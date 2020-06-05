@@ -14,13 +14,13 @@
 
 package com.google.devtools.build.lib.util.io;
 
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadCompatible;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import java.util.logging.Logger;
 
 /**
  * A utility class for dealing with filesystem timestamp granularity issues.
@@ -74,8 +74,7 @@ import java.util.logging.Logger;
  */
 @ThreadCompatible
 public class TimestampGranularityMonitor {
-  private static final Logger logger =
-      Logger.getLogger(TimestampGranularityMonitor.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   /**
    * The time of the start of the current Blaze command,
@@ -125,13 +124,18 @@ public class TimestampGranularityMonitor {
    * of a build file or source file with the specified time stamp.
    */
   @ThreadSafe
-  public void notifyDependenceOnFileTime(PathFragment path, long mtime) {
-    if (mtime == this.commandStartTimeMillis) {
-      logger.info("Will have to wait for a millisecond on completion because of " + path);
+  public void notifyDependenceOnFileTime(PathFragment path, long ctimeMillis) {
+    if (!this.waitAMillisecond && ctimeMillis == this.commandStartTimeMillis) {
+      if (path != null) {
+        logger.atInfo().log(
+            "Will have to wait for a millisecond on completion because of %s", path);
+      }
       this.waitAMillisecond = true;
     }
-    if (mtime == this.commandStartTimeMillisRounded) {
-      logger.info("Will have to wait for a second on completion because of " + path);
+    if (!this.waitASecond && ctimeMillis == this.commandStartTimeMillisRounded) {
+      if (path != null) {
+        logger.atInfo().log("Will have to wait for a second on completion because of %s", path);
+      }
       this.waitASecond = true;
     }
   }
@@ -187,11 +191,8 @@ public class TimestampGranularityMonitor {
 
       Profiler.instance().logSimpleTask(startedWaiting, ProfilerTask.WAIT,
                                         "Timestamp granularity");
-      logger.info(
-          "Waited for "
-              + (clock.currentTimeMillis() - before)
-              + "ms for file system"
-              + " to catch up");
+      logger.atInfo().log(
+          "Waited for %dms for file system to catch up", clock.currentTimeMillis() - before);
     }
   }
 
@@ -202,5 +203,4 @@ public class TimestampGranularityMonitor {
   private static long roundDown(long millis) {
     return millis / 1000 * 1000;
   }
-
 }

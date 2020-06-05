@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 The gRPC Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #ifndef NET_GRPC_COMPILER_JAVA_GENERATOR_H_
 #define NET_GRPC_COMPILER_JAVA_GENERATOR_H_
 
@@ -10,15 +26,12 @@
 
 class LogHelper {
   std::ostream* os;
-  bool abort;
 
  public:
-  LogHelper(std::ostream* os, bool abort) : os(os), abort(abort) {}
+  LogHelper(std::ostream* os) : os(os) {}
   ~LogHelper() {
     *os << std::endl;
-    if (abort) {
-      ::abort();
-    }
+    ::abort();
   }
   std::ostream& get_os() {
     return *os;
@@ -27,7 +40,7 @@ class LogHelper {
 
 // Abort the program after logging the mesage if the given condition is not
 // true. Otherwise, do nothing.
-#define GRPC_CODEGEN_CHECK(x) !(x) && LogHelper(&std::cerr, true).get_os() \
+#define GRPC_CODEGEN_CHECK(x) !(x) && LogHelper(&std::cerr).get_os() \
                              << "CHECK FAILED: " << __FILE__ << ":" \
                              << __LINE__ << ": "
 
@@ -39,11 +52,11 @@ using namespace std;
 namespace java_grpc_generator {
 
 enum ProtoFlavor {
-  NORMAL, LITE, NANO
+  NORMAL, LITE
 };
 
 // Returns the package name of the gRPC services defined in the given file.
-string ServiceJavaPackage(const google::protobuf::FileDescriptor* file, bool nano);
+string ServiceJavaPackage(const google::protobuf::FileDescriptor* file);
 
 // Returns the name of the outer class that wraps in all the generated code for
 // the given service.
@@ -53,7 +66,7 @@ string ServiceClassName(const google::protobuf::ServiceDescriptor* service);
 void GenerateService(const google::protobuf::ServiceDescriptor* service,
                      google::protobuf::io::ZeroCopyOutputStream* out,
                      ProtoFlavor flavor,
-                     bool enable_deprecated);
+                     bool disable_version);
 
 }  // namespace java_grpc_generator
 

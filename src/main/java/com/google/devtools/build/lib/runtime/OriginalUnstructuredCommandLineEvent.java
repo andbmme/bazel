@@ -15,9 +15,10 @@
 package com.google.devtools.build.lib.runtime;
 
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.buildeventstream.BuildEventConverters;
-import com.google.devtools.build.lib.buildeventstream.BuildEventId;
+import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
+import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventWithOrderConstraint;
 import com.google.devtools.build.lib.buildeventstream.GenericBuildEvent;
 import java.util.Collection;
@@ -34,7 +35,7 @@ public class OriginalUnstructuredCommandLineEvent implements BuildEventWithOrder
 
   @Override
   public BuildEventId getEventId() {
-    return BuildEventId.unstructuredCommandlineId();
+    return BuildEventIdUtil.unstructuredCommandlineId();
   }
 
   @Override
@@ -44,11 +45,11 @@ public class OriginalUnstructuredCommandLineEvent implements BuildEventWithOrder
 
   @Override
   public Collection<BuildEventId> postedAfter() {
-    return ImmutableList.of(BuildEventId.buildStartedId());
+    return ImmutableList.of(BuildEventIdUtil.buildStartedId());
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     return GenericBuildEvent.protoChaining(this)
         .setUnstructuredCommandLine(
             BuildEventStreamProtos.UnstructuredCommandLine.newBuilder().addAllArgs(args).build())

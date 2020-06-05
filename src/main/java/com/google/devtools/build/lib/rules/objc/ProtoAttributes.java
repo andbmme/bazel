@@ -23,15 +23,12 @@ import com.google.common.base.CharMatcher;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.configuredtargets.AbstractConfiguredTarget;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
-import com.google.devtools.build.lib.rules.proto.ProtoSourceFileBlacklist;
-import com.google.devtools.build.lib.rules.proto.ProtoSourcesProvider;
+import com.google.devtools.build.lib.rules.proto.ProtoInfo;
 import java.util.ArrayList;
 
 /** Common rule attributes used by an objc_proto_library. */
@@ -52,6 +49,8 @@ final class ProtoAttributes {
   static final String NO_PROTOS_ERROR =
       "no protos to compile - a non-empty deps attribute is required";
 
+  static final String PORTABLE_PROTO_FILTERS_ATTR = "portable_proto_filters";
+
   private final RuleContext ruleContext;
 
   /**
@@ -64,58 +63,34 @@ final class ProtoAttributes {
   }
 
   /**
-   * Validates the proto attributes for this target.
-   *
-   * <ul>
-   * <li>Validates that there are protos specified to be compiled.
-   * <li>Validates that, when enabling the open source protobuf library, the options for the PB2 are
-   *     not specified also.
-   * <li>Validates that, when enabling the open source protobuf library, the rule specifies at least
-   *     one portable proto filter file.
-   * </ul>
-   */
-  public void validate() throws RuleErrorException {
-    if (getProtoFiles().isEmpty() && !hasObjcProtoLibraryDependencies()) {
-      ruleContext.throwWithAttributeError("deps", NO_PROTOS_ERROR);
-    }
-    if (hasPortableProtoFilters() && getPortableProtoFilters().isEmpty()) {
-      ruleContext.throwWithAttributeError(
-          ObjcProtoLibraryRule.PORTABLE_PROTO_FILTERS_ATTR, PORTABLE_PROTO_FILTERS_EMPTY_ERROR);
-    }
-  }
-
-  /**
    * Returns whether the target is an objc_proto_library. It does so by making sure that the
    * portable_proto_filters attribute exists in this target's attributes (even if it's empty).
    */
   boolean isObjcProtoLibrary() {
-    return ruleContext.attributes().has(ObjcProtoLibraryRule.PORTABLE_PROTO_FILTERS_ATTR);
+    return ruleContext.attributes().has(PORTABLE_PROTO_FILTERS_ATTR);
   }
 
   /** Returns whether to use the protobuf library instead of the PB2 library. */
   boolean hasPortableProtoFilters() {
     return ruleContext
         .attributes()
-        .isAttributeValueExplicitlySpecified(ObjcProtoLibraryRule.PORTABLE_PROTO_FILTERS_ATTR);
+        .isAttributeValueExplicitlySpecified(PORTABLE_PROTO_FILTERS_ATTR);
   }
 
   /** Returns the list of portable proto filters. */
   ImmutableList<Artifact> getPortableProtoFilters() {
-    if (ruleContext
-        .attributes()
-        .has(ObjcProtoLibraryRule.PORTABLE_PROTO_FILTERS_ATTR, LABEL_LIST)) {
+    if (ruleContext.attributes().has(PORTABLE_PROTO_FILTERS_ATTR, LABEL_LIST)) {
       return ruleContext
-          .getPrerequisiteArtifacts(ObjcProtoLibraryRule.PORTABLE_PROTO_FILTERS_ATTR, Mode.HOST)
+          .getPrerequisiteArtifacts(PORTABLE_PROTO_FILTERS_ATTR, TransitionMode.HOST)
           .list();
     }
     return ImmutableList.of();
   }
 
   /** Returns the list of well known type protos. */
-  ImmutableList<Artifact> getWellKnownTypeProtos() {
-    return ruleContext
-        .getPrerequisiteArtifacts(ObjcRuleClasses.PROTOBUF_WELL_KNOWN_TYPES, Mode.HOST)
-        .list();
+  NestedSet<Artifact> getWellKnownTypeProtos() {
+    return PrerequisiteArtifacts.nestedSet(
+        ruleContext, ObjcRuleClasses.PROTOBUF_WELL_KNOWN_TYPES, TransitionMode.HOST);
   }
 
   /** Returns the list of proto files to compile. */
@@ -127,32 +102,15 @@ final class ProtoAttributes {
 
   /** Returns the proto compiler to be used. */
   Artifact getProtoCompiler() {
-    return ruleContext.getPrerequisiteArtifact(ObjcRuleClasses.PROTO_COMPILER_ATTR, Mode.HOST);
+    return ruleContext.getPrerequisiteArtifact(
+        ObjcRuleClasses.PROTO_COMPILER_ATTR, TransitionMode.HOST);
   }
 
   /** Returns the list of files needed by the proto compiler. */
   Iterable<Artifact> getProtoCompilerSupport() {
     return ruleContext
-        .getPrerequisiteArtifacts(ObjcRuleClasses.PROTO_COMPILER_SUPPORT_ATTR, Mode.HOST)
+        .getPrerequisiteArtifacts(ObjcRuleClasses.PROTO_COMPILER_SUPPORT_ATTR, TransitionMode.HOST)
         .list();
-  }
-
-  /**
-   * Filters the well known protos from the given list of proto files. This should be used to
-   * prevent the well known protos from being generated as they are already generated in the runtime
-   * library.
-   */
-  Iterable<Artifact> filterWellKnownProtos(Iterable<Artifact> protoFiles) {
-    ProtoSourceFileBlacklist wellKnownProtoBlacklist =
-        new ProtoSourceFileBlacklist(ruleContext, getWellKnownTypeProtos());
-    return wellKnownProtoBlacklist.filter(protoFiles);
-  }
-
-  /** Returns whether the given proto is a well known proto or not. */
-  boolean isProtoWellKnown(Artifact protoFile) {
-    ProtoSourceFileBlacklist wellKnownProtoBlacklist =
-        new ProtoSourceFileBlacklist(ruleContext, getWellKnownTypeProtos());
-    return wellKnownProtoBlacklist.isBlacklisted(protoFile);
   }
 
   /**
@@ -230,30 +188,11 @@ final class ProtoAttributes {
   /** Returns the sets of proto files that were added using proto_library dependencies. */
   private NestedSet<Artifact> getProtoDepsSources() {
     NestedSetBuilder<Artifact> artifacts = NestedSetBuilder.stableOrder();
-    Iterable<ProtoSourcesProvider> providers =
-        ruleContext.getPrerequisites("deps", Mode.TARGET, ProtoSourcesProvider.class);
-    for (ProtoSourcesProvider provider : providers) {
+    Iterable<ProtoInfo> providers =
+        ruleContext.getPrerequisites("deps", TransitionMode.TARGET, ProtoInfo.PROVIDER);
+    for (ProtoInfo provider : providers) {
       artifacts.addTransitive(provider.getTransitiveProtoSources());
     }
     return artifacts.build();
-  }
-
-  private boolean hasObjcProtoLibraryDependencies() {
-    for (TransitiveInfoCollection dep : ruleContext.getPrerequisites("deps", Mode.TARGET)) {
-      if (isObjcProtoLibrary(dep)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean isObjcProtoLibrary(TransitiveInfoCollection dependency) {
-    try {
-      AbstractConfiguredTarget target = (AbstractConfiguredTarget) dependency;
-      String targetName = target.getTarget().getTargetKind();
-      return targetName.equals("objc_proto_library rule");
-    } catch (Exception e) {
-      return false;
-    }
   }
 }

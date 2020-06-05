@@ -1,4 +1,4 @@
-// Copyright 2014 The Bazel Authors. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,28 +11,27 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 
 package com.google.devtools.build.lib.vfs;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
-import com.google.common.hash.Hashing;
 import com.google.common.io.ByteSource;
 import com.google.common.io.CharStreams;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.vfs.Dirent.Type;
-import com.google.devtools.build.lib.vfs.Path.PathFactory;
-import com.google.devtools.common.options.EnumConverter;
-import com.google.devtools.common.options.OptionsParsingException;
+import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.file.FileAlreadyExistsException;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 
 /**
@@ -41,73 +40,18 @@ import java.util.List;
 @ThreadSafe
 public abstract class FileSystem {
 
-  /** Type of hash function to use for digesting files. */
-  // The underlying HashFunctions are immutable and thread safe.
-  @SuppressWarnings("ImmutableEnumChecker")
-  public enum HashFunction {
-    MD5(Hashing.md5()),
-    SHA1(Hashing.sha1()),
-    SHA256(Hashing.sha256());
+  private final DigestHashFunction digestFunction;
 
-    private final com.google.common.hash.HashFunction hash;
-
-    HashFunction(com.google.common.hash.HashFunction hash) {
-      this.hash = hash;
-    }
-
-    /** Converts to {@link HashFunction}. */
-    public static class Converter extends EnumConverter<HashFunction> {
-      public Converter() {
-        super(HashFunction.class, "hash function");
-      }
-    }
-
-    public com.google.common.hash.HashFunction getHash() {
-      return hash;
-    }
-
-    public boolean isValidDigest(byte[] digest) {
-      return digest != null && digest.length * 8 == hash.bits();
-    }
+  public FileSystem() throws DefaultHashFunctionNotSetException {
+    digestFunction = DigestHashFunction.getDefault();
   }
 
-  // This is effectively final, should be changed only in unit-tests!
-  private static HashFunction digestFunction;
-  static {
-    try {
-      digestFunction = new HashFunction.Converter().convert(
-          System.getProperty("bazel.DigestFunction", "MD5"));
-    } catch (OptionsParsingException e) {
-      throw new IllegalStateException(e);
-    }
+  public FileSystem(DigestHashFunction digestFunction) {
+    this.digestFunction = Preconditions.checkNotNull(digestFunction);
   }
 
-  @VisibleForTesting
-  public static void setDigestFunctionForTesting(HashFunction value) {
-    digestFunction = value;
-  }
-
-  public static HashFunction getDigestFunction() {
+  public DigestHashFunction getDigestFunction() {
     return digestFunction;
-  }
-
-  private enum UnixPathFactory implements PathFactory {
-    INSTANCE {
-      @Override
-      public Path createRootPath(FileSystem filesystem) {
-        return new Path(filesystem, PathFragment.ROOT_DIR, null);
-      }
-
-      @Override
-      public Path createChildPath(Path parent, String childName) {
-        return new Path(parent.getFileSystem(), childName, parent);
-      }
-
-      @Override
-      public Path getCachedChildPathInternal(Path path, String childName) {
-        return Path.getCachedChildPathInternal(path, childName, /*cacheable=*/ true);
-      }
-    };
   }
 
   /**
@@ -115,55 +59,31 @@ public abstract class FileSystem {
    */
   protected static final class NotASymlinkException extends IOException {
     public NotASymlinkException(Path path) {
-      super(path.toString());
+      super(path + " is not a symlink");
     }
   }
 
-  /** Lazy-initialized on first access, always use {@link FileSystem#getRootDirectory} */
-  private Path rootPath;
-
-  /** Returns filesystem-specific path factory. */
-  protected PathFactory getPathFactory() {
-    return UnixPathFactory.INSTANCE;
-  }
+  private final Root absoluteRoot = new Root.AbsoluteRoot(this);
 
   /**
-   * Returns an absolute path instance, given an absolute path name, without
-   * double slashes, .., or . segments. While this method will normalize the
-   * path representation by creating a structured/parsed representation, it will
-   * not cause any IO. (e.g., it will not resolve symbolic links if it's a Unix
-   * file system.
+   * Returns an absolute path instance, given an absolute path name, without double slashes, .., or
+   * . segments. While this method will normalize the path representation by creating a
+   * structured/parsed representation, it will not cause any IO. (e.g., it will not resolve symbolic
+   * links if it's a Unix file system.
    */
-  public Path getPath(String pathName) {
-    return getPath(PathFragment.create(pathName));
+  public Path getPath(String path) {
+    return Path.create(path, this);
   }
 
-  /**
-   * Returns an absolute path instance, given an absolute path name, without
-   * double slashes, .., or . segments. While this method will normalize the
-   * path representation by creating a structured/parsed representation, it will
-   * not cause any IO. (e.g., it will not resolve symbolic links if it's a Unix
-   * file system.
-   */
-  public Path getPath(PathFragment pathName) {
-    if (!pathName.isAbsolute()) {
-      throw new IllegalArgumentException(pathName.getPathString()  + " (not an absolute path)");
-    }
-    return getRootDirectory().getRelative(pathName);
+  /** Returns an absolute path instance, given an absolute path fragment. */
+  public Path getPath(PathFragment pathFragment) {
+    Preconditions.checkArgument(pathFragment.isAbsolute());
+    return Path.createAlreadyNormalized(
+        pathFragment.getPathString(), pathFragment.getDriveStrLength(), this);
   }
 
-  /**
-   * Returns a path representing the root directory of the current file system.
-   */
-  public final Path getRootDirectory() {
-    if (rootPath == null) {
-      synchronized (this) {
-        if (rootPath == null) {
-          rootPath = getPathFactory().createRootPath(this);
-        }
-      }
-    }
-    return rootPath;
+  final Root getAbsoluteRoot() {
+    return absoluteRoot;
   }
 
   /**
@@ -257,12 +177,17 @@ public abstract class FileSystem {
     return fileSystem;
   }
 
+  /**
+   * Creates a directory with the name of the current path. See {@link Path#createDirectory} for
+   * specification.
+   */
+  public abstract boolean createDirectory(Path path) throws IOException;
 
   /**
-   * Creates a directory with the name of the current path. See
-   * {@link Path#createDirectory} for specification.
+   * Creates all directories up to the path. See {@link Path#createDirectoryAndParents} for
+   * specification.
    */
-  protected abstract boolean createDirectory(Path path) throws IOException;
+  public abstract void createDirectoryAndParents(Path path) throws IOException;
 
   /**
    * Returns the size in bytes of the file denoted by {@code path}. See {@link
@@ -274,11 +199,78 @@ public abstract class FileSystem {
    */
   protected abstract long getFileSize(Path path, boolean followSymlinks) throws IOException;
 
+  /** Deletes the file denoted by {@code path}. See {@link Path#delete} for specification. */
+  public abstract boolean delete(Path path) throws IOException;
+
   /**
-   * Deletes the file denoted by {@code path}. See {@link Path#delete} for
-   * specification.
+   * Deletes all directory trees recursively beneath the given path and removes that path as well.
+   *
+   * @param path the directory hierarchy to remove
+   * @throws IOException if the hierarchy cannot be removed successfully
    */
-  protected abstract boolean delete(Path path) throws IOException;
+  public void deleteTree(Path path) throws IOException {
+    deleteTreesBelow(path);
+    path.delete();
+  }
+
+  /**
+   * Deletes all directory trees recursively beneath the given path. Does nothing if the given path
+   * is not a directory.
+   *
+   * <p>This generic implementation is not as efficient as it could be: for example, we issue
+   * separate stats for each directory entry to determine if they are directories or not (instead of
+   * reusing the information that readdir returns), and we issue separate operations to toggle
+   * different permissions while they could be done at once via chmod. Subclasses can optimize this
+   * by taking advantage of platform-specific features.
+   *
+   * @param dir the directory hierarchy to remove
+   * @throws IOException if the hierarchy cannot be removed successfully
+   */
+  public void deleteTreesBelow(Path dir) throws IOException {
+    if (dir.isDirectory(Symlinks.NOFOLLOW)) {
+      Collection<Path> entries;
+      try {
+        entries = dir.getDirectoryEntries();
+      } catch (IOException e) {
+        // If we couldn't read the directory, it may be because it's not readable. Try granting this
+        // permission and retry. If the retry fails, give up.
+        dir.setReadable(true);
+        dir.setExecutable(true);
+        entries = dir.getDirectoryEntries();
+      }
+
+      Iterator<Path> iterator = entries.iterator();
+      if (iterator.hasNext()) {
+        Path first = iterator.next();
+        deleteTreesBelow(first);
+        try {
+          // If the directory is not executable, delete(), depending on implementation, may decide
+          // that the directory entry does not exist and return false without throwing.
+          if (!first.delete()) {
+            throw new IOException(
+                "Unable to delete \"" + first + "\": directory entry does not exist");
+          }
+        } catch (IOException e) {
+          // If we couldn't delete the first entry in a directory, it may be because the directory
+          // (not the entry!) is not writable or executable. Try granting this permission and retry.
+          // If the retry fails, give up. Note that we have to retry deleteTreesBelow() too in case
+          // first is itself a directory; if the directory were not executable, the initial
+          // first.deleteTreesBelow() call would have been a silent no-op (since first.isDirectory()
+          // would have returned false) and sub-entries of first would not have been deleted.
+          dir.setWritable(true);
+          dir.setExecutable(true);
+          deleteTreesBelow(first);
+          first.delete();
+        }
+      }
+      while (iterator.hasNext()) {
+        Path path = iterator.next();
+        deleteTreesBelow(path);
+        // No need to retry here: if needed, we already unprotected the directory earlier.
+        path.delete();
+      }
+    }
+  }
 
   /**
    * Returns the last modification time of the file denoted by {@code path}. See {@link
@@ -291,36 +283,28 @@ public abstract class FileSystem {
   protected abstract long getLastModifiedTime(Path path, boolean followSymlinks) throws IOException;
 
   /**
-   * Sets the last modification time of the file denoted by {@code path}. See
-   * {@link Path#setLastModifiedTime} for specification.
+   * Sets the last modification time of the file denoted by {@code path}. See {@link
+   * Path#setLastModifiedTime} for specification.
    */
-  protected abstract void setLastModifiedTime(Path path, long newTime) throws IOException;
+  public abstract void setLastModifiedTime(Path path, long newTime) throws IOException;
 
   /**
-   * Returns value of the given extended attribute name or null if attribute
-   * does not exist or file system does not support extended attributes. Follows symlinks.
-   * <p>Default implementation assumes that file system does not support
-   * extended attributes and always returns null. Specific file system
-   * implementations should override this method if they do provide support
-   * for extended attributes.
+   * Returns value of the given extended attribute name or null if attribute does not exist or file
+   * system does not support extended attributes. Follows symlinks.
+   *
+   * <p>Default implementation assumes that file system does not support extended attributes and
+   * always returns null. Specific file system implementations should override this method if they
+   * do provide support for extended attributes.
    *
    * @param path the file whose extended attribute is to be returned.
    * @param name the name of the extended attribute key.
-   * @return the value of the extended attribute associated with 'path', if
-   *   any, or null if no such attribute is defined (ENODATA) or file
-   *   system does not support extended attributes at all.
+   * @param followSymlinks whether to follow symlinks or not; if false, returns the xattr of the
+   *     link itself, not its target.
+   * @return the value of the extended attribute associated with 'path', if any, or null if no such
+   *     attribute is defined (ENODATA) or file system does not support extended attributes at all.
    * @throws IOException if the call failed for any other reason.
    */
-  protected byte[] getxattr(Path path, String name) throws IOException {
-    return null;
-  }
-
-  /**
-   * Gets a fast digest for the given path and hash function type, or {@code null} if there
-   * isn't one available or the filesystem doesn't support them. This digest should be
-   * suitable for detecting changes to the file.
-   */
-  protected byte[] getFastDigest(Path path, HashFunction hashFunction) throws IOException {
+  public byte[] getxattr(Path path, String name, boolean followSymlinks) throws IOException {
     return null;
   }
 
@@ -329,43 +313,25 @@ public abstract class FileSystem {
    * filesystem doesn't support them. This digest should be suitable for detecting changes to the
    * file.
    */
-  protected final byte[] getFastDigest(Path path) throws IOException {
-    return getFastDigest(path, digestFunction);
-  }
-
-  /**
-   * Returns whether the given digest is a valid digest for the default digest function.
-   */
-  public boolean isValidDigest(byte[] digest) {
-    return digestFunction.isValidDigest(digest);
-  }
-
-  /**
-   * Returns the digest of the file denoted by the path, following
-   * symbolic links, for the given hash digest function.
-   *
-   * @return a new byte array containing the file's digest
-   * @throws IOException if the digest could not be computed for any reason
-   *
-   * Subclasses may (and do) optimize this computation for particular digest functions.
-   */
-  protected byte[] getDigest(final Path path, HashFunction hashFunction) throws IOException {
-    return new ByteSource() {
-      @Override
-      public InputStream openStream() throws IOException {
-        return getInputStream(path);
-      }
-    }.hash(hashFunction.getHash()).asBytes();
+  protected byte[] getFastDigest(Path path) throws IOException {
+    return null;
   }
 
   /**
    * Returns the digest of the file denoted by the path, following symbolic links.
    *
+   * <p>Subclasses may (and do) optimize this computation for a particular digest functions.
+   *
    * @return a new byte array containing the file's digest
    * @throws IOException if the digest could not be computed for any reason
    */
-  protected final byte[] getDigest(final Path path) throws IOException {
-    return getDigest(path, digestFunction);
+  protected byte[] getDigest(final Path path) throws IOException {
+    return new ByteSource() {
+      @Override
+      public InputStream openStream() throws IOException {
+        return getInputStream(path);
+      }
+    }.hash(digestFunction.getHashFunction()).asBytes();
   }
 
   /**
@@ -400,7 +366,7 @@ public abstract class FileSystem {
       throw new IOException(naive + " (Too many levels of symbolic links)");
     }
     if (linkTarget.isAbsolute()) {
-      dir = getRootDirectory();
+      dir = getPath(linkTarget.getDriveStr());
     }
     for (String name : linkTarget.segments()) {
       if (name.equals(".") || name.isEmpty()) {
@@ -612,6 +578,11 @@ public abstract class FileSystem {
     return readSymbolicLink(path);
   }
 
+  /** Returns true iff this path denotes an existing file of any kind. Follows symbolic links. */
+  public boolean exists(Path path) {
+    return exists(path, true);
+  }
+
   /**
    * Returns true iff {@code path} denotes an existing file of any kind. See
    * {@link Path#exists(Symlinks)} for specification.
@@ -628,17 +599,17 @@ public abstract class FileSystem {
 
   protected static Dirent.Type direntFromStat(FileStatus stat) {
     if (stat == null) {
-      return Type.UNKNOWN;
+      return Dirent.Type.UNKNOWN;
     } else if (stat.isSpecialFile()) {
-        return Type.UNKNOWN;
+      return Dirent.Type.UNKNOWN;
     } else if (stat.isFile()) {
-      return Type.FILE;
+      return Dirent.Type.FILE;
     } else if (stat.isDirectory()) {
-      return Type.DIRECTORY;
+      return Dirent.Type.DIRECTORY;
     } else if (stat.isSymbolicLink()) {
-      return Type.SYMLINK;
+      return Dirent.Type.SYMLINK;
     } else {
-      return Type.UNKNOWN;
+      return Dirent.Type.UNKNOWN;
     }
   }
 
@@ -695,7 +666,7 @@ public abstract class FileSystem {
    *
    * @throws IOException if there was an error reading or writing the file's metadata
    */
-  protected abstract void setWritable(Path path, boolean writable) throws IOException;
+  public abstract void setWritable(Path path, boolean writable) throws IOException;
 
   /**
    * Returns true iff the file represented by the path is executable.
@@ -741,6 +712,15 @@ public abstract class FileSystem {
   protected abstract InputStream getInputStream(Path path) throws IOException;
 
   /**
+   * Creates a ReadableFileChannel accessing the file denoted by the path.
+   *
+   * @throws IOException if there was an error opening the file for reading
+   */
+  protected ReadableByteChannel createReadableByteChannel(Path path) throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
    * Creates an OutputStream accessing the file denoted by path.
    *
    * @throws IOException if there was an error opening the file for writing
@@ -758,11 +738,10 @@ public abstract class FileSystem {
   protected abstract OutputStream getOutputStream(Path path, boolean append) throws IOException;
 
   /**
-   * Renames the file denoted by "sourceNode" to the location "targetNode".
-   * See {@link Path#renameTo} for specification.
+   * Renames the file denoted by "sourceNode" to the location "targetNode". See {@link
+   * Path#renameTo} for specification.
    */
-  protected abstract void renameTo(Path sourcePath, Path targetPath) throws IOException;
-
+  public abstract void renameTo(Path sourcePath, Path targetPath) throws IOException;
 
   /**
    * Create a new hard link file at "linkPath" for file at "originalPath".

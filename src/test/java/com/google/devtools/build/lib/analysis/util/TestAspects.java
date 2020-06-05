@@ -16,14 +16,17 @@ package com.google.devtools.build.lib.analysis.util;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredAspectFactory;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
@@ -32,9 +35,9 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
@@ -43,13 +46,16 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.AspectDefinition;
 import com.google.devtools.build.lib.packages.AspectParameters;
-import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
+import com.google.devtools.build.lib.packages.Attribute.ComputedDefault;
+import com.google.devtools.build.lib.packages.Attribute.LabelListLateBoundDefault;
+import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
 import com.google.devtools.build.lib.packages.Rule;
-import com.google.devtools.build.lib.packages.SkylarkProviderIdentifier;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import java.util.List;
 
@@ -135,8 +141,8 @@ public class TestAspects {
       if (!LABEL.equals(attributeType) && !LABEL_LIST.equals(attributeType)) {
         continue;
       }
-      Iterable<AspectInfo> prerequisites = ruleContext
-          .getPrerequisites(attributeName, Mode.DONT_CHECK, AspectInfo.class);
+      Iterable<AspectInfo> prerequisites =
+          ruleContext.getPrerequisites(attributeName, TransitionMode.DONT_CHECK, AspectInfo.class);
       for (AspectInfo prerequisite : prerequisites) {
         result.addTransitive(prerequisite.getData());
       }
@@ -149,7 +155,8 @@ public class TestAspects {
    */
   public static class DummyRuleFactory implements RuleConfiguredTargetFactory {
     @Override
-    public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
+    public ConfiguredTarget create(RuleContext ruleContext)
+        throws InterruptedException, RuleErrorException, ActionConflictException {
 
       RuleConfiguredTargetBuilder builder =
           new RuleConfiguredTargetBuilder(ruleContext)
@@ -172,7 +179,8 @@ public class TestAspects {
    */
   public static class DummyRuleFactory2 implements RuleConfiguredTargetFactory {
     @Override
-    public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
+    public ConfiguredTarget create(RuleContext ruleContext)
+        throws InterruptedException, RuleErrorException, ActionConflictException {
       return new RuleConfiguredTargetBuilder(ruleContext)
               .addProvider(
                   new RuleInfo(collectAspectData("rule " + ruleContext.getLabel(), ruleContext)))
@@ -191,9 +199,12 @@ public class TestAspects {
    */
   public static class MultiAspectRuleFactory implements RuleConfiguredTargetFactory {
     @Override
-    public ConfiguredTarget create(RuleContext ruleContext) throws InterruptedException {
-      TransitiveInfoCollection fooAttribute = ruleContext.getPrerequisite("foo", Mode.DONT_CHECK);
-      TransitiveInfoCollection barAttribute = ruleContext.getPrerequisite("bar", Mode.DONT_CHECK);
+    public ConfiguredTarget create(RuleContext ruleContext)
+        throws InterruptedException, RuleErrorException, ActionConflictException {
+      TransitiveInfoCollection fooAttribute =
+          ruleContext.getPrerequisite("foo", TransitionMode.DONT_CHECK);
+      TransitiveInfoCollection barAttribute =
+          ruleContext.getPrerequisite("bar", TransitionMode.DONT_CHECK);
 
       NestedSetBuilder<String> infoBuilder = NestedSetBuilder.<String>stableOrder();
 
@@ -223,11 +234,15 @@ public class TestAspects {
     implements ConfiguredAspectFactory {
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws ActionConflictException {
       String information = parameters.isEmpty()
           ? ""
           : " data " + Iterables.getFirst(parameters.getAttribute("baz"), null);
-      return new ConfiguredAspect.Builder(this, parameters, ruleContext)
+      return new ConfiguredAspect.Builder(ruleContext)
           .addProvider(
               new AspectInfo(
                   collectAspectData("aspect " + ruleContext.getLabel() + information, ruleContext)))
@@ -269,10 +284,12 @@ public class TestAspects {
 
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
-      return new ConfiguredAspect.Builder(this, parameters, ruleContext)
-          .addProvider(new FooProvider())
-          .build();
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws ActionConflictException {
+      return new ConfiguredAspect.Builder(ruleContext).addProvider(new FooProvider()).build();
     }
   }
 
@@ -288,10 +305,12 @@ public class TestAspects {
 
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
-      return new ConfiguredAspect.Builder(this, parameters, ruleContext)
-          .addProvider(new BarProvider())
-          .build();
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws ActionConflictException {
+      return new ConfiguredAspect.Builder(ruleContext).addProvider(new BarProvider()).build();
     }
   }
 
@@ -316,6 +335,29 @@ public class TestAspects {
     @Override
     public AspectDefinition getDefinition(AspectParameters aspectParameters) {
       return EXTRA_ATTRIBUTE_ASPECT_DEFINITION;
+    }
+  }
+
+  public static final ComputedAttributeAspect COMPUTED_ATTRIBUTE_ASPECT =
+      new ComputedAttributeAspect();
+  private static final AspectDefinition COMPUTED_ATTRIBUTE_ASPECT_DEFINITION =
+      new AspectDefinition.Builder(COMPUTED_ATTRIBUTE_ASPECT)
+          .add(
+              attr("$default_copts", STRING_LIST)
+                  .value(
+                      new ComputedDefault() {
+                        @Override
+                        public Object getDefault(AttributeMap rule) {
+                          return rule.getPackageDefaultCopts();
+                        }
+                      }))
+          .build();
+
+  /** An aspect that defines its own computed default attribute. */
+  public static class ComputedAttributeAspect extends BaseAspect {
+    @Override
+    public AspectDefinition getDefinition(AspectParameters aspectParameters) {
+      return COMPUTED_ATTRIBUTE_ASPECT_DEFINITION;
     }
   }
 
@@ -413,9 +455,11 @@ public class TestAspects {
       ImmutableCollection<String> baz = aspectParameters.getAttribute("baz");
       if (baz != null) {
         try {
-          builder.add(attr("$dep", LABEL).value(Label.parseAbsolute(baz.iterator().next())));
+          builder.add(
+              attr("$dep", LABEL)
+                  .value(Label.parseAbsolute(baz.iterator().next(), ImmutableMap.of())));
         } catch (LabelSyntaxException e) {
-          throw new IllegalStateException();
+          throw new IllegalStateException(e);
         }
       }
       return builder.build();
@@ -423,32 +467,35 @@ public class TestAspects {
 
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws ActionConflictException {
       StringBuilder information = new StringBuilder("aspect " + ruleContext.getLabel());
       if (!parameters.isEmpty()) {
         information.append(" data " + Iterables.getFirst(parameters.getAttribute("baz"), null));
         information.append(" ");
       }
       List<? extends TransitiveInfoCollection> deps =
-          ruleContext.getPrerequisites("$dep", Mode.TARGET);
+          ruleContext.getPrerequisites("$dep", TransitionMode.TARGET);
       information.append("$dep:[");
       for (TransitiveInfoCollection dep : deps) {
         information.append(" ");
         information.append(dep.getLabel());
       }
       information.append("]");
-      return new ConfiguredAspect.Builder(this, parameters, ruleContext)
+      return new ConfiguredAspect.Builder(ruleContext)
           .addProvider(new AspectInfo(collectAspectData(information.toString(), ruleContext)))
           .build();
     }
   }
 
-  private static final ParametrizedDefinitionAspect PARAMETRIZED_DEFINITION_ASPECT =
+  static final ParametrizedDefinitionAspect PARAMETRIZED_DEFINITION_ASPECT =
       new ParametrizedDefinitionAspect();
 
-  private static final AspectRequiringProvider ASPECT_REQUIRING_PROVIDER =
-      new AspectRequiringProvider();
-  private static final AspectRequiringProviderSets ASPECT_REQUIRING_PROVIDER_SETS =
+  static final AspectRequiringProvider ASPECT_REQUIRING_PROVIDER = new AspectRequiringProvider();
+  static final AspectRequiringProviderSets ASPECT_REQUIRING_PROVIDER_SETS =
       new AspectRequiringProviderSets();
   private static final AspectDefinition ASPECT_REQUIRING_PROVIDER_DEFINITION =
       new AspectDefinition.Builder(ASPECT_REQUIRING_PROVIDER)
@@ -459,8 +506,8 @@ public class TestAspects {
       new AspectDefinition.Builder(ASPECT_REQUIRING_PROVIDER_SETS)
           .requireProviderSets(
               ImmutableList.of(
-                  ImmutableSet.<Class<?>>of(RequiredProvider.class),
-                  ImmutableSet.<Class<?>>of(RequiredProvider2.class)))
+                  ImmutableSet.of(RequiredProvider.class),
+                  ImmutableSet.of(RequiredProvider2.class)))
           .build();
 
   /**
@@ -471,9 +518,13 @@ public class TestAspects {
 
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
-      ruleContext.ruleWarning("Aspect warning on " + base.getTarget().getLabel());
-      return new ConfiguredAspect.Builder(this, parameters, ruleContext).build();
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws ActionConflictException {
+      ruleContext.ruleWarning("Aspect warning on " + ctadBase.getTarget().getLabel());
+      return new ConfiguredAspect.Builder(ruleContext).build();
     }
 
     @Override
@@ -496,7 +547,10 @@ public class TestAspects {
 
     @Override
     public ConfiguredAspect create(
-        ConfiguredTarget base, RuleContext ruleContext, AspectParameters parameters) {
+        ConfiguredTargetAndData ctadBase,
+        RuleContext ruleContext,
+        AspectParameters parameters,
+        String toolsRepository) {
       ruleContext.ruleError("Aspect error");
       return null;
     }
@@ -525,19 +579,23 @@ public class TestAspects {
     }
 
     @Override
-    public ConfiguredAspect create(ConfiguredTarget base, RuleContext context,
-        AspectParameters parameters) throws InterruptedException {
-      return new ConfiguredAspect.Builder(this, parameters, context).build();
+    public ConfiguredAspect create(
+        ConfiguredTargetAndData ctadBase,
+        RuleContext context,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws InterruptedException, ActionConflictException {
+      return new ConfiguredAspect.Builder(context).build();
     }
   }
   public static final FalseAdvertisementAspect FALSE_ADVERTISEMENT_ASPECT
       = new FalseAdvertisementAspect();
   private static final AspectDefinition FALSE_ADVERTISEMENT_DEFINITION =
       new AspectDefinition.Builder(FALSE_ADVERTISEMENT_ASPECT)
-        .advertiseProvider(RequiredProvider.class)
-        .advertiseProvider(
-            ImmutableList.of(SkylarkProviderIdentifier.forLegacy("advertised_provider")))
-        .build();
+          .advertiseProvider(RequiredProvider.class)
+          .advertiseProvider(
+              ImmutableList.of(StarlarkProviderIdentifier.forLegacy("advertised_provider")))
+          .build();
 
   /**
    * A common base rule for mock rules in this class to reduce boilerplate.
@@ -615,6 +673,17 @@ public class TestAspects {
           "rule_with_extra_deps_aspect",
           attr("foo", LABEL_LIST).allowedFileTypes(FileTypeSet.ANY_FILE)
               .aspect(EXTRA_ATTRIBUTE_ASPECT));
+
+  /** A rule that defines an {@link ComputedAttributeAspect} on one of its attributes. */
+  public static final MockRule COMPUTED_ATTRIBUTE_ASPECT_RULE =
+      () ->
+          MockRule.ancestor(BASE_RULE.getClass())
+              .factory(DummyRuleFactory.class)
+              .define(
+                  "rule_with_computed_deps_aspect",
+                  attr("foo", LABEL_LIST)
+                      .allowedFileTypes(FileTypeSet.ANY_FILE)
+                      .aspect(COMPUTED_ATTRIBUTE_ASPECT));
 
   /**
    * A rule that defines an {@link ParametrizedDefinitionAspect} on one of its attributes.
@@ -729,11 +798,9 @@ public class TestAspects {
           attr("$dep", LABEL).value(Label.parseAbsoluteUnchecked("//extra:extra")));
 
   // TODO(b/65746853): provide a way to do this without passing the entire configuration
-  private static final LateBoundDefault<?, List<Label>> PLUGINS_LABEL_LIST =
-      LateBoundDefault.fromTargetConfiguration(
-          JavaConfiguration.class,
-          ImmutableList.of(),
-          (rule, attributes, javaConfig) -> javaConfig.getPlugins());
+  private static final LabelListLateBoundDefault<?> PLUGINS_LABEL_LIST =
+      LabelListLateBoundDefault.fromTargetConfiguration(
+          JavaConfiguration.class, (rule, attributes, javaConfig) -> javaConfig.getPlugins());
 
   public static final MockRule LATE_BOUND_DEP_RULE = () ->
       MockRule.ancestor(BASE_RULE.getClass()).factory(DummyRuleFactory.class).define(
@@ -772,10 +839,14 @@ public class TestAspects {
     }
 
     @Override
-    public ConfiguredAspect create(ConfiguredTarget base, RuleContext context,
-        AspectParameters parameters) throws InterruptedException {
-      return ConfiguredAspect.builder(this, parameters, context)
-          .addProvider(Provider.class, new Provider(base.getLabel()))
+    public ConfiguredAspect create(
+        ConfiguredTargetAndData ctadBase,
+        RuleContext context,
+        AspectParameters parameters,
+        String toolsRepository)
+        throws InterruptedException, ActionConflictException {
+      return ConfiguredAspect.builder(context)
+          .addProvider(Provider.class, new Provider(ctadBase.getConfiguredTarget().getLabel()))
           .build();
     }
   }

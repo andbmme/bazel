@@ -1,4 +1,8 @@
-package(default_visibility = ["//src:__subpackages__"])
+load("@rules_java//java:defs.bzl", "java_library")
+
+package(default_visibility = [
+    "//src/java_tools/junitrunner:junitrunner_package_group",
+])
 
 java_library(
     name = "testing",
@@ -16,4 +20,5 @@ java_library(
 filegroup(
     name = "srcs",
     srcs = glob(["**/*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
 )

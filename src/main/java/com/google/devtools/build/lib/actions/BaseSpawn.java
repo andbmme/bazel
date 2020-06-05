@@ -17,11 +17,14 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
 /** Base implementation of a Spawn. */
@@ -49,25 +52,6 @@ public class BaseSpawn implements Spawn {
     this.localResources = localResources;
   }
 
-  public BaseSpawn(
-      List<String> arguments,
-      Map<String, String> environment,
-      Map<String, String> executionInfo,
-      ActionExecutionMetadata action,
-      ResourceSet localResources) {
-    this(
-        arguments,
-        environment,
-        executionInfo,
-        EmptyRunfilesSupplier.INSTANCE,
-        action,
-        localResources);
-  }
-
-  public static PathFragment runfilesForFragment(PathFragment pathFragment) {
-    return pathFragment.getParentDirectory().getChild(pathFragment.getBaseName() + ".runfiles");
-  }
-
   @Override
   public final ImmutableMap<String, String> getExecutionInfo() {
     return executionInfo;
@@ -79,15 +63,15 @@ public class BaseSpawn implements Spawn {
   }
 
   @Override
-  public ImmutableList<Artifact> getFilesetManifests() {
-    return ImmutableList.<Artifact>of();
-  }
-
-  @Override
   public ImmutableList<String> getArguments() {
     // TODO(bazel-team): this method should be final, as the correct value of the args can be
     // injected in the ctor.
     return arguments;
+  }
+
+  @Override
+  public ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> getFilesetMappings() {
+    return ImmutableMap.of();
   }
 
   @Override
@@ -119,12 +103,12 @@ public class BaseSpawn implements Spawn {
   }
 
   @Override
-  public Iterable<? extends ActionInput> getToolFiles() {
+  public NestedSet<? extends ActionInput> getToolFiles() {
     return action.getTools();
   }
 
   @Override
-  public Iterable<? extends ActionInput> getInputFiles() {
+  public NestedSet<? extends ActionInput> getInputFiles() {
     return action.getInputs();
   }
 
@@ -146,5 +130,16 @@ public class BaseSpawn implements Spawn {
   @Override
   public String getMnemonic() {
     return action.getMnemonic();
+  }
+
+  @Override
+  public ImmutableMap<String, String> getCombinedExecProperties() {
+    return action.getOwner().getExecProperties();
+  }
+
+  @Override
+  @Nullable
+  public PlatformInfo getExecutionPlatform() {
+    return action.getExecutionPlatform();
   }
 }

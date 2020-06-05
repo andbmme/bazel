@@ -26,13 +26,11 @@ import com.google.devtools.build.android.AndroidResourceProcessor.AaptConfigOpti
 import com.google.devtools.build.android.AndroidResourceProcessor.FlagAaptOptions;
 import com.google.devtools.build.android.Converters.ExistingPathConverter;
 import com.google.devtools.build.android.Converters.PathConverter;
-import com.google.devtools.build.android.Converters.PathListConverter;
 import com.google.devtools.build.android.Converters.VariantTypeConverter;
 import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
-import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.ShellQuotedParamsFilePreProcessor;
@@ -42,7 +40,7 @@ import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -60,7 +58,6 @@ import org.xml.sax.SAXException;
  * Example Usage:
  *   java/com/google/build/android/ResourceShrinkerAction
  *       --aapt path to sdk/aapt
- *       --annotationJar path to sdk/annotationJar
  *       --androidJar path to sdk/androidJar
  *       --shrunkJar path to proguard dead code removal jar
  *       --resources path to processed resources zip
@@ -71,6 +68,7 @@ import org.xml.sax.SAXException;
  *       --shrunkResources path to write shrunk resources zip
  * </pre>
  */
+@Deprecated
 public class ResourceShrinkerAction {
   private static final StdLogger stdLogger = new StdLogger(StdLogger.Level.WARNING);
   private static final Logger logger = Logger.getLogger(ResourceShrinkerAction.class.getName());
@@ -133,32 +131,15 @@ public class ResourceShrinkerAction {
     public Path primaryManifest;
 
     @Option(
-      name = "dependencyManifest",
-      allowMultiple = true,
-      defaultValue = "",
-      category = "input",
-      converter = PathConverter.class,
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help = "Paths to the manifests of the dependencies. Specify one path per flag."
-    )
+        name = "dependencyManifest",
+        allowMultiple = true,
+        defaultValue = "null",
+        category = "input",
+        converter = PathConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help = "Paths to the manifests of the dependencies. Specify one path per flag.")
     public List<Path> dependencyManifests;
-
-    // TODO(laszlocsomor): remove this flag after 2018-01-31 (about 6 months from now). Everyone
-    // should have updated to newer Bazel versions by then.
-    @Deprecated
-    @Option(
-      name = "dependencyManifests",
-      defaultValue = "",
-      category = "input",
-      converter = PathListConverter.class,
-      deprecationWarning = "Deprecated in favour of \"--dependencyManifest\"",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help = "A list of paths to the manifests of the dependencies.",
-      metadataTags = {OptionMetadataTag.DEPRECATED}
-    )
-    public List<Path> deprecatedDependencyManifests;
 
     @Option(
       name = "resourcePackages",
@@ -216,16 +197,24 @@ public class ResourceShrinkerAction {
     public Path log;
 
     @Option(
-      name = "packageType",
-      defaultValue = "DEFAULT",
-      converter = VariantTypeConverter.class,
-      category = "config",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Variant configuration type for packaging the resources."
-              + " Acceptible values DEFAULT, LIBRARY, ANDROID_TEST, UNIT_TEST"
-    )
+        name = "resourcesConfigOutput",
+        defaultValue = "null",
+        converter = PathConverter.class,
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help = "Path to where the list of resources configuration directives should be written.")
+    public Path resourcesConfigOutput;
+
+    @Option(
+        name = "packageType",
+        defaultValue = "DEFAULT",
+        converter = VariantTypeConverter.class,
+        category = "config",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "Variant configuration type for packaging the resources."
+                + " Acceptable values DEFAULT, LIBRARY, ANDROID_TEST, UNIT_TEST")
     public VariantType packageType;
   }
 
@@ -239,8 +228,8 @@ public class ResourceShrinkerAction {
   }
 
   private static Set<String> getManifestPackages(Path primaryManifest, List<Path> otherManifests)
-          throws SAXException, IOException, StreamException, ParserConfigurationException {
-    Set<String> manifestPackages = new HashSet<>();
+      throws SAXException, IOException, StreamException, ParserConfigurationException {
+    Set<String> manifestPackages = new LinkedHashSet<>();
     manifestPackages.add(getManifestPackage(primaryManifest));
     for (Path manifest : otherManifests) {
       manifestPackages.add(getManifestPackage(manifest));
@@ -251,15 +240,14 @@ public class ResourceShrinkerAction {
   public static void main(String[] args) throws Exception {
     final Stopwatch timer = Stopwatch.createStarted();
     // Parse arguments.
-    OptionsParser optionsParser = OptionsParser.newOptionsParser(
-        Options.class, AaptConfigOptions.class);
-    optionsParser.enableParamsFileSupport(
-        new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()));
+    OptionsParser optionsParser =
+        OptionsParser.builder()
+            .optionsClasses(Options.class, AaptConfigOptions.class)
+            .argsPreProcessor(new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()))
+            .build();
     optionsParser.parseAndExitUponError(args);
     aaptConfigOptions = optionsParser.getOptions(AaptConfigOptions.class);
     options = optionsParser.getOptions(Options.class);
-    options.dependencyManifests =
-        Converters.concatLists(options.dependencyManifests, options.deprecatedDependencyManifests);
 
     AndroidResourceProcessor resourceProcessor = new AndroidResourceProcessor(stdLogger);
     // Setup temporary working directories.
@@ -271,13 +259,13 @@ public class ResourceShrinkerAction {
       final Path shrunkResources = working.resolve("shrunk_resources");
 
       // Gather package list from manifests.
-      Set<String> resourcePackages = getManifestPackages(
-          options.primaryManifest, options.dependencyManifests);
+      Set<String> resourcePackages =
+          getManifestPackages(options.primaryManifest, options.dependencyManifests);
       resourcePackages.addAll(options.resourcePackages);
 
       // Expand resource files zip into working directory.
-      try (ZipInputStream zin = new ZipInputStream(
-          new FileInputStream(options.resourcesZip.toFile()))) {
+      try (ZipInputStream zin =
+          new ZipInputStream(new FileInputStream(options.resourcesZip.toFile()))) {
         ZipEntry entry;
         while ((entry = zin.getNextEntry()) != null) {
           if (!entry.isDirectory()) {
@@ -291,18 +279,20 @@ public class ResourceShrinkerAction {
       }
 
       // Shrink resources.
-      ResourceUsageAnalyzer resourceShrinker = new ResourceUsageAnalyzer(
-          resourcePackages,
-          options.rTxt,
-          options.shrunkJar,
-          options.primaryManifest,
-          options.proguardMapping,
-          resourceFiles.resolve("res"),
-          options.log);
+      ResourceUsageAnalyzer resourceShrinker =
+          new ResourceUsageAnalyzer(
+              resourcePackages,
+              options.rTxt,
+              options.shrunkJar,
+              options.primaryManifest,
+              options.proguardMapping,
+              resourceFiles.resolve("res"),
+              options.log);
 
       resourceShrinker.shrink(shrunkResources);
-      logger.fine(String.format("Shrinking resources finished at %sms",
-          timer.elapsed(TimeUnit.MILLISECONDS)));
+      logger.fine(
+          String.format(
+              "Shrinking resources finished at %sms", timer.elapsed(TimeUnit.MILLISECONDS)));
 
       Path generatedSources = null;
       if (options.rTxtOutput != null) {
@@ -320,7 +310,6 @@ public class ResourceShrinkerAction {
           null /* packageForR */,
           new FlagAaptOptions(aaptConfigOptions),
           aaptConfigOptions.resourceConfigs,
-          aaptConfigOptions.splits,
           new MergedAndroidData(
               shrunkResources, resourceFiles.resolve("assets"), options.primaryManifest),
           ImmutableList.<DependencyAndroidData>of() /* libraries */,
@@ -328,18 +317,19 @@ public class ResourceShrinkerAction {
           options.shrunkApk,
           null /* proguardOutput */,
           null /* mainDexProguardOutput */,
-          null /* publicResourcesOut */,
-          null /* dataBindingInfoOut */);
+          /* publicResourcesOut= */ null,
+          /* dataBindingInfoOut= */ null);
       if (options.shrunkResources != null) {
         ResourcesZip.from(shrunkResources, resourceFiles.resolve("assets"))
-            .writeTo(options.shrunkResources, false /* compress */);
+            .writeTo(options.shrunkResources, /* compress= */ false);
       }
       if (options.rTxtOutput != null) {
         AndroidResourceOutputs.copyRToOutput(
             generatedSources, options.rTxtOutput, options.packageType == VariantType.LIBRARY);
       }
-      logger.fine(String.format("Packing resources finished at %sms",
-          timer.elapsed(TimeUnit.MILLISECONDS)));
+      logger.fine(
+          String.format(
+              "Packing resources finished at %sms", timer.elapsed(TimeUnit.MILLISECONDS)));
     } catch (Exception e) {
       logger.log(Level.SEVERE, "Error shrinking resources", e);
       throw e;

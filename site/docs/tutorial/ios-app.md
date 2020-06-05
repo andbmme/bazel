@@ -3,31 +3,14 @@ layout: documentation
 title: Build Tutorial - iOS
 ---
 
-Introduction to Bazel: Build an iOS App
-==========
+# Introduction to Bazel: Building an iOS App
 
 In this tutorial, you will learn how to build a simple iOS app. You'll do the
 following:
 
-*   [Set up your environment](#set-up-your-environment)
-    *   [Install Bazel](#install-bazel)
-    *   [Install Xcode](#install-xcode)
-    *   [Get the sample project](#get-the-sample-project)
-*   [Set up a workspace](#set-up-a-workspace)
-    *   [Create a WORKSPACE file](#create-a-workspace-file)
-    *   [Update the WORKSPACE file](#update-the-workspace-file)
-*   [Review the source files](#review-the-source-files)
-*   [Create a BUILD file](#create-a-build-file)
-    *   [Add the rule load statement](#add-the-rule-load-statement)
-    *   [Add an objc_library rule](#add-an-objc_library-rule)
-    *   [Add an ios_application rule](#add_an-ios_application-rule)
-*   [Build and deploy the app](#build-and-deploy-the-app)
-    *   [Build the app for the simulator](#build-the-app-for-the-simulator)
-    *   [Find the build outputs](#find-the-build-outputs)
-    *   [Run and debug the app in the simulator](#run-and-debug-the-app-in-the-simulator)
-    *   [Build the app for a device](#build-the-app-for-a-device)
-    *   [Install the app on a device](#install-the-app-on-a-device)
-*   [Review  your work](#review-your-work)
+* ToC
+{:toc}
+
 
 ## Set up your environment
 
@@ -113,22 +96,43 @@ This creates and opens the empty `WORKSPACE` file.
 
 To build applications for Apple devices, Bazel needs to pull the latest
 [Apple build rules](https://github.com/bazelbuild/rules_apple) from its GitHub
-repository. To enable this, add the following [`http_archive`](../be/workspace.html#http_archive)
-rule to your `WORKSPACE` file:
+repository. To enable this, add the following [`git_repository`](../be/workspace.html#git_repository)
+rules to your `WORKSPACE` file:
 
-```
-http_archive(
+```python
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+
+git_repository(
     name = "build_bazel_rules_apple",
-    strip_prefix = "rules_apple-0.1.0",
-    urls = ["https://github.com/bazelbuild/rules_apple/archive/0.1.0.tar.gz"],
+    remote = "https://github.com/bazelbuild/rules_apple.git",
+    tag = "0.19.0",
+)
+
+git_repository(
+    name = "build_bazel_rules_swift",
+    remote = "https://github.com/bazelbuild/rules_swift.git",
+    tag = "0.13.0",
+)
+
+git_repository(
+    name = "build_bazel_apple_support",
+    remote = "https://github.com/bazelbuild/apple_support.git",
+    tag = "0.7.2",
+)
+
+git_repository(
+    name = "bazel_skylib",
+    remote = "https://github.com/bazelbuild/bazel-skylib.git",
+    tag = "0.9.0",
 )
 ```
 
 **NOTE:** "Always use the [latest version of the build_apple rules](https://github.com/bazelbuild/rules_apple/releases)
-in the `urls` and `strip_prefix` attributes."
+in the `tag` attribute. Make sure to check the latest dependencies required in
+`rules_apple`'s [project](https://github.com/bazelbuild/rules_apple)."
 
 **NOTE:** You **must** set the value of the `name` attribute in the
-`http_archive` rule to `build_bazel_rules_apple` or the build will fail.
+`git_repository` rule to `build_bazel_rules_apple` or the build will fail.
 
 ## Review the source files
 
@@ -165,7 +169,8 @@ Bazel provides several build rules that you can use to build an app for the
 iOS platform. For this tutorial, you'll first use the
 [`objc_library`](../be/objective-c.html#objc_library) rule to tell Bazel
 how to build a static library from the app source code and Xib files. Then
-you'll use the [`ios_application`](https://github.com/bazelbuild/rules_apple)
+you'll use the
+[`ios_application`](https://github.com/bazelbuild/rules_apple/tree/master/doc)
 rule to tell it how to build the application binary and the `.ipa` bundle.
 
 **NOTE:** This tutorial presents a minimal use case of the Objective-C rules in
@@ -183,7 +188,7 @@ objc_library(
          "UrlGet/main.m",
     ],
     hdrs = glob(["UrlGet/*.h"]),
-    xibs = ["UrlGet/UrlGetViewController.xib"],
+    data = ["UrlGet/UrlGetViewController.xib"],
 )
 ```
 
@@ -191,8 +196,9 @@ Note the name of the rule, `UrlGetClasses`.
 
 ### Add an ios_application rule
 
-The [`ios_application`](../be/objective-c.html#ios_application) rule builds
-the application binary and creates the `.ipa` bundle file.
+The
+[`ios_application`](https://github.com/bazelbuild/rules_apple/tree/master/doc)
+rule builds the application binary and creates the `.ipa` bundle file.
 
 Add the following to your `BUILD` file:
 

@@ -37,18 +37,26 @@ public class TestOptions extends OptionsBase {
   )
   public String testString;
 
+  @Option(
+    name = "test_string_null_by_default",
+    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+    effectTags = {OptionEffectTag.NO_OP},
+    defaultValue = "null",
+    help = "a string-valued option that has the special string 'null' as its default."
+  )
+  public String testStringNullByDefault;
+
   /*
    * Repeated flags
    */
 
   @Option(
-    name = "test_multiple_string",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.NO_OP},
-    defaultValue = "", // default value is ignored when allowMultiple=true.
-    allowMultiple = true,
-    help = "a repeatable string-valued flag with its own unhelpful help text"
-  )
+      name = "test_multiple_string",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.NO_OP},
+      defaultValue = "null",
+      allowMultiple = true,
+      help = "a repeatable string-valued flag with its own unhelpful help text")
   public List<String> testMultipleString;
 
   /*
@@ -56,16 +64,15 @@ public class TestOptions extends OptionsBase {
    */
 
   @Option(
-    name = "test_list_converters",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.NO_OP},
-    defaultValue = "",
-    allowMultiple = true,
-    converter = ToListConverter.class,
-    help =
-        "a repeatable flag that accepts lists, but doesn't want to have lists of lists "
-            + "as a final type"
-  )
+      name = "test_list_converters",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.NO_OP},
+      defaultValue = "null",
+      allowMultiple = true,
+      converter = ToListConverter.class,
+      help =
+          "a repeatable flag that accepts lists, but doesn't want to have lists of lists "
+              + "as a final type")
   public List<String> testListConverters;
 
   /*
@@ -306,4 +313,12 @@ public class TestOptions extends OptionsBase {
     defaultValue = "false"
   )
   public boolean specialExpBar;
+
+  @Option(
+      name = "test_deprecated",
+      defaultValue = "default",
+      deprecationWarning = "Flag for testing deprecation behavior.",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.NO_OP})
+  public String testDeprecated;
 }

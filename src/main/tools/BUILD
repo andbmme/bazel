@@ -1,4 +1,11 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
 package(default_visibility = ["//src:__subpackages__"])
+
+cc_binary(
+    name = "daemonize",
+    srcs = ["daemonize.c"],
+)
 
 cc_library(
     name = "logging",
@@ -8,7 +15,10 @@ cc_library(
 
 cc_library(
     name = "process-tools",
-    srcs = ["process-tools.cc"],
+    srcs = ["process-tools.cc"] + select({
+        "//src/conditions:darwin": ["process-tools-darwin.cc"],
+        "//conditions:default": ["process-tools-linux.cc"],
+    }),
     hdrs = ["process-tools.h"],
     deps = [
         ":logging",
@@ -19,8 +29,7 @@ cc_library(
 cc_binary(
     name = "process-wrapper",
     srcs = select({
-        "//src:windows": ["process-wrapper-windows.cc"],
-        "//src:windows_msvc": ["process-wrapper-windows.cc"],
+        "//src/conditions:windows": ["process-wrapper-windows.cc"],
         "//conditions:default": [
             "process-wrapper.cc",
             "process-wrapper.h",
@@ -30,10 +39,12 @@ cc_binary(
             "process-wrapper-options.h",
         ],
     }),
-    linkopts = ["-lm"],
+    linkopts = select({
+        "//src/conditions:windows": [],
+        "//conditions:default": ["-lm"],
+    }),
     deps = select({
-        "//src:windows": [],
-        "//src:windows_msvc": [],
+        "//src/conditions:windows": [],
         "//conditions:default": [
             ":process-tools",
             ":logging",
@@ -44,21 +55,23 @@ cc_binary(
 cc_binary(
     name = "build-runfiles",
     srcs = select({
-        "//src:windows": ["build-runfiles-windows.cc"],
-        "//src:windows_msvc": ["build-runfiles-windows.cc"],
+        "//src/conditions:windows": ["build-runfiles-windows.cc"],
         "//conditions:default": ["build-runfiles.cc"],
+    }),
+    deps = ["//src/main/cpp/util:filesystem"] + select({
+        "//src/conditions:windows": ["//src/main/native/windows:lib-file"],
+        "//conditions:default": [],
     }),
 )
 
 cc_binary(
     name = "linux-sandbox",
     srcs = select({
-        "//src:darwin": ["dummy-sandbox.c"],
-        "//src:darwin_x86_64": ["dummy-sandbox.c"],
-        "//src:freebsd": ["dummy-sandbox.c"],
-        "//src:windows": ["dummy-sandbox.c"],
-        "//src:windows_msys": ["dummy-sandbox.c"],
-        "//src:windows_msvc": ["dummy-sandbox.c"],
+        "//src/conditions:darwin": ["dummy-sandbox.c"],
+        "//src/conditions:darwin_x86_64": ["dummy-sandbox.c"],
+        "//src/conditions:freebsd": ["dummy-sandbox.c"],
+        "//src/conditions:openbsd": ["dummy-sandbox.c"],
+        "//src/conditions:windows": ["dummy-sandbox.c"],
         "//conditions:default": [
             "linux-sandbox.cc",
             "linux-sandbox.h",
@@ -70,12 +83,11 @@ cc_binary(
     }),
     linkopts = ["-lm"],
     deps = select({
-        "//src:darwin": [],
-        "//src:darwin_x86_64": [],
-        "//src:freebsd": [],
-        "//src:windows": [],
-        "//src:windows_msys": [],
-        "//src:windows_msvc": [],
+        "//src/conditions:darwin": [],
+        "//src/conditions:darwin_x86_64": [],
+        "//src/conditions:freebsd": [],
+        "//src/conditions:openbsd": [],
+        "//src/conditions:windows": [],
         "//conditions:default": [
             ":logging",
             ":process-tools",

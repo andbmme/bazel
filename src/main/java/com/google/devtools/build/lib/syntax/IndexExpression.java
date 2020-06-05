@@ -13,8 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import com.google.devtools.build.lib.events.Location;
-import java.io.IOException;
 
 /**
  * An index expression ({@code obj[field]}). Not to be confused with a slice expression ({@code
@@ -24,12 +22,21 @@ import java.io.IOException;
 public final class IndexExpression extends Expression {
 
   private final Expression object;
-
+  private final int lbracketOffset;
   private final Expression key;
+  private final int rbracketOffset;
 
-  public IndexExpression(Expression object, Expression key) {
+  IndexExpression(
+      FileLocations locs,
+      Expression object,
+      int lbracketOffset,
+      Expression key,
+      int rbracketOffset) {
+    super(locs);
     this.object = object;
+    this.lbracketOffset = lbracketOffset;
     this.key = key;
+    this.rbracketOffset = rbracketOffset;
   }
 
   public Expression getObject() {
@@ -41,46 +48,21 @@ public final class IndexExpression extends Expression {
   }
 
   @Override
-  public void prettyPrint(Appendable buffer) throws IOException {
-    object.prettyPrint(buffer);
-    buffer.append('[');
-    key.prettyPrint(buffer);
-    buffer.append(']');
+  public int getStartOffset() {
+    return object.getStartOffset();
   }
 
   @Override
-  Object doEval(Environment env) throws EvalException, InterruptedException {
-    return evaluate(object.eval(env), key.eval(env), env, getLocation());
+  public int getEndOffset() {
+    return rbracketOffset + 1;
   }
 
-  /**
-   * Retrieves the value associated with a key in the given object.
-   *
-   * @throws EvalException if {@code object} is not a list or dictionary
-   */
-  public static Object evaluate(Object object, Object key, Environment env, Location loc)
-      throws EvalException, InterruptedException {
-    if (object instanceof SkylarkIndexable) {
-      Object result = ((SkylarkIndexable) object).getIndex(key, loc);
-      // TODO(bazel-team): We shouldn't have this convertToSkylark call here. If it's needed at all,
-      // it should go in the implementations of SkylarkIndexable#getIndex that produce non-Skylark
-      // values.
-      return SkylarkType.convertToSkylark(result, env);
-    } else if (object instanceof String) {
-      String string = (String) object;
-      int index = EvalUtils.getSequenceIndex(key, string.length(), loc);
-      return string.substring(index, index + 1);
-    } else {
-      throw new EvalException(
-          loc,
-          String.format(
-              "type '%s' has no operator [](%s)",
-              EvalUtils.getDataTypeName(object), EvalUtils.getDataTypeName(key)));
-    }
+  public Location getLbracketLocation() {
+    return locs.getLocation(lbracketOffset);
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

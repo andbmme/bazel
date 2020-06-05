@@ -13,40 +13,41 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import java.io.IOException;
 
-/**
- * Syntax node for comments.
- */
-public final class Comment extends ASTNode {
+/** Syntax node for comments. */
+public final class Comment extends Node {
 
-  protected final String value;
+  private final int offset;
+  private final String text;
 
-  public Comment(String value) {
-    this.value = value;
+  Comment(FileLocations locs, int offset, String text) {
+    super(locs);
+    this.offset = offset;
+    this.text = text;
   }
 
-  public String getValue() {
-    return value;
+  /** Returns the text of the comment, including the leading '#' but not the trailing newline. */
+  public String getText() {
+    return text;
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getStartOffset() {
+    return offset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return offset + text.length();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
   @Override
-  public void prettyPrint(Appendable buffer, int indentLevel) throws IOException {
-    // We can't really print comments in the right place anyway, due to how their relative order
-    // is lost in the representation of BuildFileAST. So don't bother word-wrapping and just print
-    // it on a single line.
-    printIndent(buffer, indentLevel);
-    buffer.append("# ");
-    buffer.append(value);
-  }
-
-  @Override
   public String toString() {
-    return value;
+    return text;
   }
 }

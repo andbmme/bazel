@@ -39,16 +39,22 @@ fi
 # using the output of genquery //src/test/shell/bazel:embedded_tools_deps
 # and removing everything under @bazel_tools because the exact contents of the
 # latter depends on the bazel binary used to run the test.
+# Sort the targets for a deterministic diffing experience.
 current_deps="${TEST_TMPDIR}/current_deps"
-grep -v "^@bazel_tools//" \
+grep -v "^@bazel_tools//\|^@remote_java_tools\|^@debian_cc_deps" \
   "${TEST_SRCDIR}/io_bazel/src/test/shell/bazel/embedded_tools_deps" \
-  >"${current_deps}"
+  | sort >"${current_deps}"
+
+# TODO: This is a temproary hack to make this test works both before and after
+# https://github.com/bazelbuild/bazel/pull/11300
+# Remove the following line after the PR is merged.
+sed -i.bak s/\:zlib$/\:zlib_checked_in/ "${current_deps}"
 
 # Load the current allowed dependencies of //src:embedded_tools_srcs
 allowed_deps=${testdata_path}/embedded_tools_srcs_deps
 
 diff_result=$(diff -ay --suppress-common-lines ${current_deps} \
-  ${allowed_deps}) || \
+  <(sort ${allowed_deps})) || \
   fail "Dependencies of //src:embedded_tools_srcs are modified. The diff \
 between the new dependencies and the current allowed dependencies is \
 $(printf "\n${diff_result}\nThe new dependencies are ")$(cat ${current_deps})"

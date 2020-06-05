@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.bazel.rules.sh;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
@@ -22,28 +23,30 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
-import com.google.devtools.build.lib.analysis.actions.ExecutableSymlinkAction;
+import com.google.devtools.build.lib.analysis.ShToolchain;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.actions.LauncherFileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.LauncherFileWriteAction.LaunchInfo;
-import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction;
-import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction.Substitution;
-import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction.Template;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.bazel.rules.BazelConfiguration;
+import com.google.devtools.build.lib.analysis.actions.SymlinkAction;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector.InstrumentationSpec;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.util.OS;
+import com.google.devtools.build.lib.vfs.PathFragment;
 
 /**
  * Implementation for the sh_binary rule.
  */
 public class ShBinary implements RuleConfiguredTargetFactory {
-  private static final Template STUB_SCRIPT_WINDOWS =
-      Template.forResource(ShBinary.class, "sh_stub_template_windows.txt");
 
   @Override
-  public ConfiguredTarget create(RuleContext ruleContext) throws RuleErrorException {
-    ImmutableList<Artifact> srcs = ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list();
+  public ConfiguredTarget create(RuleContext ruleContext)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
+    ImmutableList<Artifact> srcs =
+        ruleContext.getPrerequisiteArtifacts("srcs", TransitionMode.TARGET).list();
     if (srcs.size() != 1) {
       ruleContext.attributeError("srcs", "you must specify exactly one file in 'srcs'");
       return null;
@@ -59,7 +62,8 @@ public class ShBinary implements RuleConfiguredTargetFactory {
     // happens when srcs = ['x', 'y'] but 'x' is an empty filegroup?). This is a pervasive
     // problem in Blaze.
     ruleContext.registerAction(
-        new ExecutableSymlinkAction(ruleContext.getActionOwner(), src, symlink));
+        SymlinkAction.toExecutable(
+            ruleContext.getActionOwner(), src, symlink, "Symlinking " + ruleContext.getLabel()));
 
     NestedSetBuilder<Artifact> filesToBuildBuilder =
         NestedSetBuilder.<Artifact>stableOrder().add(src).add(symlink);
@@ -90,6 +94,11 @@ public class ShBinary implements RuleConfiguredTargetFactory {
         .setFilesToBuild(filesToBuild)
         .setRunfilesSupport(runfilesSupport, mainExecutable)
         .addProvider(RunfilesProvider.class, RunfilesProvider.simple(runfiles))
+        .addNativeDeclaredProvider(
+            InstrumentedFilesCollector.collectTransitive(
+                ruleContext,
+                new InstrumentationSpec(FileTypeSet.ANY_FILE, "srcs", "deps", "data"),
+                /* reportedToActualSources= */ NestedSetBuilder.emptySet(Order.STABLE_ORDER)))
         .build();
   }
 
@@ -99,8 +108,8 @@ public class ShBinary implements RuleConfiguredTargetFactory {
         || artifact.getExtension().equals("bat");
   }
 
-  private static Artifact createWindowsExeLauncher(RuleContext ruleContext)
-      throws RuleErrorException {
+  private static Artifact createWindowsExeLauncher(
+      RuleContext ruleContext, PathFragment shExecutable) throws RuleErrorException {
     Artifact bashLauncher =
         ruleContext.getImplicitOutputArtifact(ruleContext.getTarget().getName() + ".exe");
 
@@ -109,11 +118,9 @@ public class ShBinary implements RuleConfiguredTargetFactory {
             .addKeyValuePair("binary_type", "Bash")
             .addKeyValuePair("workspace_name", ruleContext.getWorkspaceName())
             .addKeyValuePair(
-                "bash_bin_path",
-                ruleContext
-                    .getFragment(BazelConfiguration.class)
-                    .getShellExecutable()
-                    .getPathString())
+                "symlink_runfiles_enabled",
+                ruleContext.getConfiguration().runfilesEnabled() ? "1" : "0")
+            .addKeyValuePair("bash_bin_path", shExecutable.getPathString())
             .build();
 
     LauncherFileWriteAction.createAndRegister(ruleContext, bashLauncher, launchInfo);
@@ -129,32 +136,13 @@ public class ShBinary implements RuleConfiguredTargetFactory {
         return primaryOutput;
       } else {
         // If the extensions don't match, we should always respect mainFile's extension.
-        ruleContext.ruleError(
+        throw ruleContext.throwWithRuleError(
             "Source file is a Windows executable file,"
                 + " target name extension should match source file extension");
-        throw new RuleErrorException();
       }
     }
 
-    if (ruleContext.getConfiguration().enableWindowsExeLauncher()) {
-      return createWindowsExeLauncher(ruleContext);
-    }
-
-    Artifact wrapper =
-        ruleContext.getImplicitOutputArtifact(ruleContext.getTarget().getName() + ".cmd");
-    ruleContext.registerAction(
-        new TemplateExpansionAction(
-            ruleContext.getActionOwner(),
-            wrapper,
-            STUB_SCRIPT_WINDOWS,
-            ImmutableList.of(
-                Substitution.of(
-                    "%bash_exe_path%",
-                    ruleContext
-                        .getFragment(BazelConfiguration.class)
-                        .getShellExecutable()
-                        .getPathString())),
-            true));
-    return wrapper;
+    PathFragment shExecutable = ShToolchain.getPathOrError(ruleContext);
+    return createWindowsExeLauncher(ruleContext, shExecutable);
   }
 }

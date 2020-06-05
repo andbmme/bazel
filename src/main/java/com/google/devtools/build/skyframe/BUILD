@@ -1,3 +1,7 @@
+load("@rules_java//java:defs.bzl", "java_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("//tools/build_rules:utilities.bzl", "java_library_srcs")
+
 # Description:
 #   Skyframe Java code
 package(
@@ -5,21 +9,20 @@ package(
 )
 
 SKYFRAME_OBJECT_SRCS = [
-    "SkyValue.java",
-    "SkyKey.java",
-    "LegacySkyKey.java",
+    "AbstractSkyKey.java",
+    "FunctionHermeticity.java",
+    "ShareabilityOfValue.java",
     "SkyFunctionName.java",
+    "SkyKey.java",
+    "SkyValue.java",
+    "Version.java",
 ]
 
 java_library(
     name = "skyframe-objects",
     srcs = SKYFRAME_OBJECT_SRCS,
     visibility = ["//visibility:public"],
-    deps = [
-        "//src/main/java/com/google/devtools/build/lib/collect",
-        "//src/main/java/com/google/devtools/build/lib/concurrent",
-        "//third_party:guava",
-    ],
+    deps = ["//third_party:guava"],
 )
 
 java_library(
@@ -29,20 +32,42 @@ java_library(
         exclude = SKYFRAME_OBJECT_SRCS,
     ),
     deps = [
+        ":graph_inconsistency_java_proto",
         ":skyframe-objects",
-        "//src/main/java/com/google/devtools/build/lib:events",
-        "//src/main/java/com/google/devtools/build/lib:util",
+        "//src/main/java/com/google/devtools/build/lib/bugreport",
         "//src/main/java/com/google/devtools/build/lib/clock",  # keep
-        "//src/main/java/com/google/devtools/build/lib/collect",
+        "//src/main/java/com/google/devtools/build/lib/collect/compacthashmap",
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashset",
         "//src/main/java/com/google/devtools/build/lib/collect/nestedset",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
+        "//src/main/java/com/google/devtools/build/lib/events",
         "//src/main/java/com/google/devtools/build/lib/profiler",
-        "//src/main/java/com/google/devtools/build/lib/vfs",
+        "//src/main/java/com/google/devtools/build/lib/profiler:google-auto-profiler-utils",
+        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/autocodec",
+        "//src/main/java/com/google/devtools/build/lib/supplier",
+        "//src/main/java/com/google/devtools/build/lib/util",
+        "//src/main/java/com/google/devtools/build/lib/util:abrupt_exit_exception",
+        "//src/main/java/com/google/devtools/build/lib/util:string",
         "//src/main/java/com/google/devtools/common/options",
+        "//third_party:flogger",
         "//third_party:guava",
         "//third_party:jsr305",
     ],
+)
+
+proto_library(
+    name = "graph_inconsistency",
+    srcs = ["graph_inconsistency.proto"],
+)
+
+java_proto_library(
+    name = "graph_inconsistency_java_proto",
+    deps = [":graph_inconsistency"],
+)
+
+java_library_srcs(
+    name = "dist_jars",
+    deps = [":graph_inconsistency_java_proto"],
 )
 
 filegroup(

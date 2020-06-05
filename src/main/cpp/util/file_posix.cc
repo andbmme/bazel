@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "src/main/cpp/util/file_platform.h"
+
 #include <dirent.h>  // DIR, dirent, opendir, closedir
 #include <errno.h>
 #include <fcntl.h>   // O_RDONLY
@@ -28,11 +30,13 @@
 #include "src/main/cpp/util/errors.h"
 #include "src/main/cpp/util/exit_code.h"
 #include "src/main/cpp/util/file.h"
+#include "src/main/cpp/util/logging.h"
+#include "src/main/cpp/util/path.h"
+#include "src/main/cpp/util/path_platform.h"
 #include "src/main/cpp/util/strings.h"
 
 namespace blaze_util {
 
-using std::pair;
 using std::string;
 
 // Runs "stat" on `path`. Returns -1 and sets errno if stat fails or
@@ -120,6 +124,72 @@ static bool MakeDirectories(const string &path, mode_t mode, bool childmost) {
   return stat_succeeded;
 }
 
+
+string CreateTempDir(const std::string &prefix) {
+  std::string parent = Dirname(prefix);
+  // Need parent to exist first.
+  if (!blaze_util::PathExists(parent) &&
+      !blaze_util::MakeDirectories(parent, 0777)) {
+    BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
+        << "couldn't create '" << parent << "': "
+        << blaze_util::GetLastErrorString();
+  }
+
+  std::string result(prefix + "XXXXXX");
+  if (mkdtemp(&result[0]) == nullptr) {
+    std::string err = GetLastErrorString();
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "could not create temporary directory under " << parent
+        << " to extract install base into (" << err << ")";
+  }
+
+  // There's no better way to get the current umask than to set and reset it.
+  const mode_t um = umask(0);
+  umask(um);
+  chmod(result.c_str(), 0777 & ~um);
+
+  return result;
+}
+
+static bool RemoveDirRecursively(const std::string &path) {
+  DIR *dir;
+  if ((dir = opendir(path.c_str())) == NULL) {
+    return false;
+  }
+
+  struct dirent *ent;
+  while ((ent = readdir(dir)) != NULL) {
+    if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
+      continue;
+    }
+
+    if (!RemoveRecursively(blaze_util::JoinPath(path, ent->d_name))) {
+      closedir(dir);
+      return false;
+    }
+  }
+
+  if (closedir(dir) != 0) {
+    return false;
+  }
+
+  return rmdir(path.c_str()) == 0;
+}
+
+bool RemoveRecursively(const std::string &path) {
+  struct stat stat_buf;
+  if (lstat(path.c_str(), &stat_buf) == -1) {
+    // Non-existent is good enough.
+    return errno == ENOENT;
+  }
+
+  if (S_ISDIR(stat_buf.st_mode) && !S_ISLNK(stat_buf.st_mode)) {
+    return RemoveDirRecursively(path);
+  } else {
+    return UnlinkPath(path);
+  }
+}
+
 class PosixPipe : public IPipe {
  public:
   PosixPipe(int recv_socket, int send_socket)
@@ -160,32 +230,21 @@ class PosixPipe : public IPipe {
 IPipe* CreatePipe() {
   int fd[2];
   if (pipe(fd) < 0) {
-    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "pipe()");
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "pipe() failed: " << GetLastErrorString();
   }
 
   if (fcntl(fd[0], F_SETFD, FD_CLOEXEC) == -1) {
-    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
-         "fcntl(F_SETFD, FD_CLOEXEC) failed");
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "fcntl(F_SETFD, FD_CLOEXEC) failed: " << GetLastErrorString();
   }
 
   if (fcntl(fd[1], F_SETFD, FD_CLOEXEC) == -1) {
-    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
-         "fcntl(F_SETFD, FD_CLOEXEC) failed");
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "fcntl(F_SETFD, FD_CLOEXEC) failed: " << GetLastErrorString();
   }
 
   return new PosixPipe(fd[0], fd[1]);
-}
-
-pair<string, string> SplitPath(const string &path) {
-  size_t pos = path.rfind('/');
-
-  // Handle the case with no '/' in 'path'.
-  if (pos == string::npos) return std::make_pair("", path);
-
-  // Handle the case with a single leading '/' in 'path'.
-  if (pos == 0) return std::make_pair(string(path, 0, 1), string(path, 1));
-
-  return std::make_pair(string(path, 0, pos), string(path, pos + 1));
 }
 
 int ReadFromHandle(file_handle_type fd, void *data, size_t size, int *error) {
@@ -214,12 +273,20 @@ bool ReadFile(const string &filename, string *content, int max_size) {
   return result;
 }
 
+bool ReadFile(const Path &path, std::string *content, int max_size) {
+  return ReadFile(path.AsNativePath(), content, max_size);
+}
+
 bool ReadFile(const string &filename, void *data, size_t size) {
   int fd = open(filename.c_str(), O_RDONLY);
   if (fd == -1) return false;
   bool result = ReadFrom(fd, data, size);
   close(fd);
   return result;
+}
+
+bool ReadFile(const Path &filename, void *data, size_t size) {
+  return ReadFile(filename.AsNativePath(), data, size);
 }
 
 bool WriteFile(const void *data, size_t size, const string &filename,
@@ -236,6 +303,11 @@ bool WriteFile(const void *data, size_t size, const string &filename,
   return result == static_cast<int>(size);
 }
 
+bool WriteFile(const void *data, size_t size, const Path &path,
+               unsigned int perm) {
+  return WriteFile(data, size, path.AsNativePath(), perm);
+}
+
 int WriteToStdOutErr(const void *data, size_t size, bool to_stdout) {
   size_t r = fwrite(data, 1, size, to_stdout ? stdout : stderr);
   return (r == size) ? WriteResult::SUCCESS
@@ -247,14 +319,17 @@ int RenameDirectory(const std::string &old_name, const std::string &new_name) {
   if (rename(old_name.c_str(), new_name.c_str()) == 0) {
     return kRenameDirectorySuccess;
   } else {
-    return errno == ENOTEMPTY ? kRenameDirectoryFailureNotEmpty
-                              : kRenameDirectoryFailureOtherError;
+    if (errno == ENOTEMPTY || errno == EEXIST) {
+      return kRenameDirectoryFailureNotEmpty;
+    } else {
+      return kRenameDirectoryFailureOtherError;
+    }
   }
 }
 
-bool ReadDirectorySymlink(const string &name, string *result) {
+bool ReadDirectorySymlink(const blaze_util::Path &name, string *result) {
   char buf[PATH_MAX + 1];
-  int len = readlink(name.c_str(), buf, PATH_MAX);
+  int len = readlink(name.AsNativePath().c_str(), buf, PATH_MAX);
   if (len < 0) {
     return false;
   }
@@ -268,9 +343,15 @@ bool UnlinkPath(const string &file_path) {
   return unlink(file_path.c_str()) == 0;
 }
 
+bool UnlinkPath(const Path &file_path) {
+  return UnlinkPath(file_path.AsNativePath());
+}
+
 bool PathExists(const string& path) {
   return access(path.c_str(), F_OK) == 0;
 }
+
+bool PathExists(const Path &path) { return PathExists(path.AsNativePath()); }
 
 string MakeCanonical(const char *path) {
   char *resolved_path = realpath(path, NULL);
@@ -297,20 +378,28 @@ static bool CanAccess(const string &path, bool read, bool write, bool exec) {
   return access(path.c_str(), mode) == 0;
 }
 
-bool IsDevNull(const char *path) {
-  return path != NULL && *path != 0 && strncmp("/dev/null\0", path, 10) == 0;
-}
-
 bool CanReadFile(const std::string &path) {
   return !IsDirectory(path) && CanAccess(path, true, false, false);
+}
+
+bool CanReadFile(const Path &path) {
+  return CanReadFile(path.AsNativePath());
 }
 
 bool CanExecuteFile(const std::string &path) {
   return !IsDirectory(path) && CanAccess(path, false, false, true);
 }
 
+bool CanExecuteFile(const Path &path) {
+  return CanExecuteFile(path.AsNativePath());
+}
+
 bool CanAccessDirectory(const std::string &path) {
   return IsDirectory(path) && CanAccess(path, true, true, true);
+}
+
+bool CanAccessDirectory(const Path &path) {
+  return CanAccessDirectory(path.AsNativePath());
 }
 
 bool IsDirectory(const string& path) {
@@ -318,25 +407,24 @@ bool IsDirectory(const string& path) {
   return stat(path.c_str(), &buf) == 0 && S_ISDIR(buf.st_mode);
 }
 
-bool IsRootDirectory(const string &path) {
-  return path.size() == 1 && path[0] == '/';
-}
-
-bool IsAbsolute(const string &path) { return !path.empty() && path[0] == '/'; }
+bool IsDirectory(const Path &path) { return IsDirectory(path.AsNativePath()); }
 
 void SyncFile(const string& path) {
   const char* file_path = path.c_str();
   int fd = open(file_path, O_RDONLY);
   if (fd < 0) {
-    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR,
-         "failed to open '%s' for syncing", file_path);
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "failed to open '" << file_path
+        << "' for syncing: " << GetLastErrorString();
   }
   if (fsync(fd) < 0) {
-    pdie(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR, "failed to sync '%s'",
-         file_path);
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "failed to sync '" << file_path << "': " << GetLastErrorString();
   }
   close(fd);
 }
+
+void SyncFile(const Path &path) { SyncFile(path.AsNativePath()); }
 
 class PosixFileMtime : public IFileMtime {
  public:
@@ -344,9 +432,9 @@ class PosixFileMtime : public IFileMtime {
       : near_future_(GetFuture(9)),
         distant_future_({GetFuture(10), GetFuture(10)}) {}
 
-  bool GetIfInDistantFuture(const string &path, bool *result) override;
-  bool SetToNow(const string &path) override;
-  bool SetToDistantFuture(const string &path) override;
+  bool IsUntampered(const Path &path) override;
+  bool SetToNow(const Path &path) override;
+  bool SetToDistantFuture(const Path &path) override;
 
  private:
   // 9 years in the future.
@@ -354,43 +442,44 @@ class PosixFileMtime : public IFileMtime {
   // 10 years in the future.
   const struct utimbuf distant_future_;
 
-  static bool Set(const string &path, const struct utimbuf &mtime);
+  static bool Set(const Path &path, const struct utimbuf &mtime);
   static time_t GetNow();
   static time_t GetFuture(unsigned int years);
 };
 
-bool PosixFileMtime::GetIfInDistantFuture(const string &path, bool *result) {
+bool PosixFileMtime::IsUntampered(const Path &path) {
   struct stat buf;
-  if (stat(path.c_str(), &buf)) {
+  if (stat(path.AsNativePath().c_str(), &buf)) {
     return false;
   }
+
   // Compare the mtime with `near_future_`, not with `GetNow()` or
   // `distant_future_`.
   // This way we don't need to call GetNow() every time we want to compare and
   // we also don't need to worry about potentially unreliable time equality
   // check (in case it uses floats or something crazy).
-  *result = (buf.st_mtime > near_future_);
-  return true;
+  return S_ISDIR(buf.st_mode) || (buf.st_mtime > near_future_);
 }
 
-bool PosixFileMtime::SetToNow(const string &path) {
+bool PosixFileMtime::SetToNow(const Path &path) {
   time_t now(GetNow());
   struct utimbuf times = {now, now};
   return Set(path, times);
 }
 
-bool PosixFileMtime::SetToDistantFuture(const string &path) {
+bool PosixFileMtime::SetToDistantFuture(const Path &path) {
   return Set(path, distant_future_);
 }
 
-bool PosixFileMtime::Set(const string &path, const struct utimbuf &mtime) {
-  return utime(path.c_str(), &mtime) == 0;
+bool PosixFileMtime::Set(const Path &path, const struct utimbuf &mtime) {
+  return utime(path.AsNativePath().c_str(), &mtime) == 0;
 }
 
 time_t PosixFileMtime::GetNow() {
   time_t result = time(NULL);
   if (result == -1) {
-    pdie(blaze_exit_code::INTERNAL_ERROR, "time(NULL) failed");
+    BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
+        << "time(NULL) failed: " << GetLastErrorString();
   }
   return result;
 }
@@ -411,10 +500,15 @@ bool MakeDirectories(const string &path, unsigned int mode) {
   return MakeDirectories(path, mode, true);
 }
 
+bool MakeDirectories(const Path &path, unsigned int mode) {
+  return MakeDirectories(path.AsNativePath(), mode);
+}
+
 string GetCwd() {
   char cwdbuf[PATH_MAX];
   if (getcwd(cwdbuf, sizeof cwdbuf) == NULL) {
-    pdie(blaze_exit_code::INTERNAL_ERROR, "getcwd() failed");
+    BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
+        << "getcwd() failed: " << GetLastErrorString();
   }
   return string(cwdbuf);
 }
@@ -440,20 +534,26 @@ void ForEachDirectoryEntry(const string &path,
 
     string filename(blaze_util::JoinPath(path, ent->d_name));
     bool is_directory;
-    if (ent->d_type == DT_UNKNOWN) {
-      struct stat buf;
-      if (lstat(filename.c_str(), &buf) == -1) {
-        die(blaze_exit_code::INTERNAL_ERROR, "stat failed");
-      }
-      is_directory = S_ISDIR(buf.st_mode);
-    } else {
+// 'd_type' field isn't part of the POSIX spec.
+#ifdef _DIRENT_HAVE_D_TYPE
+    if (ent->d_type != DT_UNKNOWN) {
       is_directory = (ent->d_type == DT_DIR);
+    } else  // NOLINT (the brace is on the next line)
+#endif
+      {
+        struct stat buf;
+        if (lstat(filename.c_str(), &buf) == -1) {
+          BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
+              << "stat failed for filename '" << filename
+              << "': " << GetLastErrorString();
+        }
+        is_directory = S_ISDIR(buf.st_mode);
+      }
+
+      consume->Consume(filename, is_directory);
     }
 
-    consume->Consume(filename, is_directory);
+    closedir(dir);
   }
-
-  closedir(dir);
-}
 
 }  // namespace blaze_util

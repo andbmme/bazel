@@ -12,14 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This becomes the BUILD file for @local_config_cc// under non-BSD unixes.
+
 package(default_visibility = ["//visibility:public"])
+
+load(":cc_toolchain_config.bzl", "cc_toolchain_config")
+load(":armeabi_cc_toolchain_config.bzl", "armeabi_cc_toolchain_config")
+load("@rules_cc//cc:defs.bzl", "cc_toolchain", "cc_toolchain_suite")
+
+licenses(["notice"])  # Apache 2.0
 
 cc_library(
     name = "malloc",
-)
-
-cc_library(
-    name = "stl",
 )
 
 filegroup(
@@ -32,6 +36,11 @@ filegroup(
     srcs = ["cc_wrapper.sh"],
 )
 
+filegroup(
+    name = "compiler_deps",
+    srcs = glob(["extra_tools/**"], allow_empty = True) + [%{cc_compiler_deps}],
+)
+
 # This is the entry point for --crosstool_top.  Toolchains are found
 # by lopping off the name of --crosstool_top and searching for
 # the "${CPU}" entry in the toolchains attribute.
@@ -39,75 +48,67 @@ cc_toolchain_suite(
     name = "toolchain",
     toolchains = {
         "%{name}|%{compiler}": ":cc-compiler-%{name}",
+        "%{name}": ":cc-compiler-%{name}",
         "armeabi-v7a|compiler": ":cc-compiler-armeabi-v7a",
-        "ios_x86_64|compiler": ":cc-compiler-ios_x86_64",
+        "armeabi-v7a": ":cc-compiler-armeabi-v7a",
     },
 )
 
 cc_toolchain(
     name = "cc-compiler-%{name}",
-    all_files = "%{cc_compiler_deps}",
-    compiler_files = "%{cc_compiler_deps}",
-    cpu = "%{name}",
+    toolchain_identifier = "%{cc_toolchain_identifier}",
+    toolchain_config = ":%{cc_toolchain_identifier}",
+    all_files = ":compiler_deps",
+    ar_files = ":compiler_deps",
+    as_files = ":compiler_deps",
+    compiler_files = ":compiler_deps",
     dwp_files = ":empty",
-    dynamic_runtime_libs = [":empty"],
-    linker_files = "%{cc_compiler_deps}",
+    linker_files = ":compiler_deps",
     objcopy_files = ":empty",
-    static_runtime_libs = [":empty"],
     strip_files = ":empty",
     supports_param_files = %{supports_param_files},
+    module_map = %{modulemap},
 )
 
+cc_toolchain_config(
+    name = "%{cc_toolchain_identifier}",
+    cpu = "%{target_cpu}",
+    compiler = "%{compiler}",
+    toolchain_identifier = "%{cc_toolchain_identifier}",
+    host_system_name = "%{host_system_name}",
+    target_system_name = "%{target_system_name}",
+    target_libc = "%{target_libc}",
+    abi_version = "%{abi_version}",
+    abi_libc_version = "%{abi_libc_version}",
+    cxx_builtin_include_directories = [%{cxx_builtin_include_directories}],
+    tool_paths = {%{tool_paths}},
+    compile_flags = [%{compile_flags}],
+    opt_compile_flags = [%{opt_compile_flags}],
+    dbg_compile_flags = [%{dbg_compile_flags}],
+    cxx_flags = [%{cxx_flags}],
+    link_flags = [%{link_flags}],
+    link_libs = [%{link_libs}],
+    opt_link_flags = [%{opt_link_flags}],
+    unfiltered_compile_flags = [%{unfiltered_compile_flags}],
+    coverage_compile_flags = [%{coverage_compile_flags}],
+    coverage_link_flags = [%{coverage_link_flags}],
+    supports_start_end_lib = %{supports_start_end_lib},
+)
 
 # Android tooling requires a default toolchain for the armeabi-v7a cpu.
 cc_toolchain(
     name = "cc-compiler-armeabi-v7a",
+    toolchain_identifier = "stub_armeabi-v7a",
+    toolchain_config = ":stub_armeabi-v7a",
     all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
     compiler_files = ":empty",
-    cpu = "local",
     dwp_files = ":empty",
-    dynamic_runtime_libs = [":empty"],
     linker_files = ":empty",
     objcopy_files = ":empty",
-    static_runtime_libs = [":empty"],
     strip_files = ":empty",
     supports_param_files = 1,
 )
 
-# ios crosstool configuration requires a default toolchain for the
-# ios_x86_64 cpu.
-cc_toolchain(
-    name = "cc-compiler-ios_x86_64",
-    all_files = ":empty",
-    compiler_files = ":empty",
-    cpu = "local",
-    dwp_files = ":empty",
-    dynamic_runtime_libs = [":empty"],
-    linker_files = ":empty",
-    objcopy_files = ":empty",
-    static_runtime_libs = [":empty"],
-    strip_files = ":empty",
-    supports_param_files = 1,
-)
-
-filegroup(name = "toolchain_type")
-
-# A dummy toolchain is necessary to satisfy toolchain resolution until platforms
-# are used in c++ by default.
-# TODO(b/64754003): Remove once platforms are used in c++ by default.
-toolchain(
-    name = "dummy_cc_toolchain_type",
-    toolchain = "dummy_cc_toolchain_impl",
-    toolchain_type = ":toolchain_type",
-)
-
-filegroup(name = "toolchain_category")
-toolchain(
-    name = "dummy_cc_toolchain",
-    toolchain = "dummy_cc_toolchain_impl",
-    toolchain_type = ":toolchain_category",
-)
-
-load(":dummy_toolchain.bzl", "dummy_toolchain")
-
-dummy_toolchain(name = "dummy_cc_toolchain_impl")
+armeabi_cc_toolchain_config(name = "stub_armeabi-v7a")

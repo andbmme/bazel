@@ -15,32 +15,28 @@ package com.google.devtools.build.lib.runtime;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
-import com.google.common.base.Predicates;
 import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ListMultimap;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
-import com.google.devtools.build.lib.runtime.commands.ProjectFileSupport;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
-import com.google.devtools.build.lib.util.ExitCode;
+import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.Command.Code;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.InvocationPolicyEnforcer;
 import com.google.devtools.common.options.OptionDefinition;
 import com.google.devtools.common.options.OptionPriority.PriorityCategory;
-import com.google.devtools.common.options.OptionValueDescription;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsParsingException;
-import com.google.devtools.common.options.OptionsProvider;
-import com.google.devtools.common.options.ParsedOptionDescription;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
@@ -49,9 +45,11 @@ import java.util.logging.Level;
 /**
  * Handles parsing the blaze command arguments.
  *
- * <p>This class manages rc options, default options, and invocation policy.
+ * <p>This class manages rc options, configs, default options, and invocation policy.
  */
-public abstract class BlazeOptionHandler {
+public final class BlazeOptionHandler {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
+
   // Keep in sync with options added in OptionProcessor::AddRcfileArgsAndOptions()
   private static final ImmutableSet<String> INTERNAL_COMMAND_OPTIONS =
       ImmutableSet.of(
@@ -63,15 +61,15 @@ public abstract class BlazeOptionHandler {
           "client_env",
           "client_cwd");
 
-  protected final BlazeRuntime runtime;
-  protected final OptionsParser optionsParser;
-  protected final BlazeWorkspace workspace;
-  protected final BlazeCommand command;
-  protected final Command commandAnnotation;
-  protected final InvocationPolicy invocationPolicy;
-  protected final List<String> rcfileNotes = new ArrayList<>();
+  private final BlazeRuntime runtime;
+  private final OptionsParser optionsParser;
+  private final BlazeWorkspace workspace;
+  private final BlazeCommand command;
+  private final Command commandAnnotation;
+  private final InvocationPolicy invocationPolicy;
+  private final List<String> rcfileNotes = new ArrayList<>();
 
-  private BlazeOptionHandler(
+  BlazeOptionHandler(
       BlazeRuntime runtime,
       BlazeWorkspace workspace,
       BlazeCommand command,
@@ -86,26 +84,11 @@ public abstract class BlazeOptionHandler {
     this.invocationPolicy = invocationPolicy;
   }
 
-  public static BlazeOptionHandler getHandler(
-      BlazeRuntime runtime,
-      BlazeWorkspace workspace,
-      BlazeCommand command,
-      Command commandAnnotation,
-      OptionsParser optionsParser,
-      InvocationPolicy invocationPolicy,
-      boolean expandConfigsInPlace) {
-    if (expandConfigsInPlace) {
-      return new InPlaceConfigExpansionRcHandler(
-          runtime, workspace, command, commandAnnotation, optionsParser, invocationPolicy);
-    } else {
-      return new FixPointConfigExpansionRcHandler(
-          runtime, workspace, command, commandAnnotation, optionsParser, invocationPolicy);
-    }
-  }
-
-  // Return options as OptionsProvider so the options can't be easily modified after we've
-  // applied the invocation policy.
-  OptionsProvider getOptionsResult() {
+  /**
+   * Return options as {@link OptionsParsingResult} so the options can't be easily modified after
+   * we've applied the invocation policy.
+   */
+  OptionsParsingResult getOptionsResult() {
     return optionsParser;
   }
 
@@ -117,47 +100,53 @@ public abstract class BlazeOptionHandler {
    * Only some commands work if cwd != workspaceSuffix in Blaze. In that case, also check if Blaze
    * was called from the output directory and fail if it was.
    */
-  private ExitCode checkCwdInWorkspace(EventHandler eventHandler) {
+  private DetailedExitCode checkCwdInWorkspace(EventHandler eventHandler) {
     if (!commandAnnotation.mustRunInWorkspace()) {
-      return ExitCode.SUCCESS;
+      return DetailedExitCode.success();
     }
 
     if (!workspace.getDirectories().inWorkspace()) {
-      eventHandler.handle(
-          Event.error(
-              "The '"
-                  + commandAnnotation.name()
-                  + "' command is only supported from within a workspace."));
-      return ExitCode.COMMAND_LINE_ERROR;
+      String message =
+          "The '"
+              + commandAnnotation.name()
+              + "' command is only supported from within a workspace"
+              + " (below a directory having a WORKSPACE file).\n"
+              + "See documentation at"
+              + " https://docs.bazel.build/versions/master/build-ref.html#workspace";
+      eventHandler.handle(Event.error(message));
+      return createDetailedExitCode(message, Code.NOT_IN_WORKSPACE);
     }
 
     Path workspacePath = workspace.getWorkspace();
     // TODO(kchodorow): Remove this once spaces are supported.
     if (workspacePath.getPathString().contains(" ")) {
-      eventHandler.handle(
-          Event.error(
-              runtime.getProductName()
-                  + " does not currently work properly from paths "
-                  + "containing spaces ("
-                  + workspace
-                  + ")."));
-      return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+      String message =
+          runtime.getProductName()
+              + " does not currently work properly from paths "
+              + "containing spaces ("
+              + workspacePath
+              + ").";
+      eventHandler.handle(Event.error(message));
+      return createDetailedExitCode(message, Code.SPACES_IN_WORKSPACE_PATH);
     }
 
-    Path doNotBuild =
-        workspacePath.getParentDirectory().getRelative(BlazeWorkspace.DO_NOT_BUILD_FILE_NAME);
+    if (workspacePath.getParentDirectory() != null) {
+      Path doNotBuild =
+          workspacePath.getParentDirectory().getRelative(BlazeWorkspace.DO_NOT_BUILD_FILE_NAME);
 
-    if (doNotBuild.exists()) {
-      if (!commandAnnotation.canRunInOutputDirectory()) {
-        eventHandler.handle(Event.error(getNotInRealWorkspaceError(doNotBuild)));
-        return ExitCode.COMMAND_LINE_ERROR;
-      } else {
-        eventHandler.handle(
-            Event.warn(
-                runtime.getProductName() + " is run from output directory. This is unsound."));
+      if (doNotBuild.exists()) {
+        if (!commandAnnotation.canRunInOutputDirectory()) {
+          String message = getNotInRealWorkspaceError(doNotBuild);
+          eventHandler.handle(Event.error(message));
+          return createDetailedExitCode(message, Code.IN_OUTPUT_DIRECTORY);
+        } else {
+          eventHandler.handle(
+              Event.warn(
+                  runtime.getProductName() + " is run from output directory. This is unsound."));
+        }
       }
     }
-    return ExitCode.SUCCESS;
+    return DetailedExitCode.success();
   }
 
   /**
@@ -178,31 +167,23 @@ public abstract class BlazeOptionHandler {
     for (String commandToParse : getCommandNamesToParse(commandAnnotation)) {
       // Get all args defined for this command (or "common"), grouped by rc chunk.
       for (RcChunkOfArgs rcArgs : commandToRcArgs.get(commandToParse)) {
-        if (!rcArgs.args.isEmpty()) {
+        if (!rcArgs.getArgs().isEmpty()) {
           String inherited = commandToParse.equals(commandAnnotation.name()) ? "" : "Inherited ";
           String source =
-              rcArgs.rcFile.equals("client")
+              rcArgs.getRcFile().equals("client")
                   ? "Options provided by the client"
                   : String.format(
                       "Reading rc options for '%s' from %s",
-                      commandAnnotation.name(), rcArgs.rcFile);
+                      commandAnnotation.name(), rcArgs.getRcFile());
           rcfileNotes.add(
               String.format(
                   "%s:\n  %s'%s' options: %s",
-                  source, inherited, commandToParse, Joiner.on(' ').join(rcArgs.args)));
+                  source, inherited, commandToParse, Joiner.on(' ').join(rcArgs.getArgs())));
         }
-        optionsParser.parse(PriorityCategory.RC_FILE, rcArgs.rcFile, rcArgs.args);
+        optionsParser.parse(PriorityCategory.RC_FILE, rcArgs.getRcFile(), rcArgs.getArgs());
       }
     }
   }
-
-  /**
-   * Expand the values of --config according to the definitions provided in the rc files and the
-   * applicable command.
-   */
-  abstract void expandConfigOptions(
-      EventHandler eventHandler, ListMultimap<String, RcChunkOfArgs> commandToRcArgs)
-      throws OptionsParsingException;
 
   private void parseArgsAndConfigs(List<String> args, ExtendedEventHandler eventHandler)
       throws OptionsParsingException {
@@ -250,18 +231,43 @@ public abstract class BlazeOptionHandler {
   }
 
   /**
+   * TODO(bazel-team): When we move CoreOptions options to be defined in starlark, make sure they're
+   * not passed in here during {@link #getOptionsResult}.
+   */
+  DetailedExitCode parseStarlarkOptions(CommandEnvironment env, ExtendedEventHandler eventHandler) {
+    // For now, restrict starlark options to commands that already build to ensure that loading
+    // will work. We may want to open this up to other commands in the future. The "info"
+    // and "clean" commands have builds=true set in their annotation but don't actually do any
+    // building (b/120041419).
+    if (!commandAnnotation.builds()
+        || commandAnnotation.name().equals("info")
+        || commandAnnotation.name().equals("clean")) {
+      return DetailedExitCode.success();
+    }
+    try {
+      StarlarkOptionsParser.newStarlarkOptionsParser(env, optionsParser).parse(eventHandler);
+    } catch (OptionsParsingException e) {
+      env.getReporter().handle(Event.error(e.getMessage()));
+      logger.atInfo().withCause(e).log("Error parsing Starlark options");
+      return createDetailedExitCode(
+          "Error parsing Starlark options: " + e.getMessage(), Code.STARLARK_OPTIONS_PARSE_FAILURE);
+    }
+    return DetailedExitCode.success();
+  }
+
+  /**
    * Parses the options, taking care not to generate any output to outErr, return, or throw an
    * exception.
    *
-   * @return ExitCode.SUCCESS if everything went well, or some other value if not
+   * @return {@code DetailedExitCode.success()} if everything went well, or some other value if not
    */
-  ExitCode parseOptions(List<String> args, ExtendedEventHandler eventHandler) {
+  DetailedExitCode parseOptions(List<String> args, ExtendedEventHandler eventHandler) {
     // The initialization code here was carefully written to parse the options early before we call
     // into the BlazeModule APIs, which means we must not generate any output to outErr, return, or
     // throw an exception. All the events happening here are instead stored in a temporary event
     // handler, and later replayed.
-    ExitCode earlyExitCode = checkCwdInWorkspace(eventHandler);
-    if (!earlyExitCode.equals(ExitCode.SUCCESS)) {
+    DetailedExitCode earlyExitCode = checkCwdInWorkspace(eventHandler);
+    if (!earlyExitCode.isSuccess()) {
       return earlyExitCode;
     }
 
@@ -306,283 +312,26 @@ public abstract class BlazeOptionHandler {
       }
     } catch (OptionsParsingException e) {
       eventHandler.handle(Event.error(e.getMessage()));
-      return ExitCode.COMMAND_LINE_ERROR;
+      logger.atInfo().withCause(e).log("Error parsing options");
+      return createDetailedExitCode(
+          "Error parsing options" + e.getMessage(), Code.OPTIONS_PARSE_FAILURE);
     }
-    return ExitCode.SUCCESS;
+    return DetailedExitCode.success();
   }
 
   /**
-   * Implements the legacy way of expanding blazerc and config expansions.
-   *
-   * <p>--config options are expanded in a fixed point expansion at the end of the rc option block.
-   * Their expansion is defined in the rc file, and is triggered by the presence of a {@code
-   * --config=someConfigName} option somewhere in the user's options. The resulting option order is
-   * {@code <rc options> <config expansions> <command line options>}, where all of the config values
-   * mentioned are in the mid segment, regardless of whether they were defined in an rc file, on the
-   * command line, or in the expansion of other config values that were triggered earlier. If the
-   * same config value is provided twice (say, once on the command line and once in another config
-   * expansion) it will only be expanded once.
-   *
-   * <p>This behavior is relatively well-defined, but the final order of options is not intuitive.
-   * As a simple example, consider a user specified command line with --config=foo last. Most users
-   * expect the expansion of --config=foo to override earlier flags in their command line if
-   * necessary, but this is not the case. This is why we are phasing out this behavior. We will
-   * maintain the old behavior to avoid breaking users during a transition period.
+   * Expand the values of --config according to the definitions provided in the rc files and the
+   * applicable command.
    */
-  static final class FixPointConfigExpansionRcHandler extends BlazeOptionHandler {
-
-    private FixPointConfigExpansionRcHandler(
-        BlazeRuntime runtime,
-        BlazeWorkspace workspace,
-        BlazeCommand command,
-        Command commandAnnotation,
-        OptionsParser optionsParser,
-        InvocationPolicy invocationPolicy) {
-      super(runtime, workspace, command, commandAnnotation, optionsParser, invocationPolicy);
-    }
-
-    @Override
-    void expandConfigOptions(
-        EventHandler eventHandler, ListMultimap<String, RcChunkOfArgs> commandToRcArgs)
-        throws OptionsParsingException {
-      // Fix-point iteration until all configs are loaded.
-      List<String> configsLoaded = ImmutableList.of();
-      Set<String> unknownConfigs = new LinkedHashSet<>();
-      CommonCommandOptions commonOptions = optionsParser.getOptions(CommonCommandOptions.class);
-      while (!commonOptions.configs.equals(configsLoaded)) {
-        // Parse the configs we have not seen yet.
-        Set<String> missingConfigs = new LinkedHashSet<>(commonOptions.configs);
-        missingConfigs.removeAll(configsLoaded);
-        parseConfigOptionsForCommand(commandToRcArgs, missingConfigs, unknownConfigs);
-        // Refresh the list of config values we've processed to be the list of config values we had
-        // before the call to parseConfigOptionsForCommand.
-        configsLoaded = commonOptions.configs;
-        commonOptions = optionsParser.getOptions(CommonCommandOptions.class);
-      }
-      if (!unknownConfigs.isEmpty()) {
-        if (commonOptions.allowUndefinedConfigs) {
-          eventHandler.handle(
-              Event.warn(
-                  "Config values are not defined in any .rc file: "
-                      + Joiner.on(", ").join(unknownConfigs)));
-        } else {
-          throw new OptionsParsingException(
-              "Config values are not defined in any .rc file: "
-                  + Joiner.on(", ").join(unknownConfigs));
-        }
-      }
-    }
-
-    /**
-     * Go through the configs given and parse their expansion if a definition was found.
-     *
-     * @param configs the configs for which to parse options.
-     * @param unknownConfigs a collection that the method will populate with the config values in
-     *     {@code configs} that none of the .rc files had entries for.
-     */
-    private void parseConfigOptionsForCommand(
-        ListMultimap<String, RcChunkOfArgs> commandToRcArgs,
-        Collection<String> configs,
-        Collection<String> unknownConfigs)
-        throws OptionsParsingException {
-      Set<String> knownConfigs = new HashSet<>();
-      for (String commandToParse : getCommandNamesToParse(commandAnnotation)) {
-        for (String config : configs) {
-          String configDef = commandToParse + ":" + config;
-          for (RcChunkOfArgs rcArgs : commandToRcArgs.get(configDef)) {
-            // Track that we've found at least 1 definition for this config value.
-            knownConfigs.add(config);
-            rcfileNotes.add(
-                String.format(
-                    "Found applicable config definition %s in file %s: %s",
-                    configDef, rcArgs.rcFile, String.join(" ", rcArgs.args)));
-            optionsParser.parse(PriorityCategory.RC_FILE, rcArgs.rcFile, rcArgs.args);
-          }
-        }
-      }
-      if (configs.size() > knownConfigs.size()) {
-        configs
-            .stream()
-            .filter(Predicates.not(Predicates.in(knownConfigs)))
-            .forEachOrdered(unknownConfigs::add);
-      }
-    }
-  }
-
-  /**
-   * Expands the rc's options in {@code <rc options> <command line>} order, with config options
-   * expanded wherever the --config option was mentioned.
-   *
-   * <p>This requires a bit more care than the in-place expansion. We need to be wary of potential
-   * cycles in the definitions of config values, and should warn when a single --config expansion
-   * contradicts itself.
-   */
-  static final class InPlaceConfigExpansionRcHandler extends BlazeOptionHandler {
-
-    private InPlaceConfigExpansionRcHandler(
-        BlazeRuntime runtime,
-        BlazeWorkspace workspace,
-        BlazeCommand command,
-        Command commandAnnotation,
-        OptionsParser optionsParser,
-        InvocationPolicy invocationPolicy) {
-      super(runtime, workspace, command, commandAnnotation, optionsParser, invocationPolicy);
-    }
-
-    @Override
-    void expandConfigOptions(
-        EventHandler eventHandler, ListMultimap<String, RcChunkOfArgs> commandToRcArgs)
-        throws OptionsParsingException {
-
-      OptionValueDescription configValueDescription =
-          optionsParser.getOptionValueDescription("config");
-      if (configValueDescription == null
-          || configValueDescription.getCanonicalInstances() == null) {
-        // No --config values were set, we can avoid this whole thing.
-        return;
-      }
-
-      // Find the base set of configs. This does not include the config options that might be
-      // recursively incuded.
-      ImmutableList<ParsedOptionDescription> configInstances =
-          ImmutableList.copyOf(configValueDescription.getCanonicalInstances());
-
-      // Expand the configs that are mentioned in the input. Flatten these expansions before parsing
-      // them, to preserve order.
-      for (ParsedOptionDescription configInstance : configInstances) {
-        String configValueToExpand = (String) configInstance.getConvertedValue();
-        List<String> expansion = getExpansion(eventHandler, commandToRcArgs, configValueToExpand);
-        optionsParser.parseOptionsFixedAtSpecificPriority(
-            configInstance.getPriority(),
-            String.format("expanded from --%s", configValueToExpand),
-            expansion);
-      }
-
-      // At this point, we've expanded everything, identify duplicates, if any, to warn about
-      // re-application.
-      List<String> configs = optionsParser.getOptions(CommonCommandOptions.class).configs;
-      Set<String> configSet = new HashSet<>();
-      LinkedHashSet<String> duplicateConfigs = new LinkedHashSet<>();
-      for (String configValue : configs) {
-        if (!configSet.add(configValue)) {
-          duplicateConfigs.add(configValue);
-        }
-      }
-      if (!duplicateConfigs.isEmpty()) {
-        eventHandler.handle(Event.warn(
-            String.format(
-                "The following configs were expanded more than once: %s. For repeatable flags, "
-                    + "repeats are counted twice and may lead to unexpected behavior.",
-                duplicateConfigs)));
-      }
-    }
-
-    private List<String> getExpansion(
-        EventHandler eventHandler,
-        ListMultimap<String, RcChunkOfArgs> commandToRcArgs,
-        String configToExpand)
-        throws OptionsParsingException {
-      LinkedHashSet<String> configAncestorSet = new LinkedHashSet<>();
-      configAncestorSet.add(configToExpand);
-      List<String> longestChain = new ArrayList<>();
-      List<String> finalExpansion =
-          getExpansion(
-              eventHandler, commandToRcArgs, configAncestorSet, configToExpand, longestChain);
-
-      // In order to prevent warning about a long chain of 13 configs at the 10, 11, 12, and 13
-      // point, we identify the longest chain for this 'high-level' --config found and only warn
-      // about it once. This may mean we missed a fork where each branch was independently long
-      // enough to warn, but the single warning should convey the message reasonably.
-      if (longestChain.size() >= 10) {
-        eventHandler.handle(
-            Event.warn(
-                String.format(
-                    "There is a recursive chain of configs %s configs long: %s. This seems "
-                        + "excessive, and might be hiding errors.",
-                    longestChain.size(), longestChain)));
-      }
-      return finalExpansion;
-    }
-
-    /**
-     * @param configAncestorSet is the chain of configs that have led to this one getting expanded.
-     *     This should only contain the configs that expanded, recursively, to this one, and should
-     *     not contain "siblings," as it is used to detect cycles. {@code build:foo --config=bar},
-     *     {@code build:bar --config=foo}, is a cycle, detected because this list will be [foo, bar]
-     *     when we find another 'foo' to expand. However, {@code build:foo --config=bar}, {@code
-     *     build:foo --config=bar} is not a cycle just because bar is expanded twice, and the 1st
-     *     bar should not be in the parents list of the second bar.
-     * @param longestChain will be populated with the longest inheritance chain of configs.
-     */
-    private List<String> getExpansion(
-        EventHandler eventHandler,
-        ListMultimap<String, RcChunkOfArgs> commandToRcArgs,
-        LinkedHashSet<String> configAncestorSet,
-        String configToExpand,
-        List<String> longestChain)
-        throws OptionsParsingException {
-      List<String> expansion = new ArrayList<>();
-      boolean foundDefinition = false;
-      // The expansion order of rc files is first by command priority, and then in the order the
-      // rc files were read, respecting import statement placement.
-      for (String commandToParse : getCommandNamesToParse(commandAnnotation)) {
-        String configDef = commandToParse + ":" + configToExpand;
-        for (RcChunkOfArgs rcArgs : commandToRcArgs.get(configDef)) {
-          foundDefinition = true;
-          rcfileNotes.add(
-              String.format(
-                  "Found applicable config definition %s in file %s: %s",
-                  configDef, rcArgs.rcFile, String.join(" ", rcArgs.args)));
-
-          // For each arg in the rcARgs chunk, we first check if it is a config, and if so, expand
-          // it in place. We avoid cycles by tracking the parents of this config.
-          for (String arg : rcArgs.args) {
-            expansion.add(arg);
-            if (arg.length() >= 8 && arg.substring(0, 8).equals("--config")) {
-              // We have a config. For sanity, because we don't want to worry about formatting,
-              // we will only accept --config=value, and will not accept value on a following line.
-              int charOfConfigValue = arg.indexOf('=');
-              if (charOfConfigValue < 0) {
-                throw new OptionsParsingException("Config flag was provided without a value.");
-              }
-              String newConfigValue = arg.substring(charOfConfigValue + 1);
-              LinkedHashSet<String> extendedConfigAncestorSet =
-                  new LinkedHashSet<>(configAncestorSet);
-              if (!extendedConfigAncestorSet.add(newConfigValue)) {
-                throw new OptionsParsingException(
-                    String.format(
-                        "Config expansion has a cycle: config value %s expands to itself, "
-                            + "see inheritance chain %s",
-                        newConfigValue, extendedConfigAncestorSet));
-              }
-              if (extendedConfigAncestorSet.size() > longestChain.size()) {
-                longestChain.clear();
-                longestChain.addAll(extendedConfigAncestorSet);
-              }
-
-              expansion.addAll(
-                  getExpansion(
-                      eventHandler,
-                      commandToRcArgs,
-                      extendedConfigAncestorSet,
-                      newConfigValue,
-                      longestChain));
-            }
-          }
-        }
-      }
-
-      if (!foundDefinition) {
-        String warning = "Config value " + configToExpand + " is not defined in any .rc file";
-        CommonCommandOptions commonOptions = optionsParser.getOptions(CommonCommandOptions.class);
-        if (commonOptions.allowUndefinedConfigs) {
-          eventHandler.handle(Event.warn(warning));
-        } else {
-          throw new OptionsParsingException(warning);
-        }
-      }
-      return expansion;
-    }
+  void expandConfigOptions(
+      EventHandler eventHandler, ListMultimap<String, RcChunkOfArgs> commandToRcArgs)
+      throws OptionsParsingException {
+    ConfigExpander.expandConfigOptions(
+        eventHandler,
+        commandToRcArgs,
+        getCommandNamesToParse(commandAnnotation),
+        rcfileNotes::add,
+        optionsParser);
   }
 
   private static List<String> getCommandNamesToParse(Command commandAnnotation) {
@@ -612,43 +361,6 @@ public abstract class BlazeOptionHandler {
     }
 
     return message;
-  }
-
-  /**
-   * We receive the rc file arguments from the client in an order that maintains the location of
-   * "import" statements, expanding the imported rc file in place so that its args override previous
-   * args in the file and are overridden by later arguments. We cannot group the args by rc file for
-   * parsing, as we would lose this ordering, so we store them in these "chunks."
-   *
-   * <p>Each chunk comes from a single rc file, but the args stored here may not contain the entire
-   * file if its contents were interrupted by an import statement.
-   */
-  static class RcChunkOfArgs {
-    public RcChunkOfArgs(String rcFile, List<String> args) {
-      this.rcFile = rcFile;
-      this.args = args;
-    }
-
-    // The name of the rc file, usually a path.
-    String rcFile;
-    // The list of arguments specified in this rc "chunk". This is all for a single command (or
-    // command:config definition), as different commands will be grouped together, so this list of
-    // arguments can all be parsed as a continuous group.
-    List<String> args;
-
-    @Override
-    public boolean equals(Object o) {
-      if (o instanceof RcChunkOfArgs) {
-        RcChunkOfArgs other = (RcChunkOfArgs) o;
-        return rcFile.equals(other.rcFile) && args.equals(other.args);
-      }
-      return false;
-    }
-
-    @Override
-    public int hashCode() {
-      return rcFile.hashCode() + args.hashCode();
-    }
   }
 
   /**
@@ -718,5 +430,13 @@ public abstract class BlazeOptionHandler {
     }
 
     return commandToRcArgs;
+  }
+
+  private static DetailedExitCode createDetailedExitCode(String message, Code detailedCode) {
+    return DetailedExitCode.of(
+        FailureDetail.newBuilder()
+            .setMessage(message)
+            .setCommand(FailureDetails.Command.newBuilder().setCode(detailedCode))
+            .build());
   }
 }

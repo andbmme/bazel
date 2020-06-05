@@ -17,6 +17,7 @@ package com.google.devtools.build.lib.testutil;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.FailAction;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
@@ -34,7 +35,8 @@ import com.google.devtools.build.lib.packages.Rule;
 public class UnknownRuleConfiguredTarget implements RuleConfiguredTargetFactory {
 
   @Override
-  public ConfiguredTarget create(RuleContext context)  {
+  public ConfiguredTarget create(RuleContext context)
+      throws InterruptedException, RuleErrorException, ActionConflictException {
     // TODO(bazel-team): (2009) why isn't this an error?  It would stop the build more promptly...
     context.ruleWarning("cannot build " + context.getRule().getRuleClass() + " rules");
 
@@ -49,8 +51,11 @@ public class UnknownRuleConfiguredTarget implements RuleConfiguredTargetFactory 
     }
 
     Rule rule = context.getRule();
-    context.registerAction(new FailAction(context.getActionOwner(),
-        filesToBuild, "cannot build " + rule.getRuleClass() + " rules such as " + rule.getLabel()));
+    context.registerAction(
+        new FailAction(
+            context.getActionOwner(),
+            filesToBuild.toList(),
+            "cannot build " + rule.getRuleClass() + " rules such as " + rule.getLabel()));
     return new RuleConfiguredTargetBuilder(context)
         .setFilesToBuild(filesToBuild)
         .add(RunfilesProvider.class, RunfilesProvider.simple(Runfiles.EMPTY))

@@ -14,14 +14,16 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.devtools.build.lib.actions.Artifact;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.rules.cpp.CppCompilationContext.Builder;
+import com.google.devtools.build.lib.packages.AspectDescriptor;
+import com.google.devtools.build.lib.packages.StructImpl;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingMode;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 
 /**
  * Null-object like {@link CppSemantics} implementation. Only to be used in tests that don't depend
@@ -29,22 +31,15 @@ import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingM
  */
 @Immutable
 public final class MockCppSemantics implements CppSemantics {
-
-  public static final CppSemantics INSTANCE = new MockCppSemantics();
+  @AutoCodec public static final MockCppSemantics INSTANCE = new MockCppSemantics();
 
   private MockCppSemantics() {}
 
   @Override
   public void finalizeCompileActionBuilder(
-      RuleContext ruleContext, CppCompileActionBuilder actionBuilder) {}
-
-  @Override
-  public void setupCompilationContext(RuleContext ruleContext, Builder contextBuilder) {}
-
-  @Override
-  public NestedSet<Artifact> getAdditionalPrunableIncludes() {
-    return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-  }
+      BuildConfiguration configuration,
+      FeatureConfiguration featureConfiguration,
+      CppCompileActionBuilder actionBuilder) {}
 
   @Override
   public IncludeProcessing getIncludeProcessing() {
@@ -54,11 +49,6 @@ public final class MockCppSemantics implements CppSemantics {
   @Override
   public HeadersCheckingMode determineHeadersCheckingMode(RuleContext ruleContext) {
     return HeadersCheckingMode.LOOSE;
-  }
-
-  @Override
-  public boolean needsIncludeScanning(RuleContext ruleContext) {
-    return false;
   }
 
   @Override
@@ -73,4 +63,16 @@ public final class MockCppSemantics implements CppSemantics {
   public boolean needsIncludeValidation() {
     return true;
   }
+
+  @Override
+  public StructImpl getCcSharedLibraryInfo(TransitiveInfoCollection dep) {
+    return null;
+  }
+
+  @Override
+  public void validateLayeringCheckFeatures(
+      RuleContext ruleContext,
+      AspectDescriptor aspectDescriptor,
+      CcToolchainProvider ccToolchain,
+      ImmutableSet<String> unsupportedFeatures) {}
 }

@@ -17,16 +17,18 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.packages.BuildFileName;
 import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import com.google.devtools.build.lib.vfs.UnixGlob;
 import java.io.IOException;
@@ -45,7 +47,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * filesystem) idempotent.
  */
 public class PathPackageLocator implements Serializable {
-  private final ImmutableList<Path> pathEntries;
+  private static final String WORKSPACE_WILDCARD = "%workspace%";
+
+  private final ImmutableList<Root> pathEntries;
   // Transient because this is an injected value in Skyframe, and as such, its serialized
   // representation is used as a key. We want a change to output base not to invalidate things.
   private final transient Path outputBase;
@@ -54,7 +58,7 @@ public class PathPackageLocator implements Serializable {
 
   @VisibleForTesting
   public PathPackageLocator(
-      Path outputBase, List<Path> pathEntries, List<BuildFileName> buildFilesByPriority) {
+      Path outputBase, List<Root> pathEntries, List<BuildFileName> buildFilesByPriority) {
     this.outputBase = outputBase;
     this.pathEntries = ImmutableList.copyOf(pathEntries);
     this.buildFilesByPriority = ImmutableList.copyOf(buildFilesByPriority);
@@ -131,11 +135,8 @@ public class PathPackageLocator implements Serializable {
     return null;
   }
 
-
-  /**
-   * Returns an immutable ordered list of the directories on the package path.
-   */
-  public ImmutableList<Path> getPathEntries() {
+  /** Returns an immutable ordered list of the directories on the package path. */
+  public ImmutableList<Root> getPathEntries() {
     return pathEntries;
   }
 
@@ -144,6 +145,9 @@ public class PathPackageLocator implements Serializable {
     return "PathPackageLocator" + pathEntries;
   }
 
+  public static String maybeReplaceWorkspaceInString(String pathElement, Path workspace) {
+    return pathElement.replace(WORKSPACE_WILDCARD, workspace.getPathString());
+  }
   /**
    * A factory of PathPackageLocators from a list of path elements. Elements may contain
    * "%workspace%", indicating the workspace.
@@ -182,38 +186,18 @@ public class PathPackageLocator implements Serializable {
   }
 
   /**
-   * A factory of PathPackageLocators from a list of path elements. Elements may contain
-   * "%workspace%", indicating the workspace.
+   * A factory of PathPackageLocators from a list of path elements.
    *
    * @param outputBase the output base. Can be null if remote repositories are not in use.
-   * @param pathElements Each element must be an absolute path, relative path, or some string
-   *     "%workspace%" + relative, where relative is itself a relative path. The special symbol
-   *     "%workspace%" means to interpret the path relative to the nearest enclosing workspace.
-   *     Relative paths are interpreted relative to the client's working directory, which may be
-   *     below the workspace.
-   * @param eventHandler The eventHandler.
-   * @param workspace The nearest enclosing package root directory.
-   * @param clientWorkingDirectory The client's working directory.
+   * @param pathElements Each element must be a {@link Root} object.
    * @param buildFilesByPriority The ordered collection of {@link BuildFileName}s to check in each
    *     potential package directory.
    * @return a {@link PathPackageLocator} that uses the {@code outputBase} and {@code pathElements}
    *     provided.
    */
   public static PathPackageLocator createWithoutExistenceCheck(
-      Path outputBase,
-      List<String> pathElements,
-      EventHandler eventHandler,
-      Path workspace,
-      Path clientWorkingDirectory,
-      List<BuildFileName> buildFilesByPriority) {
-    return createInternal(
-        outputBase,
-        pathElements,
-        eventHandler,
-        workspace,
-        clientWorkingDirectory,
-        buildFilesByPriority,
-        false);
+      Path outputBase, List<Root> pathElements, List<BuildFileName> buildFilesByPriority) {
+    return new PathPackageLocator(outputBase, pathElements, buildFilesByPriority);
   }
 
   private static PathPackageLocator createInternal(
@@ -224,12 +208,11 @@ public class PathPackageLocator implements Serializable {
       Path clientWorkingDirectory,
       List<BuildFileName> buildFilesByPriority,
       boolean checkExistence) {
-    List<Path> resolvedPaths = new ArrayList<>();
-    final String workspaceWildcard = "%workspace%";
+    List<Root> resolvedPaths = new ArrayList<>();
 
     for (String pathElement : pathElements) {
       // Replace "%workspace%" with the path of the enclosing workspace directory.
-      pathElement = pathElement.replace(workspaceWildcard, workspace.getPathString());
+      pathElement = maybeReplaceWorkspaceInString(pathElement, workspace);
 
       PathFragment pathElementFragment = PathFragment.create(pathElement);
 
@@ -239,14 +222,18 @@ public class PathPackageLocator implements Serializable {
 
       if (!pathElementFragment.isAbsolute() && !clientWorkingDirectory.equals(workspace)) {
         eventHandler.handle(
-            Event.warn("The package path element '" + pathElementFragment + "' will be "
-                + "taken relative to your working directory. You may have intended "
-                + "to have the path taken relative to your workspace directory. "
-                + "If so, please use the '" + workspaceWildcard + "' wildcard."));
+            Event.warn(
+                "The package path element '"
+                    + pathElementFragment
+                    + "' will be taken relative to your working directory. You may have intended to"
+                    + " have the path taken relative to your workspace directory. If so, please use"
+                    + "the '"
+                    + WORKSPACE_WILDCARD
+                    + "' wildcard."));
       }
 
       if (!checkExistence || rootPath.exists()) {
-        resolvedPaths.add(rootPath);
+        resolvedPaths.add(Root.fromPath(rootPath));
       }
     }
 
@@ -263,16 +250,20 @@ public class PathPackageLocator implements Serializable {
     AtomicReference<? extends UnixGlob.FilesystemCalls> cache = UnixGlob.DEFAULT_SYSCALLS_REF;
     // TODO(bazel-team): correctness in the presence of changes to the location of the WORKSPACE
     // file.
-    return getFilePath(Label.WORKSPACE_FILE_NAME, cache);
+    Path workspaceFile = getFilePath(LabelConstants.WORKSPACE_DOT_BAZEL_FILE_NAME, cache);
+    if (workspaceFile != null) {
+      return workspaceFile;
+    }
+    return getFilePath(LabelConstants.WORKSPACE_FILE_NAME, cache);
   }
 
   private Path getFilePath(PathFragment suffix,
       AtomicReference<? extends UnixGlob.FilesystemCalls> cache) {
-    for (Path pathEntry : pathEntries) {
+    for (Root pathEntry : pathEntries) {
       Path buildFile = pathEntry.getRelative(suffix);
       try {
-        FileStatus stat = cache.get().statIfFound(buildFile, Symlinks.FOLLOW);
-        if (stat != null && stat.isFile()) {
+        Dirent.Type type = cache.get().getType(buildFile, Symlinks.FOLLOW);
+        if (type == Dirent.Type.FILE || type == Dirent.Type.UNKNOWN) {
           return buildFile;
         }
       } catch (IOException ignored) {

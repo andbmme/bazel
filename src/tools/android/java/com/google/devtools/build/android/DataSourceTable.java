@@ -14,7 +14,6 @@
 package com.google.devtools.build.android;
 
 import com.google.common.base.Function;
-import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.android.proto.SerializeFormat;
@@ -29,6 +28,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
+import java.util.stream.Collectors;
 
 /**
  * Tracks mappings from resource source paths (/foo/bar/res/values/colors.xml) to an ID for a more
@@ -36,13 +36,7 @@ import java.util.NavigableMap;
  */
 class DataSourceTable {
 
-  private static final Function<DataValue, DataSource> VALUE_TO_SOURCE =
-      new Function<DataValue, DataSource>() {
-        @Override
-        public DataSource apply(DataValue input) {
-          return input.source();
-        }
-      };
+  private static final Function<DataValue, DataSource> VALUE_TO_SOURCE = DataValue::source;
   private final Map<DataSource, Integer> sourceTable = new LinkedHashMap<>();
   private DataSource[] idToSource;
 
@@ -73,7 +67,10 @@ class DataSourceTable {
       throws IOException {
     int sourceNumber = 0;
     LinkedList<DataSource> sourceQueue =
-        new LinkedList<>(Collections2.transform(map.values(), VALUE_TO_SOURCE));
+        map.values()
+            .stream()
+            .map(VALUE_TO_SOURCE)
+            .collect(Collectors.toCollection(LinkedList::new));
     while (!sourceQueue.isEmpty()) {
       DataSource source = sourceQueue.pop();
       if (!sourceTable.containsKey(source)) {
@@ -109,10 +106,11 @@ class DataSourceTable {
   }
 
   /** Deserialize the source table and allow {@link #sourceFromId(int)} queries. */
-  public static DataSourceTable read(InputStream in, FileSystem currentFileSystem, Header header)
+  public static DataSourceTable read(
+      DependencyInfo dependencyInfo, InputStream in, FileSystem currentFileSystem, Header header)
       throws IOException {
     DataSourceTable sourceTable = new DataSourceTable();
-    sourceTable.readSourceInfo(in, currentFileSystem, header);
+    sourceTable.readSourceInfo(dependencyInfo, in, currentFileSystem, header);
     return sourceTable;
   }
 
@@ -121,14 +119,15 @@ class DataSourceTable {
     return idToSource[sourceId];
   }
 
-  private void readSourceInfo(InputStream in, FileSystem currentFileSystem, Header header)
+  private void readSourceInfo(
+      DependencyInfo dependencyInfo, InputStream in, FileSystem currentFileSystem, Header header)
       throws IOException {
     int numberOfSources = header.getSourceCount();
     // Read back the sources.
     idToSource = new DataSource[numberOfSources];
     for (int i = 0; i < numberOfSources; i++) {
       ProtoSource protoSource = SerializeFormat.ProtoSource.parseDelimitedFrom(in);
-      idToSource[i] = DataSource.from(protoSource, currentFileSystem);
+      idToSource[i] = DataSource.from(dependencyInfo, protoSource, currentFileSystem);
     }
   }
 }

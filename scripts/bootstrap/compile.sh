@@ -16,36 +16,39 @@
 
 # Script for building bazel from scratch without bazel
 
-PROTO_FILES=$(ls src/main/protobuf/*.proto src/main/java/com/google/devtools/build/lib/buildeventstream/proto/*.proto)
-LIBRARY_JARS=$(find third_party -name '*.jar' | grep -Fv /javac-9-dev-r3297-4.jar | grep -Fv /javac-9-dev-4023-3.jar | grep -Fv /javac7.jar | grep -Fv JavaBuilder | grep -Fv third_party/guava | grep -Fv third_party/guava | grep -ve third_party/grpc/grpc.*jar | tr "\n" " ")
-GRPC_JAVA_VERSION=1.7.0
-GRPC_LIBRARY_JARS=$(find third_party/grpc -name '*.jar' | grep -e .*${GRPC_JAVA_VERSION}.*jar | tr "\n" " ")
-GUAVA_VERSION=23.1
-GUAVA_JARS=$(find third_party/guava -name '*.jar' | grep -e .*${GUAVA_VERSION}.*jar | tr "\n" " ")
-LIBRARY_JARS="${LIBRARY_JARS} ${GRPC_LIBRARY_JARS} ${GUAVA_JARS}"
-
-# tl;dr - error_prone_core contains a copy of an older version of guava, so we
-# need to make sure the newer version of guava always appears first on the
-# classpath.
-#
-# Please read the comment in third_party/BUILD for more details.
-LIBRARY_JARS_ARRAY=($LIBRARY_JARS)
-for i in $(seq 0 $((${#LIBRARY_JARS_ARRAY[@]} - 1)))
-do
-  [[ "${LIBRARY_JARS_ARRAY[$i]}" =~ ^"third_party/error_prone/error_prone_core-".*\.jar$ ]] && ERROR_PRONE_INDEX=$i
-  [[ "${LIBRARY_JARS_ARRAY[$i]}" =~ ^"third_party/guava/guava-".*\.jar$ ]] && GUAVA_INDEX=$i
-done
-[ "${ERROR_PRONE_INDEX:+present}" = "present" ] || { echo "no error prone jar"; echo "${LIBRARY_JARS_ARRAY[@]}"; exit 1; }
-[ "${GUAVA_INDEX:+present}" = "present" ] || { echo "no guava jar"; exit 1; }
-if [ "$ERROR_PRONE_INDEX" -lt "$GUAVA_INDEX" ]; then
-  TEMP_FOR_SWAP="${LIBRARY_JARS_ARRAY[$ERROR_PRONE_INDEX]}"
-  LIBRARY_JARS_ARRAY[$ERROR_PRONE_INDEX]="${LIBRARY_JARS_ARRAY[$GUAVA_INDEX]}"
-  LIBRARY_JARS_ARRAY[$GUAVA_INDEX]="$TEMP_FOR_SWAP"
-  LIBRARY_JARS="${LIBRARY_JARS_ARRAY[*]}"
+if [ -d derived/jars ]; then
+  ADDITIONAL_JARS=derived/jars
+else
+  DISTRIBUTION=${DISTRIBUTION:-debian}
+  ADDITIONAL_JARS="$(grep -o '".*\.jar"' tools/distributions/${DISTRIBUTION}/${DISTRIBUTION}_java.BUILD | sed 's/"//g' | sed 's|^|/usr/share/java/|g')"
 fi
 
-DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}} third_party/java/dd_plist/java ${OUTPUT_DIR}/src)
-EXCLUDE_FILES="src/main/java/com/google/devtools/build/lib/server/GrpcServerImpl.java src/java_tools/buildjar/java/com/google/devtools/build/buildjar/javac/testing/*"
+# Parse third_party/googleapis/BUILD.bazel to find the proto files we need to compile from googleapis
+GOOGLE_API_PROTOS="$(grep -o '".*\.proto"' third_party/googleapis/BUILD.bazel | sed 's/"//g' | sed 's|^|third_party/googleapis/|g')"
+PROTO_FILES=$(find third_party/remoteapis ${GOOGLE_API_PROTOS} third_party/pprof src/main/protobuf src/main/java/com/google/devtools/build/lib/buildeventstream/proto src/main/java/com/google/devtools/build/skyframe src/main/java/com/google/devtools/build/lib/skyframe/proto src/main/java/com/google/devtools/build/lib/bazel/debug src/main/java/com/google/devtools/build/lib/starlarkdebug/proto -name "*.proto")
+LIBRARY_JARS=$(find $ADDITIONAL_JARS third_party -name '*.jar' | grep -Fv JavaBuilder | grep -Fv third_party/guava | grep -ve 'third_party/grpc/grpc.*jar' | tr "\n" " ")
+GRPC_JAVA_VERSION=1.20.0
+GRPC_LIBRARY_JARS=$(find third_party/grpc -name '*.jar' | grep -e ".*${GRPC_JAVA_VERSION}.*jar" | tr "\n" " ")
+# TODO(pcloudy): Remove this after upgrading gRPC to 1.26.0
+if [ -z "${GRPC_LIBRARY_JARS}" ]; then
+  GRPC_JAVA_VERSION=1.26.0
+  GRPC_LIBRARY_JARS=$(find third_party/grpc -name '*.jar' | grep -e ".*${GRPC_JAVA_VERSION}.*jar" | tr "\n" " ")
+fi
+GUAVA_VERSION=25.1
+GUAVA_JARS=$(find third_party/guava -name '*.jar' | grep -e ".*${GUAVA_VERSION}.*jar" | tr "\n" " ")
+LIBRARY_JARS="${LIBRARY_JARS} ${GRPC_LIBRARY_JARS} ${GUAVA_JARS}"
+
+DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java} tools/java/runfiles ${OUTPUT_DIR}/src)
+# Exclude source files that are not needed for Bazel itself, which avoids dependencies like truth.
+EXCLUDE_FILES="src/main/java/com/google/devtools/build/lib/server/GrpcServerImpl.java src/java_tools/buildjar/java/com/google/devtools/build/buildjar/javac/testing/* src/main/java/com/google/devtools/build/lib/collect/nestedset/NestedSetCodecTestUtils.java"
+# Exclude whole directories under the bazel src tree that bazel itself
+# doesn't depend on.
+EXCLUDE_DIRS="src/main/java/com/google/devtools/build/skydoc src/main/java/com/google/devtools/build/docgen tools/java/runfiles/testing src/main/java/com/google/devtools/build/lib/skyframe/serialization/testutils src/main/java/com/google/devtools/common/options/testing"
+for d in $EXCLUDE_DIRS ; do
+  for f in $(find $d -type f) ; do
+    EXCLUDE_FILES+=" $f"
+  done
+done
 
 mkdir -p "${OUTPUT_DIR}/classes"
 mkdir -p "${OUTPUT_DIR}/src"
@@ -72,6 +75,26 @@ get_minor_java_version
   fail "JDK version (${JAVAC_VERSION}) is lower than ${JAVA_VERSION}, please set \$JAVA_HOME."
 
 JAR="${JAVA_HOME}/bin/jar"
+
+# Ensures unzip won't create paths longer than 259 chars (MAX_PATH) on Windows.
+function check_unzip_wont_create_long_paths() {
+  output_path="$1"
+  jars="$2"
+  if [[ "${PLATFORM}" == "windows" ]]; then
+    log "Checking if helper classes can be extracted..."
+    max_path=$((259-${#output_path}))
+    # Do not quote $jars, we rely on it being split on spaces.
+    for f in $jars ; do
+      # Get the zip entries. Match lines with a date: they have the paths.
+      entries="$(unzip -l "$f" | grep '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}' | awk '{print $4}')"
+      for e in $entries; do
+        if [[ ${#e} -gt $max_path ]]; then
+          fail "Cannot unzip \"$f\" because the output path is too long: extracting file \"$e\" under \"$output_path\" would create a path longer than 259 characters. To fix this, set a shorter TMP value and try again. Example: export TMP=/c/tmp/bzl"
+        fi
+      done
+    done
+  fi
+}
 
 # Compiles java classes.
 function java_compilation() {
@@ -114,9 +137,16 @@ function java_compilation() {
     cat "$paramfile" >&2
   fi
 
+  check_unzip_wont_create_long_paths "${output}/classes" "$library_jars"
+
+  # Use BAZEL_JAVAC_OPTS to pass additional arguments to javac, e.g.,
+  # export BAZEL_JAVAC_OPTS="-J-Xmx2g -J-Xms200m"
+  # Useful if your system chooses too small of a max heap for javac.
+  # We intentionally rely on shell word splitting to allow multiple
+  # additional arguments to be passed to javac.
   run "${JAVAC}" -classpath "${classpath}" -sourcepath "${sourcepath}" \
       -d "${output}/classes" -source "$JAVA_VERSION" -target "$JAVA_VERSION" \
-      -encoding UTF-8 "@${paramfile}"
+      -encoding UTF-8 ${BAZEL_JAVAC_OPTS} "@${paramfile}"
 
   log "Extracting helper classes for $name..."
   for f in ${library_jars} ; do
@@ -193,10 +223,23 @@ if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
                 -I. \
                 -Isrc/main/protobuf/ \
                 -Isrc/main/java/com/google/devtools/build/lib/buildeventstream/proto/ \
+                -Isrc/main/java/com/google/devtools/build/lib/skyframe/proto/ \
+                -Isrc/main/java/com/google/devtools/build/skyframe/ \
+                -Isrc/main/java/com/google/devtools/build/lib/bazel/debug/ \
+                -Isrc/main/java/com/google/devtools/build/lib/starlarkdebug/proto/ \
+                -Ithird_party/remoteapis/ \
+                -Ithird_party/googleapis/ \
+                -Ithird_party/pprof/ \
                 --java_out=${OUTPUT_DIR}/src \
                 --plugin=protoc-gen-grpc="${GRPC_JAVA_PLUGIN-}" \
                 --grpc_out=${OUTPUT_DIR}/src "$f"
         done
+
+        # Recreate the derived directory
+        mkdir -p derived/src/java/build
+        mkdir -p derived/src/java/com
+        link_children ${OUTPUT_DIR}/src build derived/src/java
+        link_children ${OUTPUT_DIR}/src com derived/src/java
     fi
 
   java_compilation "Bazel Java" "$DIRS" "$EXCLUDE_FILES" "$LIBRARY_JARS" "${OUTPUT_DIR}"
@@ -207,28 +250,122 @@ if [ -z "${BAZEL_SKIP_JAVA_COMPILATION}" ]; then
     cp src/main/java/$i ${OUTPUT_DIR}/classes/$i
   done
 
+  # Create the bazel_tools repository.
+  BAZEL_TOOLS_REPO=${OUTPUT_DIR}/embedded_tools
+  mkdir -p ${BAZEL_TOOLS_REPO}
+  cat <<EOF >${BAZEL_TOOLS_REPO}/WORKSPACE
+workspace(name = 'bazel_tools')
+EOF
+
+  mkdir -p "${BAZEL_TOOLS_REPO}/src/conditions"
+  link_file "${PWD}/src/conditions/BUILD.tools" \
+      "${BAZEL_TOOLS_REPO}/src/conditions/BUILD"
+  link_children "${PWD}" src/conditions "${BAZEL_TOOLS_REPO}"
+  link_children "${PWD}" src "${BAZEL_TOOLS_REPO}"
+
+  link_dir ${PWD}/third_party ${BAZEL_TOOLS_REPO}/third_party
+
+  # Create @bazel_tools//tools/cpp/runfiles
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/cpp/runfiles
+  link_file "${PWD}/tools/cpp/runfiles/runfiles_src.h" \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/runfiles.h"
+  # Transform //tools/cpp/runfiles:runfiles_src.cc to
+  # @bazel_tools//tools/cpp/runfiles:runfiles.cc
+  # Keep this transformation logic in sync with the
+  # //tools/cpp/runfiles:srcs_for_embedded_tools genrule.
+  sed 's|^#include.*/runfiles_src.h.*|#include \"tools/cpp/runfiles/runfiles.h\"|' \
+      "${PWD}/tools/cpp/runfiles/runfiles_src.cc" > \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/runfiles.cc"
+  link_file "${PWD}/tools/cpp/runfiles/BUILD.tools" \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/BUILD"
+
+  # Create @bazel_tools//tools/sh
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/sh
+  link_file "${PWD}/tools/sh/sh_configure.bzl" "${BAZEL_TOOLS_REPO}/tools/sh/sh_configure.bzl"
+  link_file "${PWD}/tools/sh/sh_toolchain.bzl" "${BAZEL_TOOLS_REPO}/tools/sh/sh_toolchain.bzl"
+  link_file "${PWD}/tools/sh/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/sh/BUILD"
+
+  # Create @bazel_tools//tools/java/runfiles
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/java/runfiles
+  link_file "${PWD}/tools/java/runfiles/Runfiles.java" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/Runfiles.java"
+  link_file "${PWD}/tools/java/runfiles/Util.java" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/Util.java"
+  link_file "${PWD}/tools/java/runfiles/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/BUILD"
+
+  # Create @bazel_tools/tools/python/BUILD
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/python
+  link_file "${PWD}/tools/python/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/python/BUILD"
+
+  # Create the rest of @bazel_tools//tools/...
+  link_children "${PWD}" tools/cpp "${BAZEL_TOOLS_REPO}"
+  mv -f ${BAZEL_TOOLS_REPO}/tools/cpp/BUILD.tools ${BAZEL_TOOLS_REPO}/tools/cpp/BUILD
+  link_children "${PWD}" tools/python "${BAZEL_TOOLS_REPO}"
+  link_children "${PWD}" tools "${BAZEL_TOOLS_REPO}"
+
+  # Set up @bazel_tools//platforms properly
+  mkdir -p ${BAZEL_TOOLS_REPO}/platforms
+  cp tools/platforms/BUILD.tools ${BAZEL_TOOLS_REPO}/platforms/BUILD
+
   # Overwrite tools.WORKSPACE, this is only for the bootstrap binary
   chmod u+w "${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE"
   cat <<EOF >${OUTPUT_DIR}/classes/com/google/devtools/build/lib/bazel/rules/tools.WORKSPACE
-local_repository(name = 'bazel_tools', path = __workspace_dir__)
+local_repository(name = 'bazel_tools', path = '${BAZEL_TOOLS_REPO}')
 bind(name = "cc_toolchain", actual = "@bazel_tools//tools/cpp:default-toolchain")
+local_config_platform(name = 'local_config_platform')
 EOF
 
-  create_deploy_jar "libblaze" "com.google.devtools.build.lib.bazel.BazelMain" \
+  create_deploy_jar "libblaze" "com.google.devtools.build.lib.bazel.Bazel" \
       ${OUTPUT_DIR}
 fi
 
 log "Creating Bazel install base..."
 ARCHIVE_DIR=${OUTPUT_DIR}/archive
-mkdir -p ${ARCHIVE_DIR}/_embedded_binaries
+mkdir -p ${ARCHIVE_DIR}
 
-# Dummy build-runfiles
-cat <<'EOF' >${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
+# Prepare @platforms local repository
+link_dir ${PWD}/platforms ${ARCHIVE_DIR}/platforms
+
+# Dummy build-runfiles (we can't compile C++ yet, so we can't have the real one)
+if [ "${PLATFORM}" = "windows" ]; then
+  # We don't rely on runfiles trees on Windows
+  cat <<'EOF' >${ARCHIVE_DIR}/build-runfiles${EXE_EXT}
 #!/bin/sh
 mkdir -p $2
 cp $1 $2/MANIFEST
 EOF
-chmod 0755 ${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
+else
+  cat <<'EOF' >${ARCHIVE_DIR}/build-runfiles${EXE_EXT}
+#!/bin/sh
+# This is bash implementation of build-runfiles: reads space-separated paths
+# from each line in the file in $1, then creates a symlink under $2 for the
+# first element of the pair that points to the second element of the pair.
+#
+# bash is a terrible tool for this job, but in this case, that's the only one
+# we have (we could hand-compile a little .jar file like we hand-compile the
+# bootstrap version of Bazel, but we'd still need a shell wrapper around it, so
+# it's not clear whether that would be a win over a few lines of Lovecraftian
+# code)
+MANIFEST="$1"
+TREE="$2"
+
+rm -fr "$TREE"
+mkdir -p "$TREE"
+
+# Read the lines in $MANIFEST. the usual "for VAR in $(cat FILE)" idiom won't do
+# because the lines in FILE contain spaces.
+while read LINE; do
+  # Split each line into two parts on the first space
+  SYMLINK_PATH="${LINE%% *}"
+  TARGET_PATH="${LINE#* }"
+  ABSOLUTE_SYMLINK_PATH="$TREE/$SYMLINK_PATH"
+  mkdir -p "$(dirname $ABSOLUTE_SYMLINK_PATH)"
+  ln -s "$TARGET_PATH" "$ABSOLUTE_SYMLINK_PATH"
+done < "$MANIFEST"
+
+cp "$MANIFEST" "$TREE/MANIFEST"
+EOF
+fi
+
+chmod 0755 ${ARCHIVE_DIR}/build-runfiles${EXE_EXT}
 
 function build_jni() {
   local -r output_dir=$1
@@ -262,42 +399,17 @@ function build_jni() {
   fi
 }
 
-# Computes the value of the bazel.windows_unix_root JVM flag.
-# Prints the JVM flag verbatim on Windows, ready to be passed to the JVM.
-# Prints an empty string on other platforms.
-function windows_unix_root_jvm_flag() {
-  if [ "${PLATFORM}" != "windows" ]; then
-    echo ""
-    return
-  fi
-  [ -n "${BAZEL_SH}" ] || fail "\$BAZEL_SH is not defined"
-  if [ "$(basename "$BAZEL_SH")" = "bash.exe" ]; then
-    local result="$(dirname "$BAZEL_SH")"
-    if [ "$(basename "$result")" = "bin" ]; then
-      result="$(dirname "$result")"
-      if [ "$(basename "$result")" = "usr" ]; then
-        result="$(dirname "$result")"
-      fi
-      # Print the JVM flag. Replace backslashes with forward slashes so the JVM
-      # and the shell won't believe that backslashes are escaping characters.
-      echo "-Dbazel.windows_unix_root=${result//\\//}"
-      return
-    fi
-  fi
-  fail "\$BAZEL_SH=${BAZEL_SH}, must end with \"bin\\bash.exe\" or \"usr\\bin\\bash.exe\""
-}
+build_jni "${ARCHIVE_DIR}"
 
-build_jni "${ARCHIVE_DIR}/_embedded_binaries"
-
-cp src/main/tools/jdk.BUILD ${ARCHIVE_DIR}/_embedded_binaries/jdk.BUILD
+cp src/main/tools/jdk.BUILD ${ARCHIVE_DIR}/jdk.BUILD
 cp $OUTPUT_DIR/libblaze.jar ${ARCHIVE_DIR}
 
 # TODO(b/28965185): Remove when xcode-locator is no longer required in embedded_binaries.
 log "Compiling xcode-locator..."
 if [[ $PLATFORM == "darwin" ]]; then
-  run /usr/bin/xcrun clang -fobjc-arc -framework CoreServices -framework Foundation -o ${ARCHIVE_DIR}/_embedded_binaries/xcode-locator tools/osx/xcode_locator.m
+  run /usr/bin/xcrun --sdk macosx clang -mmacosx-version-min=10.9 -fobjc-arc -framework CoreServices -framework Foundation -o ${ARCHIVE_DIR}/xcode-locator tools/osx/xcode_locator.m
 else
-  cp tools/osx/xcode_locator_stub.sh ${ARCHIVE_DIR}/_embedded_binaries/xcode-locator
+  cp tools/osx/xcode_locator_stub.sh ${ARCHIVE_DIR}/xcode-locator
 fi
 
 function get_cwd() {
@@ -315,7 +427,7 @@ function run_bazel_jar() {
   local env_vars="$(awk 'END { for (name in ENVIRON) { if(name != "_" && name ~ /^[A-Za-z0-9_]*$/) print name; } }' </dev/null)"
   for varname in $env_vars; do
     eval value=\$$varname
-    if [ "${PLATFORM}" = "windows" ] && echo "$varname" | grep -q -i "^\(path\|tmp\|temp\|tempdir\|systemroot\)$" ; then
+    if [ "${PLATFORM}" = "windows" ] && echo "$varname" | grep -q -i "^\(path\|tmp\|temp\|tempdir\|systemroot\|systemdrive\)$" ; then
       varname="$(echo "$varname" | tr [:lower:] [:upper:])"
     fi
     if [ "${value}" ]; then
@@ -326,14 +438,16 @@ function run_bazel_jar() {
   "${JAVA_HOME}/bin/java" \
       -XX:+HeapDumpOnOutOfMemoryError -Xverify:none -Dfile.encoding=ISO-8859-1 \
       -XX:HeapDumpPath=${OUTPUT_DIR} \
-      $(windows_unix_root_jvm_flag) \
       -Djava.util.logging.config.file=${OUTPUT_DIR}/javalog.properties \
       ${JNI_FLAGS} \
       -jar ${ARCHIVE_DIR}/libblaze.jar \
       --batch \
       --install_base=${ARCHIVE_DIR} \
       --output_base=${OUTPUT_DIR}/out \
+      --failure_detail_out=${OUTPUT_DIR}/failure_detail.rawproto \
+      --output_user_root=${OUTPUT_DIR}/user_root \
       --install_md5= \
+      --default_system_javabase="${JAVA_HOME}" \
       --workspace_directory="$(get_cwd)" \
       --nofatal_event_bus_exceptions \
       ${BAZEL_DIR_STARTUP_OPTIONS} \

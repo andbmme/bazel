@@ -13,7 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
-import static com.google.devtools.build.lib.syntax.SkylarkType.castMap;
 import static java.util.Collections.singleton;
 import static java.util.stream.Collectors.toCollection;
 
@@ -27,12 +26,14 @@ import com.google.common.collect.Sets;
 import com.google.common.escape.Escaper;
 import com.google.common.escape.Escapers;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.syntax.ClassObject;
+import com.google.devtools.build.lib.syntax.Dict;
 import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Runtime;
-import com.google.devtools.build.lib.syntax.SkylarkCallbackFunction;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.lib.syntax.Starlark;
 import com.google.devtools.build.lib.util.StringUtil;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -60,38 +61,38 @@ import java.util.Set;
 public abstract class ImplicitOutputsFunction {
 
   /**
-   * Implicit output functions for Skylark supporting key value access of expanded implicit outputs.
+   * Implicit output functions for Starlark supporting key value access of expanded implicit
+   * outputs.
    */
-  public abstract static class SkylarkImplicitOutputsFunction extends ImplicitOutputsFunction {
+  public abstract static class StarlarkImplicitOutputsFunction extends ImplicitOutputsFunction {
 
-    public abstract ImmutableMap<String, String> calculateOutputs(AttributeMap map)
-        throws EvalException, InterruptedException;
+    public abstract ImmutableMap<String, String> calculateOutputs(
+        EventHandler eventHandler, AttributeMap map) throws EvalException, InterruptedException;
 
     @Override
-    public Iterable<String> getImplicitOutputs(AttributeMap map)
+    public Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap map)
         throws EvalException, InterruptedException {
-      return calculateOutputs(map).values();
+      return calculateOutputs(eventHandler, map).values();
     }
   }
 
-  /**
-   * Implicit output functions executing Skylark code.
-   */
-  public static final class SkylarkImplicitOutputsFunctionWithCallback
-      extends SkylarkImplicitOutputsFunction {
+  /** Implicit output functions executing Starlark code. */
+  @AutoCodec
+  public static final class StarlarkImplicitOutputsFunctionWithCallback
+      extends StarlarkImplicitOutputsFunction {
 
-    private final SkylarkCallbackFunction callback;
+    private final StarlarkCallbackHelper callback;
     private final Location loc;
 
-    public SkylarkImplicitOutputsFunctionWithCallback(
-        SkylarkCallbackFunction callback, Location loc) {
+    public StarlarkImplicitOutputsFunctionWithCallback(
+        StarlarkCallbackHelper callback, Location loc) {
       this.callback = callback;
       this.loc = loc;
     }
 
     @Override
-    public ImmutableMap<String, String> calculateOutputs(AttributeMap map)
-        throws EvalException, InterruptedException {
+    public ImmutableMap<String, String> calculateOutputs(
+        EventHandler eventHandler, AttributeMap map) throws EvalException, InterruptedException {
       Map<String, Object> attrValues = new HashMap<>();
       for (String attrName : map.getAttributeNames()) {
         Type<?> attrType = map.getAttributeType(attrName);
@@ -99,21 +100,28 @@ public abstract class ImplicitOutputsFunction {
         // since we don't yet have a build configuration.
         if (!map.isConfigurable(attrName)) {
           Object value = map.get(attrName, attrType);
-          attrValues.put(attrName, value == null ? Runtime.NONE : value);
+          attrValues.put(
+              Attribute.getStarlarkName(attrName), Starlark.fromJava(value, /*mutability=*/ null));
         }
       }
       ClassObject attrs =
-          NativeProvider.STRUCT.create(
+          StructProvider.STRUCT.create(
               attrValues,
               "Attribute '%s' either doesn't exist "
                   + "or uses a select() (i.e. could have multiple values)");
       try {
         ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
-        for (Map.Entry<String, String> entry : castMap(callback.call(attrs),
-            String.class, String.class, "implicit outputs function return value").entrySet()) {
+        for (Map.Entry<String, String> entry :
+            Dict.cast(
+                    callback.call(eventHandler, attrs),
+                    String.class,
+                    String.class,
+                    "implicit outputs function return value")
+                .entrySet()) {
 
           // Returns empty string only in case of invalid templates
-          Iterable<String> substitutions = fromTemplates(entry.getValue()).getImplicitOutputs(map);
+          Iterable<String> substitutions =
+              fromTemplates(entry.getValue()).getImplicitOutputs(eventHandler, map);
           if (Iterables.isEmpty(substitutions)) {
             throw new EvalException(
                 loc,
@@ -131,28 +139,27 @@ public abstract class ImplicitOutputsFunction {
     }
   }
 
-  /**
-   * Implicit output functions using a simple an output map.
-   */
-  public static final class SkylarkImplicitOutputsFunctionWithMap
-      extends SkylarkImplicitOutputsFunction {
+  /** Implicit output functions using a simple an output map. */
+  @AutoCodec
+  public static final class StarlarkImplicitOutputsFunctionWithMap
+      extends StarlarkImplicitOutputsFunction {
 
     private final ImmutableMap<String, String> outputMap;
 
-    public SkylarkImplicitOutputsFunctionWithMap(ImmutableMap<String, String> outputMap) {
+    public StarlarkImplicitOutputsFunctionWithMap(ImmutableMap<String, String> outputMap) {
       this.outputMap = outputMap;
     }
 
     @Override
-    public ImmutableMap<String, String> calculateOutputs(AttributeMap map)
-        throws EvalException, InterruptedException {
+    public ImmutableMap<String, String> calculateOutputs(
+        EventHandler eventHandler, AttributeMap map) throws EvalException, InterruptedException {
 
       ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
       for (Map.Entry<String, String> entry : outputMap.entrySet()) {
         // Empty iff invalid placeholders present.
         ImplicitOutputsFunction outputsFunction =
             fromUnsafeTemplates(ImmutableList.of(entry.getValue()));
-        Iterable<String> substitutions = outputsFunction.getImplicitOutputs(map);
+        Iterable<String> substitutions = outputsFunction.getImplicitOutputs(eventHandler, map);
         if (Iterables.isEmpty(substitutions)) {
           throw new EvalException(
               null,
@@ -173,7 +180,8 @@ public abstract class ImplicitOutputsFunction {
    */
   public abstract static class SafeImplicitOutputsFunction extends ImplicitOutputsFunction {
     @Override
-    public abstract Iterable<String> getImplicitOutputs(AttributeMap map);
+    public abstract Iterable<String> getImplicitOutputs(
+        EventHandler eventHandler, AttributeMap map);
   }
 
   /**
@@ -203,20 +211,21 @@ public abstract class ImplicitOutputsFunction {
   private static final Escaper PERCENT_ESCAPER = Escapers.builder().addEscape('%', "%%").build();
 
   /**
-   * Given a newly-constructed Rule instance (with attributes populated),
-   * returns the list of output files that this rule produces implicitly.
+   * Given a newly-constructed Rule instance (with attributes populated), returns the list of output
+   * files that this rule produces implicitly.
    */
-  public abstract Iterable<String> getImplicitOutputs(AttributeMap rule)
+  public abstract Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap rule)
       throws EvalException, InterruptedException;
 
-  /**
-   * The implicit output function that returns no files.
-   */
-  public static final SafeImplicitOutputsFunction NONE = new SafeImplicitOutputsFunction() {
-      @Override public Iterable<String> getImplicitOutputs(AttributeMap rule) {
-        return Collections.emptyList();
-      }
-    };
+  /** The implicit output function that returns no files. */
+  @AutoCodec
+  public static final SafeImplicitOutputsFunction NONE =
+      new SafeImplicitOutputsFunction() {
+        @Override
+        public Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap rule) {
+          return Collections.emptyList();
+        }
+      };
 
   /**
    * A convenience wrapper for {@link #fromTemplates(Iterable)}.
@@ -237,10 +246,23 @@ public abstract class ImplicitOutputsFunction {
    *     %{} substrings exist, the cross-product of them is generated.
    */
   public static SafeImplicitOutputsFunction fromTemplates(final Iterable<String> templates) {
-    return new SafeImplicitOutputsFunction() {
-      // TODO(bazel-team): parse the templates already here
-      @Override
-      public Iterable<String> getImplicitOutputs(AttributeMap rule) {
+    return new TemplateImplicitOutputsFunction(templates);
+  }
+
+  @VisibleForSerialization
+  @AutoCodec
+  static class TemplateImplicitOutputsFunction extends SafeImplicitOutputsFunction {
+
+    private final Iterable<String> templates;
+
+    @VisibleForSerialization
+    TemplateImplicitOutputsFunction(Iterable<String> templates) {
+      this.templates = templates;
+    }
+
+    // TODO(bazel-team): parse the templates already here
+    @Override
+    public Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap rule) {
         ImmutableSet.Builder<String> result = new ImmutableSet.Builder<>();
         for (String template : templates) {
           List<String> substitutions = substitutePlaceholderIntoTemplate(template, rule);
@@ -257,27 +279,23 @@ public abstract class ImplicitOutputsFunction {
       public String toString() {
         return StringUtil.joinEnglishList(templates);
       }
-    };
   }
 
-  /**
-   * The implicit output function that generates files based on a set of template substitutions
-   * using rule attribute values.
-   *
-   * <p>This is not, actually, safe, and any use of configurable attributes will cause a hard
-   * failure.
-   *
-   * @param templates The templates used to construct the name of the implicit output file target.
-   *     The substring "%{foo}" will be replaced by the value of the attribute "foo". If multiple
-   *     %{} substrings exist, the cross-product of them is generated.
-   */
-  // It would be nice to unify this with fromTemplates above, but that's not possible because
-  // substitutePlaceholderIntoUnsafeTemplate can throw an exception.
-  public static ImplicitOutputsFunction fromUnsafeTemplates(Iterable<String> templates) {
-    return new ImplicitOutputsFunction() {
-      // TODO(bazel-team): parse the templates already here
-      @Override
-      public Iterable<String> getImplicitOutputs(AttributeMap rule) throws EvalException {
+  @AutoCodec
+  @VisibleForSerialization
+  static class UnsafeTemplatesImplicitOutputsFunction extends ImplicitOutputsFunction {
+
+    private final Iterable<String> templates;
+
+    @VisibleForSerialization
+    UnsafeTemplatesImplicitOutputsFunction(Iterable<String> templates) {
+      this.templates = templates;
+    }
+
+    // TODO(bazel-team): parse the templates already here
+    @Override
+    public Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap rule)
+        throws EvalException {
         ImmutableSet.Builder<String> result = new ImmutableSet.Builder<>();
         for (String template : templates) {
           List<String> substitutions =
@@ -296,13 +314,55 @@ public abstract class ImplicitOutputsFunction {
       public String toString() {
         return StringUtil.joinEnglishList(templates);
       }
-    };
+  }
+
+  /**
+   * The implicit output function that generates files based on a set of template substitutions
+   * using rule attribute values.
+   *
+   * <p>This is not, actually, safe, and any use of configurable attributes will cause a hard
+   * failure.
+   *
+   * @param templates The templates used to construct the name of the implicit output file target.
+   *     The substring "%{foo}" will be replaced by the value of the attribute "foo". If multiple
+   *     %{} substrings exist, the cross-product of them is generated.
+   */
+  // It would be nice to unify this with fromTemplates above, but that's not possible because
+  // substitutePlaceholderIntoUnsafeTemplate can throw an exception.
+  public static ImplicitOutputsFunction fromUnsafeTemplates(Iterable<String> templates) {
+    return new UnsafeTemplatesImplicitOutputsFunction(templates);
   }
 
   /** A convenience wrapper for {@link #fromFunctions(Iterable)}. */
   public static SafeImplicitOutputsFunction fromFunctions(
       SafeImplicitOutputsFunction... functions) {
     return fromFunctions(Arrays.asList(functions));
+  }
+
+  @AutoCodec
+  @VisibleForSerialization
+  static class FunctionCombinationImplicitOutputsFunction extends SafeImplicitOutputsFunction {
+
+    private final Iterable<SafeImplicitOutputsFunction> functions;
+
+    @VisibleForSerialization
+    FunctionCombinationImplicitOutputsFunction(Iterable<SafeImplicitOutputsFunction> functions) {
+      this.functions = functions;
+    }
+
+    @Override
+    public Iterable<String> getImplicitOutputs(EventHandler eventHandler, AttributeMap rule) {
+      Collection<String> result = new LinkedHashSet<>();
+      for (SafeImplicitOutputsFunction function : functions) {
+        Iterables.addAll(result, function.getImplicitOutputs(eventHandler, rule));
+      }
+      return result;
+    }
+
+    @Override
+    public String toString() {
+      return StringUtil.joinEnglishList(functions);
+    }
   }
 
   /**
@@ -317,20 +377,7 @@ public abstract class ImplicitOutputsFunction {
    */
   public static SafeImplicitOutputsFunction fromFunctions(
       final Iterable<SafeImplicitOutputsFunction> functions) {
-    return new SafeImplicitOutputsFunction() {
-      @Override
-      public Iterable<String> getImplicitOutputs(AttributeMap rule) {
-        Collection<String> result = new LinkedHashSet<>();
-        for (SafeImplicitOutputsFunction function : functions) {
-          Iterables.addAll(result, function.getImplicitOutputs(rule));
-        }
-        return result;
-      }
-      @Override
-      public String toString() {
-        return StringUtil.joinEnglishList(functions);
-      }
-    };
+    return new FunctionCombinationImplicitOutputsFunction(functions);
   }
 
   /**
@@ -440,12 +487,10 @@ public abstract class ImplicitOutputsFunction {
       List<String> placeholders = Lists.<String>newArrayList();
       String formatStr = createPlaceholderSubstitutionFormatString(rawTemplate, placeholders);
       if (placeholders.isEmpty()) {
-        return new AutoValue_ImplicitOutputsFunction_ParsedTemplate(
-            rawTemplate, rawTemplate, ImmutableList.of());
+        placeholders = ImmutableList.of();
       }
-
       return new AutoValue_ImplicitOutputsFunction_ParsedTemplate(
-          rawTemplate, formatStr, placeholders);
+            rawTemplate, formatStr, placeholders);
     }
 
     ImmutableList<String> substituteAttributes(
@@ -499,7 +544,7 @@ public abstract class ImplicitOutputsFunction {
     for (String placeholder : parsedTemplate.attributeNames()) {
       if (rule.isConfigurable(placeholder)) {
         throw new EvalException(
-            rule.getAttributeLocation(placeholder),
+            /*location=*/ null,
             String.format(
                 "Attribute %s is configurable and cannot be used in outputs", placeholder));
       }

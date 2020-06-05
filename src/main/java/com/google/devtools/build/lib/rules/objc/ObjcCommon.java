@@ -14,42 +14,23 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
-import static com.google.devtools.build.lib.packages.BuildType.LABEL;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.ASSET_CATALOG;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.BUNDLE_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.CC_LIBRARY;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DEBUG_SYMBOLS;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DEBUG_SYMBOLS_PLIST;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DEFINE;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DYNAMIC_FRAMEWORK_DIR;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.DYNAMIC_FRAMEWORK_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FLAG;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.FORCE_LOAD_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_CPP;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.Flag.USES_OBJC;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.HEADER;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IMPORTED_LIBRARY;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.INCLUDE;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.INCLUDE_SYSTEM;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.IQUOTE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.J2OBJC_LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LIBRARY;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LINKED_BINARY;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LINKMAP_FILE;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.LINKOPT;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.MODULE_MAP;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_DYLIB;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SDK_FRAMEWORK;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.SOURCE;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.STATIC_FRAMEWORK_FILE;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.STORYBOARD;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.STRINGS;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.TOP_LEVEL_MODULE_MAP;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.UMBRELLA_HEADER;
 import static com.google.devtools.build.lib.rules.objc.ObjcProvider.WEAK_SDK_FRAMEWORK;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCASSETS_DIR;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XCDATAMODEL;
-import static com.google.devtools.build.lib.rules.objc.ObjcProvider.XIB;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
@@ -57,24 +38,26 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Streams;
 import com.google.common.collect.UnmodifiableIterator;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.Info;
-import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.rules.apple.AppleToolchain;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParams;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParamsInfo;
-import com.google.devtools.build.lib.rules.cpp.CppCompilationContext;
-import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
+import com.google.devtools.build.lib.rules.cpp.CcCompilationContext;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.CcLinkingContext;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.util.FileType;
-import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.HashSet;
 import java.util.List;
@@ -90,7 +73,7 @@ import java.util.Set;
 public final class ObjcCommon {
 
   /** Filters fileset artifacts out of a group of artifacts. */
-  public static Iterable<Artifact> filterFileset(Iterable<Artifact> artifacts) {
+  public static ImmutableList<Artifact> filterFileset(Iterable<Artifact> artifacts) {
     ImmutableList.Builder<Artifact> inputs = ImmutableList.<Artifact>builder();
     for (Artifact artifact : artifacts) {
       if (!artifact.isFileset()) {
@@ -101,79 +84,47 @@ public final class ObjcCommon {
   }
 
   /**
-   * Provides a way to access attributes that are common to all resources rules.
+   * Indicates the purpose the ObjcCommon is used for.
+   *
+   * <p>The purpose determines whether ObjcCommon.build() will build an ObjcProvider or an
+   * ObjcProvider.Builder. In compile-and-link mode, ObjcCommon.build() will output an
+   * ObjcProvider.Builder. The builder is expected to combine with the CcCompilationContext from a
+   * compile action, to form a complete ObjcProvider. In link-only mode, ObjcCommon can (and does)
+   * output the full ObjcProvider.
    */
-  // TODO(bazel-team): Delete and move into support-specific attributes classes once ObjcCommon is
-  // gone.
-  static final class ResourceAttributes {
-    private final RuleContext ruleContext;
-
-    ResourceAttributes(RuleContext ruleContext) {
-      this.ruleContext = ruleContext;
-    }
-
-    ImmutableList<Artifact> strings() {
-      return ruleContext.getPrerequisiteArtifacts("strings", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> xibs() {
-      return ruleContext.getPrerequisiteArtifacts("xibs", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> storyboards() {
-      return ruleContext.getPrerequisiteArtifacts("storyboards", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> resources() {
-      return ruleContext.getPrerequisiteArtifacts("resources", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> structuredResources() {
-      return ruleContext.getPrerequisiteArtifacts("structured_resources", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> datamodels() {
-      return ruleContext.getPrerequisiteArtifacts("datamodels", Mode.TARGET).list();
-    }
-
-    ImmutableList<Artifact> assetCatalogs() {
-      return ruleContext.getPrerequisiteArtifacts("asset_catalogs", Mode.TARGET).list();
-    }
+  public enum Purpose {
+    /** The ObjcCommon will be used for compile and link. */
+    COMPILE_AND_LINK,
+    /** The ObjcCommon will be used for linking only. */
+    LINK_ONLY,
   }
 
   static class Builder {
+    private final boolean compileInfoMigration;
+    private final Purpose purpose;
     private final RuleContext context;
+    private final StarlarkSemantics semantics;
     private final BuildConfiguration buildConfiguration;
     private Optional<CompilationAttributes> compilationAttributes = Optional.absent();
-    private Optional<ResourceAttributes> resourceAttributes = Optional.absent();
-    private Iterable<SdkFramework> extraSdkFrameworks = ImmutableList.of();
-    private Iterable<SdkFramework> extraWeakSdkFrameworks = ImmutableList.of();
-    private Iterable<String> extraSdkDylibs = ImmutableList.of();
-    private Iterable<Artifact> staticFrameworkImports = ImmutableList.of();
-    private Iterable<Artifact> dynamicFrameworkImports = ImmutableList.of();
     private Optional<CompilationArtifacts> compilationArtifacts = Optional.absent();
     private Iterable<ObjcProvider> depObjcProviders = ImmutableList.of();
-    private Iterable<ObjcProvider> directDepObjcProviders = ImmutableList.of();
     private Iterable<ObjcProvider> runtimeDepObjcProviders = ImmutableList.of();
-    private Iterable<String> defines = ImmutableList.of();
     private Iterable<PathFragment> includes = ImmutableList.of();
-    private Iterable<PathFragment> directDependencyIncludes = ImmutableList.of();
     private IntermediateArtifacts intermediateArtifacts;
     private boolean alwayslink;
     private boolean hasModuleMap;
     private Iterable<Artifact> extraImportLibraries = ImmutableList.of();
-    private DsymOutputType dsymOutputType;
     private Optional<Artifact> linkedBinary = Optional.absent();
-    private Optional<Artifact> linkmapFile = Optional.absent();
-    private Iterable<CppCompilationContext> depCcHeaderProviders = ImmutableList.of();
-    private Iterable<CcLinkParamsInfo> depCcLinkProviders = ImmutableList.of();
+    private Iterable<CcCompilationContext> depCcHeaderProviders = ImmutableList.of();
+    private Iterable<CcLinkingContext> depCcLinkProviders = ImmutableList.of();
+    private Iterable<CcCompilationContext> depCcDirectProviders = ImmutableList.of();
 
     /**
-     * Builder for {@link ObjcCommon} obtaining both attribute data and configuration data from
-     * the given rule context.
+     * Builder for {@link ObjcCommon} obtaining both attribute data and configuration data from the
+     * given rule context.
      */
-    Builder(RuleContext context) {
-      this(context, context.getConfiguration());
+    Builder(Purpose purpose, RuleContext context) throws InterruptedException {
+      this(purpose, context, context.getConfiguration());
     }
 
     /**
@@ -181,9 +132,16 @@ public final class ObjcCommon {
      * configuration data from the given configuration object for use in situations where a single
      * target's outputs are under multiple configurations.
      */
-    Builder(RuleContext context, BuildConfiguration buildConfiguration) {
+    Builder(Purpose purpose, RuleContext context, BuildConfiguration buildConfiguration)
+        throws InterruptedException {
+      this.purpose = purpose;
       this.context = Preconditions.checkNotNull(context);
+      this.semantics = context.getAnalysisEnvironment().getStarlarkSemantics();
       this.buildConfiguration = Preconditions.checkNotNull(buildConfiguration);
+
+      ObjcConfiguration objcConfiguration = buildConfiguration.getFragment(ObjcConfiguration.class);
+
+      this.compileInfoMigration = objcConfiguration.compileInfoMigration();
     }
 
     public Builder setCompilationAttributes(CompilationAttributes baseCompilationAttributes) {
@@ -192,51 +150,6 @@ public final class ObjcCommon {
           "compilationAttributes is already set to: %s",
           this.compilationAttributes);
       this.compilationAttributes = Optional.of(baseCompilationAttributes);
-      return this;
-    }
-
-    public Builder setResourceAttributes(ResourceAttributes baseResourceAttributes) {
-      Preconditions.checkState(
-          !this.resourceAttributes.isPresent(),
-          "resourceAttributes is already set to: %s",
-          this.resourceAttributes);
-      this.resourceAttributes = Optional.of(baseResourceAttributes);
-      return this;
-    }
-
-    Builder addExtraSdkFrameworks(Iterable<SdkFramework> extraSdkFrameworks) {
-      this.extraSdkFrameworks = Iterables.concat(this.extraSdkFrameworks, extraSdkFrameworks);
-      return this;
-    }
-
-    Builder addExtraWeakSdkFrameworks(Iterable<SdkFramework> extraWeakSdkFrameworks) {
-      this.extraWeakSdkFrameworks =
-          Iterables.concat(this.extraWeakSdkFrameworks, extraWeakSdkFrameworks);
-      return this;
-    }
-
-    Builder addExtraSdkDylibs(Iterable<String> extraSdkDylibs) {
-      this.extraSdkDylibs = Iterables.concat(this.extraSdkDylibs, extraSdkDylibs);
-      return this;
-    }
-
-    /**
-     * Adds all given artifacts as members of static frameworks. They must be contained in
-     * {@code .frameworks} directories and the binary in that framework should be statically linked.
-     */
-    Builder addStaticFrameworkImports(Iterable<Artifact> frameworkImports) {
-      this.staticFrameworkImports = Iterables.concat(this.staticFrameworkImports, frameworkImports);
-      return this;
-    }
-
-    /**
-     * Adds all given artifacts as members of dynamic frameworks. They must be contained in
-     * {@code .frameworks} directories and the binary in that framework should be dynamically
-     * linked.
-     */
-    Builder addDynamicFrameworkImports(Iterable<Artifact> frameworkImports) {
-      this.dynamicFrameworkImports =
-          Iterables.concat(this.dynamicFrameworkImports, frameworkImports);
       return this;
     }
 
@@ -249,25 +162,111 @@ public final class ObjcCommon {
       return this;
     }
 
-    Builder addDeps(List<? extends TransitiveInfoCollection> deps) {
-      ImmutableList.Builder<ObjcProvider> propagatedObjcDeps =
-          ImmutableList.<ObjcProvider>builder();
-      ImmutableList.Builder<CppCompilationContext> cppDeps =
-          ImmutableList.<CppCompilationContext>builder();
-      ImmutableList.Builder<CcLinkParamsInfo> cppDepLinkParams =
-          ImmutableList.<CcLinkParamsInfo>builder();
+    private static ImmutableList<CcCompilationContext> getCcCompilationContexts(
+        Iterable<CcInfo> ccInfos) {
+      return Streams.stream(ccInfos)
+          .map(CcInfo::getCcCompilationContext)
+          .collect(ImmutableList.toImmutableList());
+    }
 
-      for (TransitiveInfoCollection dep : deps) {
-        addAnyProviders(propagatedObjcDeps, dep, ObjcProvider.SKYLARK_CONSTRUCTOR);
-        addAnyProviders(cppDeps, dep, CppCompilationContext.class);
-        if (isCcLibrary(dep)) {
-          cppDepLinkParams.add(dep.get(CcLinkParamsInfo.PROVIDER));
-          addDefines(dep.getProvider(CppCompilationContext.class).getDefines());
+    Builder addDepCcHeaderProviders(Iterable<CcInfo> cppDeps) {
+      this.depCcHeaderProviders =
+          Iterables.concat(this.depCcHeaderProviders, getCcCompilationContexts(cppDeps));
+      return this;
+    }
+
+    Builder addDepCcDirectProviders(Iterable<CcInfo> cppDeps) {
+      this.depCcDirectProviders =
+          Iterables.concat(this.depCcDirectProviders, getCcCompilationContexts(cppDeps));
+      return this;
+    }
+
+    private Builder addDepsPreMigration(List<ConfiguredTargetAndData> deps) {
+      ImmutableList.Builder<ObjcProvider> propagatedObjcDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcInfo> cppDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcLinkingContext> cppDepLinkParams = ImmutableList.builder();
+
+      for (ConfiguredTargetAndData dep : deps) {
+        ConfiguredTarget depCT = dep.getConfiguredTarget();
+        // It is redundant to process both ObjcProvider and CcInfo; doing so causes direct header
+        // field to include indirect headers from deps.
+        if (depCT.get(ObjcProvider.STARLARK_CONSTRUCTOR) != null) {
+          addAnyProviders(propagatedObjcDeps, depCT, ObjcProvider.STARLARK_CONSTRUCTOR);
+        } else {
+          addAnyProviders(cppDeps, depCT, CcInfo.PROVIDER);
+          if (isCcLibrary(dep)) {
+            cppDepLinkParams.add(depCT.get(CcInfo.PROVIDER).getCcLinkingContext());
+          }
         }
       }
       addDepObjcProviders(propagatedObjcDeps.build());
-      this.depCcHeaderProviders = Iterables.concat(this.depCcHeaderProviders, cppDeps.build());
+      ImmutableList<CcInfo> ccInfos = cppDeps.build();
+      addDepCcHeaderProviders(ccInfos);
+      addDepCcDirectProviders(ccInfos);
       this.depCcLinkProviders = Iterables.concat(this.depCcLinkProviders, cppDepLinkParams.build());
+
+      return this;
+    }
+
+    private Builder addDepsPostMigration(List<ConfiguredTargetAndData> deps) {
+      ImmutableList.Builder<ObjcProvider> propagatedObjcDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcInfo> cppDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcInfo> directCppDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcLinkingContext> cppDepLinkParams = ImmutableList.builder();
+
+      for (ConfiguredTargetAndData dep : deps) {
+        ConfiguredTarget depCT = dep.getConfiguredTarget();
+        if (depCT.get(ObjcProvider.STARLARK_CONSTRUCTOR) != null) {
+          addAnyProviders(propagatedObjcDeps, depCT, ObjcProvider.STARLARK_CONSTRUCTOR);
+        } else {
+          // This is the way we inject cc_library attributes into direct fields.
+          addAnyProviders(directCppDeps, depCT, CcInfo.PROVIDER);
+        }
+        addAnyProviders(cppDeps, depCT, CcInfo.PROVIDER);
+        if (isCcLibrary(dep)) {
+          cppDepLinkParams.add(depCT.get(CcInfo.PROVIDER).getCcLinkingContext());
+        }
+      }
+      addDepObjcProviders(propagatedObjcDeps.build());
+      addDepCcHeaderProviders(cppDeps.build());
+      addDepCcDirectProviders(directCppDeps.build());
+      this.depCcLinkProviders = Iterables.concat(this.depCcLinkProviders, cppDepLinkParams.build());
+
+      return this;
+    }
+
+    Builder addDeps(List<ConfiguredTargetAndData> deps) {
+      if (compileInfoMigration) {
+        return addDepsPostMigration(deps);
+      } else {
+        return addDepsPreMigration(deps);
+      }
+    }
+
+    private Builder addRuntimeDepsPreMigration(
+        List<? extends TransitiveInfoCollection> runtimeDeps) {
+      ImmutableList.Builder<ObjcProvider> propagatedDeps = ImmutableList.builder();
+
+      for (TransitiveInfoCollection dep : runtimeDeps) {
+        addAnyProviders(propagatedDeps, dep, ObjcProvider.STARLARK_CONSTRUCTOR);
+      }
+      this.runtimeDepObjcProviders =
+          Iterables.concat(this.runtimeDepObjcProviders, propagatedDeps.build());
+      return this;
+    }
+
+    private Builder addRuntimeDepsPostMigration(
+        List<? extends TransitiveInfoCollection> runtimeDeps) {
+      ImmutableList.Builder<ObjcProvider> propagatedObjcDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcInfo> cppDeps = ImmutableList.builder();
+
+      for (TransitiveInfoCollection dep : runtimeDeps) {
+        addAnyProviders(propagatedObjcDeps, dep, ObjcProvider.STARLARK_CONSTRUCTOR);
+        addAnyProviders(cppDeps, dep, CcInfo.PROVIDER);
+      }
+      this.runtimeDepObjcProviders =
+          Iterables.concat(this.runtimeDepObjcProviders, propagatedObjcDeps.build());
+      addDepCcHeaderProviders(cppDeps.build());
       return this;
     }
 
@@ -276,39 +275,23 @@ public final class ObjcCommon {
      * at build time.
      */
     Builder addRuntimeDeps(List<? extends TransitiveInfoCollection> runtimeDeps) {
-      ImmutableList.Builder<ObjcProvider> propagatedDeps =
-          ImmutableList.<ObjcProvider>builder();
-
-      for (TransitiveInfoCollection dep : runtimeDeps) {
-        addAnyProviders(propagatedDeps, dep, ObjcProvider.SKYLARK_CONSTRUCTOR);
+      if (compileInfoMigration) {
+        return addRuntimeDepsPostMigration(runtimeDeps);
+      } else {
+        return addRuntimeDepsPreMigration(runtimeDeps);
       }
-      this.runtimeDepObjcProviders = Iterables.concat(
-          this.runtimeDepObjcProviders, propagatedDeps.build());
-      return this;
-    }
-
-    private <T extends TransitiveInfoProvider> ImmutableList.Builder<T> addAnyProviders(
-        ImmutableList.Builder<T> listBuilder,
-        TransitiveInfoCollection collection,
-        Class<T> providerClass) {
-      T provider = collection.getProvider(providerClass);
-      if (provider != null) {
-        listBuilder.add(provider);
-      }
-      return listBuilder;
     }
 
     private <T extends Info> ImmutableList.Builder<T> addAnyProviders(
         ImmutableList.Builder<T> listBuilder,
         TransitiveInfoCollection collection,
-        NativeProvider<T> providerClass) {
+        BuiltinProvider<T> providerClass) {
       T provider = collection.get(providerClass);
       if (provider != null) {
         listBuilder.add(provider);
       }
       return listBuilder;
     }
-
 
     /**
      * Add providers which will be exposed both to the declaring rule and to any dependers on the
@@ -319,31 +302,17 @@ public final class ObjcCommon {
       return this;
     }
 
-    /**
-     * Add providers which will only be used by the declaring rule, and won't be propagated to any
-     * dependers on the declaring rule.
-     */
-    Builder addNonPropagatedDepObjcProviders(Iterable<ObjcProvider> directDepObjcProviders) {
-      this.directDepObjcProviders =
-          Iterables.concat(this.directDepObjcProviders, directDepObjcProviders);
+    /** Adds includes to be passed into compile actions with {@code -I}. */
+    public Builder addIncludes(NestedSet<PathFragment> includes) {
+      // The includes are copied to a new list in the .build() method, so flattening here should be
+      // benign.
+      this.includes = Iterables.concat(this.includes, includes.toList());
       return this;
     }
 
     /** Adds includes to be passed into compile actions with {@code -I}. */
     public Builder addIncludes(Iterable<PathFragment> includes) {
       this.includes = Iterables.concat(this.includes, includes);
-      return this;
-    }
-
-    /** Adds header search paths that will only be visible by strict dependents of the provider. */
-    public Builder addDirectDependencyIncludes(Iterable<PathFragment> directDependencyIncludes) {
-      this.directDependencyIncludes =
-          Iterables.concat(this.directDependencyIncludes, directDependencyIncludes);
-      return this;
-    }
-
-    public Builder addDefines(Iterable<String> defines) {
-      this.defines = Iterables.concat(this.defines, defines);
       return this;
     }
 
@@ -384,62 +353,35 @@ public final class ObjcCommon {
       return this;
     }
 
-    /**
-     * Sets which type of dsym output this rule generated to be propagated to dependers.
-     */
-    Builder addDebugArtifacts(DsymOutputType dsymOutputType) {
-      this.dsymOutputType = dsymOutputType;
-      return this;
-    }
-
-    /**
-     * Sets a linkmap file generated by this rule to be propagated to dependers.
-     */
-    Builder setLinkmapFile(Artifact linkmapFile) {
-      this.linkmapFile = Optional.of(linkmapFile);
-      return this;
-    }
-
     ObjcCommon build() {
 
-      Iterable<BundleableFile> bundleImports = BundleableFile.bundleImportsFromRule(context);
+      ObjcCompilationContext.Builder objcCompilationContextBuilder =
+          ObjcCompilationContext.builder(compileInfoMigration);
 
-      ObjcProvider.Builder objcProvider =
-          new ObjcProvider.Builder()
-              .addAll(IMPORTED_LIBRARY, extraImportLibraries)
-              .addAll(BUNDLE_FILE, bundleImports)
-              .addAll(SDK_FRAMEWORK, extraSdkFrameworks)
-              .addAll(WEAK_SDK_FRAMEWORK, extraWeakSdkFrameworks)
-              .addAll(SDK_DYLIB, extraSdkDylibs)
-              .addAll(STATIC_FRAMEWORK_FILE, staticFrameworkImports)
-              .addAll(DYNAMIC_FRAMEWORK_FILE, dynamicFrameworkImports)
-              .addAll(
-                  DYNAMIC_FRAMEWORK_DIR,
-                  uniqueContainers(dynamicFrameworkImports, FRAMEWORK_CONTAINER_TYPE))
-              .addAll(INCLUDE, includes)
-              .add(IQUOTE, buildConfiguration.getGenfilesFragment())
-              .addAllForDirectDependents(INCLUDE, directDependencyIncludes)
-              .addAll(DEFINE, defines)
-              .addTransitiveAndPropagate(depObjcProviders)
-              .addTransitiveWithoutPropagating(directDepObjcProviders);
+      ObjcProvider.Builder objcProvider = new ObjcProvider.NativeBuilder(semantics);
+
+      objcProvider
+          .addAll(IMPORTED_LIBRARY, extraImportLibraries)
+          .addTransitiveAndPropagate(depObjcProviders);
+
+      objcCompilationContextBuilder
+          .addIncludes(includes)
+          .addDepObjcProviders(depObjcProviders)
+          .addDepObjcProviders(runtimeDepObjcProviders)
+          // TODO(bazel-team): This pulls in stl via
+          // CcCompilationHelper.getStlCcCompilationContext(), but probably shouldn't.
+          .addDepCcCompilationContexts(depCcHeaderProviders);
+
+      for (CcCompilationContext headerProvider : depCcDirectProviders) {
+        objcProvider.addAllDirect(HEADER, headerProvider.getDeclaredIncludeSrcs().toList());
+      }
 
       for (ObjcProvider provider : runtimeDepObjcProviders) {
-        objcProvider.addTransitiveAndPropagate(ObjcProvider.DYNAMIC_FRAMEWORK_FILE, provider);
-        objcProvider.addTransitiveAndPropagate(ObjcProvider.STATIC_FRAMEWORK_FILE, provider);
         objcProvider.addTransitiveAndPropagate(ObjcProvider.MERGE_ZIP, provider);
       }
 
-      for (CppCompilationContext headerProvider : depCcHeaderProviders) {
-        objcProvider.addAll(HEADER, filterFileset(headerProvider.getDeclaredIncludeSrcs()));
-        objcProvider.addAll(INCLUDE, headerProvider.getIncludeDirs());
-        // TODO(bazel-team): This pulls in stl via CppHelper.mergeToolchainDependentContext but
-        // probably shouldn't.
-        objcProvider.addAll(INCLUDE_SYSTEM, headerProvider.getSystemIncludeDirs());
-        objcProvider.addAll(DEFINE, headerProvider.getDefines());
-      }
-      for (CcLinkParamsInfo linkProvider : depCcLinkProviders) {
-        CcLinkParams params = linkProvider.getCcLinkParams(true, false);
-        ImmutableList<String> linkOpts = params.flattenedLinkopts();
+      for (CcLinkingContext linkProvider : depCcLinkProviders) {
+        ImmutableList<String> linkOpts = linkProvider.getFlattenedUserLinkFlags();
         ImmutableSet.Builder<SdkFramework> frameworkLinkOpts = new ImmutableSet.Builder<>();
         ImmutableList.Builder<String> nonFrameworkLinkOpts = new ImmutableList.Builder<>();
         // Add any framework flags as frameworks directly, rather than as linkopts.
@@ -456,52 +398,32 @@ public final class ObjcCommon {
         objcProvider
             .addAll(SDK_FRAMEWORK, frameworkLinkOpts.build())
             .addAll(LINKOPT, nonFrameworkLinkOpts.build())
-            .addTransitiveAndPropagate(CC_LIBRARY, params.getLibraries());
+            .addTransitiveAndPropagate(
+                CC_LIBRARY,
+                NestedSetBuilder.<LibraryToLink>linkOrder()
+                    .addTransitive(linkProvider.getLibraries())
+                    .build());
       }
 
       if (compilationAttributes.isPresent()) {
         CompilationAttributes attributes = compilationAttributes.get();
+        PathFragment usrIncludeDir = PathFragment.create(AppleToolchain.sdkDir() + "/usr/include/");
         Iterable<PathFragment> sdkIncludes =
             Iterables.transform(
-                Interspersing.prependEach(
-                    AppleToolchain.sdkDir() + "/usr/include/",
-                    PathFragment.safePathStrings(attributes.sdkIncludes())),
-                PathFragment::create);
+                attributes.sdkIncludes().toList(), (p) -> usrIncludeDir.getRelative(p));
         objcProvider
-            .addAll(HEADER, filterFileset(attributes.hdrs()))
-            .addAll(HEADER, filterFileset(attributes.textualHdrs()))
-            .addAll(INCLUDE, attributes.headerSearchPaths(buildConfiguration.getGenfilesFragment()))
-            .addAll(INCLUDE, sdkIncludes)
             .addAll(SDK_FRAMEWORK, attributes.sdkFrameworks())
             .addAll(WEAK_SDK_FRAMEWORK, attributes.weakSdkFrameworks())
-            .addAll(SDK_DYLIB, attributes.sdkDylibs());
-      }
-
-      if (resourceAttributes.isPresent()) {
-        ResourceAttributes attributes = resourceAttributes.get();
-        objcProvider
-            .addAll(BUNDLE_FILE, BundleableFile.flattenedRawResourceFiles(attributes.resources()))
-            .addAll(
-                BUNDLE_FILE,
-                BundleableFile.structuredRawResourceFiles(attributes.structuredResources()))
-            .addAll(
-                XCASSETS_DIR,
-                uniqueContainers(attributes.assetCatalogs(), ASSET_CATALOG_CONTAINER_TYPE))
-            .addAll(ASSET_CATALOG, attributes.assetCatalogs())
-            .addAll(XCDATAMODEL, attributes.datamodels())
-            .addAll(XIB, attributes.xibs())
-            .addAll(STRINGS, attributes.strings())
-            .addAll(STORYBOARD, attributes.storyboards());
-      }
-
-      if (useLaunchStoryboard(context)) {
-        Artifact launchStoryboard =
-            context.getPrerequisiteArtifact("launch_storyboard", Mode.TARGET);
-        if (ObjcRuleClasses.STORYBOARD_TYPE.matches(launchStoryboard.getPath())) {
-          objcProvider.add(STORYBOARD, launchStoryboard);
-        } else {
-          objcProvider.add(XIB, launchStoryboard);
-        }
+            .addAll(SDK_DYLIB, attributes.sdkDylibs())
+            .addAllDirect(HEADER, attributes.hdrs().toList())
+            .addAllDirect(HEADER, attributes.textualHdrs().toList());
+        objcCompilationContextBuilder
+            .addPublicHeaders(filterFileset(attributes.hdrs().toList()))
+            .addPublicTextualHeaders(filterFileset(attributes.textualHdrs().toList()))
+            .addDefines(attributes.defines())
+            .addIncludes(
+                attributes.headerSearchPaths(buildConfiguration.getGenfilesFragment()).toList())
+            .addIncludes(sdkIncludes);
       }
 
       for (CompilationArtifacts artifacts : compilationArtifacts.asSet()) {
@@ -510,9 +432,13 @@ public final class ObjcCommon {
         // TODO(bazel-team): Add private headers to the provider when we have module maps to enforce
         // them.
         objcProvider
-            .addAll(HEADER, filterFileset(artifacts.getAdditionalHdrs()))
             .addAll(LIBRARY, artifacts.getArchive().asSet())
-            .addAll(SOURCE, allSources);
+            .addAll(SOURCE, allSources)
+            .addAllDirect(SOURCE, allSources)
+            .addAllDirect(HEADER, filterFileset(artifacts.getAdditionalHdrs().toList()));
+        objcCompilationContextBuilder.addPublicHeaders(
+            filterFileset(artifacts.getAdditionalHdrs().toList()));
+        objcCompilationContextBuilder.addPrivateHeaders(artifacts.getPrivateHdrs());
 
         if (artifacts.getArchive().isPresent()
             && J2ObjcLibrary.J2OBJC_SUPPORTED_RULES.contains(context.getRule().getRuleClass())) {
@@ -520,21 +446,12 @@ public final class ObjcCommon {
         }
 
         boolean usesCpp = false;
-        boolean usesObjc = false;
         for (Artifact sourceFile :
             Iterables.concat(artifacts.getSrcs(), artifacts.getNonArcSrcs())) {
           usesCpp = usesCpp || ObjcRuleClasses.CPP_SOURCES.matches(sourceFile.getExecPath());
-          usesObjc =
-              usesObjc
-                  || FileTypeSet.of(CppFileTypes.OBJC_SOURCE, CppFileTypes.OBJCPP_SOURCE)
-                      .matches(sourceFile.getExecPath().getPathString());
         }
-
         if (usesCpp) {
           objcProvider.add(FLAG, USES_CPP);
-        }
-        if (usesObjc) {
-          objcProvider.add(FLAG, USES_OBJC);
         }
       }
 
@@ -556,26 +473,28 @@ public final class ObjcCommon {
           objcProvider.add(UMBRELLA_HEADER, umbrellaHeader.get());
         }
         objcProvider.add(MODULE_MAP, moduleMap.getArtifact());
+        objcProvider.addDirect(MODULE_MAP, moduleMap.getArtifact());
         objcProvider.add(TOP_LEVEL_MODULE_MAP, moduleMap);
       }
 
-      objcProvider
-          .addAll(LINKED_BINARY, linkedBinary.asSet())
-          .addAll(LINKMAP_FILE, linkmapFile.asSet());
+      objcProvider.addAll(LINKED_BINARY, linkedBinary.asSet());
 
-      if (dsymOutputType != null) {
-        objcProvider
-            .add(DEBUG_SYMBOLS, intermediateArtifacts.dsymSymbol(dsymOutputType))
-            .add(DEBUG_SYMBOLS_PLIST, intermediateArtifacts.dsymPlist(dsymOutputType));
+      ObjcCompilationContext objcCompilationContext = objcCompilationContextBuilder.build();
+
+      ObjcProvider.NativeBuilder objcProviderNativeBuilder =
+          (ObjcProvider.NativeBuilder) objcProvider;
+      if (purpose == Purpose.LINK_ONLY) {
+        objcProviderNativeBuilder.setCcCompilationContext(
+            objcCompilationContext.createCcCompilationContext());
       }
-
-      return new ObjcCommon(objcProvider.build(), compilationArtifacts);
+      return new ObjcCommon(
+          purpose, objcProviderNativeBuilder, objcCompilationContext, compilationArtifacts);
     }
 
-    private static boolean isCcLibrary(TransitiveInfoCollection info) {
+    private static boolean isCcLibrary(ConfiguredTargetAndData info) {
       try {
-        ConfiguredTarget target = (ConfiguredTarget) info;
-        String targetName = target.getTarget().getTargetKind();
+        String targetName = info.getTarget().getTargetKind();
+
         for (String ruleClassName : ObjcRuleClasses.CompilingRule.ALLOWED_CC_DEPS_RULE_CLASSES) {
           if (targetName.equals(ruleClassName + " rule")) {
             return true;
@@ -586,37 +505,35 @@ public final class ObjcCommon {
         return false;
       }
     }
-    
-    /**
-     * Returns {@code true} if the given rule context has a launch storyboard set.
-     */
-    private static boolean useLaunchStoryboard(RuleContext ruleContext) {
-      if (!ruleContext.attributes().has("launch_storyboard", LABEL)) {
-        return false;
-      }
-      Artifact launchStoryboard =
-          ruleContext.getPrerequisiteArtifact("launch_storyboard", Mode.TARGET);
-      return launchStoryboard != null;
-    }
   }
 
-  static final FileType BUNDLE_CONTAINER_TYPE = FileType.of(".bundle");
-
-  static final FileType ASSET_CATALOG_CONTAINER_TYPE = FileType.of(".xcassets");
-
-  public static final FileType FRAMEWORK_CONTAINER_TYPE = FileType.of(".framework");
-  private final ObjcProvider objcProvider;
+  private final Purpose purpose;
+  private final ObjcProvider.NativeBuilder objcProviderBuilder;
+  private final ObjcCompilationContext objcCompilationContext;
 
   private final Optional<CompilationArtifacts> compilationArtifacts;
 
   private ObjcCommon(
-      ObjcProvider objcProvider, Optional<CompilationArtifacts> compilationArtifacts) {
-    this.objcProvider = Preconditions.checkNotNull(objcProvider);
+      Purpose purpose,
+      ObjcProvider.NativeBuilder objcProviderBuilder,
+      ObjcCompilationContext objcCompilationContext,
+      Optional<CompilationArtifacts> compilationArtifacts) {
+    this.purpose = purpose;
+    this.objcProviderBuilder = Preconditions.checkNotNull(objcProviderBuilder);
+    this.objcCompilationContext = Preconditions.checkNotNull(objcCompilationContext);
     this.compilationArtifacts = Preconditions.checkNotNull(compilationArtifacts);
   }
 
-  public ObjcProvider getObjcProvider() {
-    return objcProvider;
+  public Purpose getPurpose() {
+    return purpose;
+  }
+
+  public ObjcProvider.NativeBuilder getObjcProviderBuilder() {
+    return objcProviderBuilder;
+  }
+
+  public ObjcCompilationContext getObjcCompilationContext() {
+    return objcCompilationContext;
   }
 
   public Optional<CompilationArtifacts> getCompilationArtifacts() {
@@ -642,15 +559,6 @@ public final class ObjcCommon {
     return Iterables.concat(
         ruleContext.getFragment(ObjcConfiguration.class).getCopts(),
         ruleContext.getExpander().withDataLocations().tokenized("copts"));
-  }
-
-  static ImmutableSet<PathFragment> userHeaderSearchPaths(
-      ObjcProvider provider, BuildConfiguration config) {
-    return ImmutableSet.<PathFragment>builder()
-        .add(PathFragment.create("."))
-        .add(config.getGenfilesFragment())
-        .addAll(provider.get(IQUOTE))
-        .build();
   }
 
   /**
@@ -685,20 +593,6 @@ public final class ObjcCommon {
   }
 
   /**
-   * Returns all directories matching {@code containerType} that contain the items in
-   * {@code artifacts}. This function ignores artifacts that are not in any directory matching
-   * {@code containerType}.
-   */
-  static Iterable<PathFragment> uniqueContainers(
-      Iterable<Artifact> artifacts, FileType containerType) {
-    ImmutableSet.Builder<PathFragment> containers = new ImmutableSet.Builder<>();
-    for (Artifact artifact : artifacts) {
-      containers.addAll(ObjcCommon.nearestContainerMatching(containerType, artifact).asSet());
-    }
-    return containers.build();
-  }
-
-  /**
    * Similar to {@link #nearestContainerMatching(FileType, Artifact)}, but returns the container
    * closest to the root that matches the given type.
    */
@@ -719,10 +613,6 @@ public final class ObjcCommon {
     return notInContainerErrors(artifacts, ImmutableList.of(containerType));
   }
 
-  @VisibleForTesting
-  static final String NOT_IN_CONTAINER_ERROR_FORMAT =
-      "File '%s' is not in a directory of one of these type(s): %s";
-
   static Iterable<String> notInContainerErrors(
       Iterable<Artifact> artifacts, Iterable<FileType> containerTypes) {
     Set<String> errors = new HashSet<>();
@@ -738,4 +628,8 @@ public final class ObjcCommon {
     }
     return errors;
   }
+
+  @VisibleForTesting
+  static final String NOT_IN_CONTAINER_ERROR_FORMAT =
+      "File '%s' is not in a directory of one of these type(s): %s";
 }

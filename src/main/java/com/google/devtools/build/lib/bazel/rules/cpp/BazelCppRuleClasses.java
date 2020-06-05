@@ -17,9 +17,13 @@ package com.google.devtools.build.lib.bazel.rules.cpp;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
+import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.TRISTATE;
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fromFunctions;
 import static com.google.devtools.build.lib.packages.ImplicitOutputsFunction.fromTemplates;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.ALWAYS_LINK_LIBRARY;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.ALWAYS_LINK_PIC_LIBRARY;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.ARCHIVE;
@@ -33,31 +37,28 @@ import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.PIC_ARCHIVE;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.PIC_OBJECT_FILE;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.SHARED_LIBRARY;
 import static com.google.devtools.build.lib.rules.cpp.CppFileTypes.VERSIONED_SHARED_LIBRARY;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
-import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
 
 import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.packages.Attribute;
-import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
-import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
+import com.google.devtools.build.lib.packages.StarlarkProviderIdentifier;
 import com.google.devtools.build.lib.packages.TriState;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchain;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
-import com.google.devtools.build.lib.rules.cpp.CppHelper;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
-import com.google.devtools.build.lib.rules.cpp.transitions.LipoContextCollectorTransition;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses.CcIncludeScanningRule;
+import com.google.devtools.build.lib.rules.cpp.GraphNodeAspect;
 import com.google.devtools.build.lib.util.FileTypeSet;
 
 /**
@@ -69,31 +70,6 @@ public class BazelCppRuleClasses {
 
   static final SafeImplicitOutputsFunction CC_BINARY_IMPLICIT_OUTPUTS =
       fromFunctions(CppRuleClasses.CC_BINARY_STRIPPED, CppRuleClasses.CC_BINARY_DEBUG_PACKAGE);
-
-  /**
-   * Returns the STL prerequisite of the rule.
-   *
-   * <p>If rule has an implicit $stl_default attribute returns STL version set on the command line
-   * or if not set, the value of the $stl_default attribute. Returns {@code null} otherwise.
-   */
-  public static final LateBoundDefault<?, Label> STL =
-      LateBoundDefault.fromTargetConfiguration(
-          CppConfiguration.class,
-          null,
-          (rule, attributes, cppConfig) -> {
-            Label stl = null;
-            if (attributes.has("$stl_default", BuildType.LABEL)) {
-              Label stlConfigLabel = cppConfig.getStl();
-              Label stlRuleLabel = attributes.get("$stl_default", BuildType.LABEL);
-              if (stlConfigLabel == null) {
-                stl = stlRuleLabel;
-              } else if (!stlConfigLabel.equals(rule.getLabel()) && stlRuleLabel != null) {
-                // prevents self-reference and a cycle through standard STL in the dependency graph
-                stl = stlConfigLabel;
-              }
-            }
-            return stl;
-          });
 
   static final FileTypeSet ALLOWED_SRC_FILES =
       FileTypeSet.of(
@@ -113,37 +89,33 @@ public class BazelCppRuleClasses {
 
   static final String[] DEPS_ALLOWED_RULES =
       new String[] {
-        "cc_inc_library",
-        "cc_library",
-        "objc_library",
-        "cc_proto_library",
+        "cc_library", "objc_library", "cc_proto_library", "cc_import",
       };
 
-  /**
-   * Common attributes for all rules that create C++ links. This may
-   * include non-cc_* rules (e.g. py_binary).
-   */
-  public static final class CcLinkingRule implements RuleDefinition {
+  /** Common attributes for all rules that need a C++ toolchain. */
+  public static final class CcToolchainRequiringRule implements RuleDefinition {
     @Override
     @SuppressWarnings("unchecked")
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           .add(
               attr(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, LABEL)
+                  .mandatoryProviders(CcToolchainProvider.PROVIDER.id())
                   .value(CppRuleClasses.ccToolchainAttribute(env)))
           .add(
-              attr(CcToolchain.CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME, LABEL)
+              attr(CcToolchain.CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME, NODEP_LABEL)
                   .value(CppRuleClasses.ccToolchainTypeAttribute(env)))
           .setPreferredDependencyPredicate(Predicates.<String>or(CPP_SOURCE, C_SOURCE, CPP_HEADER))
           .requiresConfigurationFragments(PlatformConfiguration.class)
-          .addRequiredToolchains(CppHelper.getCcToolchainType(env.getToolsRepository()))
+          .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(env))
           .build();
     }
 
     @Override
     public Metadata getMetadata() {
       return RuleDefinition.Metadata.builder()
-          .name("$cc_linking_rule")
+          .name("$cc_toolchain_requiring_rule")
+          .ancestors(CcIncludeScanningRule.class)
           .type(RuleClassType.ABSTRACT)
           .build();
     }
@@ -154,7 +126,7 @@ public class BazelCppRuleClasses {
    */
   public static final class CcBaseRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           /*<!-- #BLAZE_RULE($cc_base_rule).ATTRIBUTE(copts) -->
           Add these options to the C++ compilation command.
@@ -163,7 +135,7 @@ public class BazelCppRuleClasses {
           <p>
             Each string in this attribute is added in the given order to <code>COPTS</code> before
             compiling the binary target. The flags take effect only for compiling this target, not
-            its dependencies, so be careful about header files included elsewhere.  All paths should
+            its dependencies, so be careful about header files included elsewhere. All paths should
             be relative to the workspace, not to the current package.
           </p>
           <p>
@@ -173,8 +145,6 @@ public class BazelCppRuleClasses {
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("copts", STRING_LIST))
-          .add(attr("$stl_default", LABEL).value(env.getToolsLabel("//tools/cpp:stl")))
-          .add(attr(":stl", LABEL).value(STL))
           .build();
     }
 
@@ -183,7 +153,7 @@ public class BazelCppRuleClasses {
       return RuleDefinition.Metadata.builder()
           .name("$cc_base_rule")
           .type(RuleClassType.ABSTRACT)
-          .ancestors(CcLinkingRule.class)
+          .ancestors(CcToolchainRequiringRule.class)
           .build();
     }
   }
@@ -193,21 +163,28 @@ public class BazelCppRuleClasses {
    */
   public static final class CcDeclRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           /*<!-- #BLAZE_RULE($cc_decl_rule).ATTRIBUTE(defines) -->
           List of defines to add to the compile line.
           Subject to <a href="${link make-variables}">"Make" variable</a> substitution and
           <a href="${link common-definitions#sh-tokenization}">Bourne shell tokenization</a>.
           Each string, which must consist of a single Bourne shell token,
-          is prepended with <code>-D</code> (or <code>/D</code> on Windows) and added to
-          <code>COPTS</code>.
-          Unlike <a href="#cc_binary.copts"><code>copts</code></a>, these flags are added for the
-          target and every rule that depends on it!  Be very careful, since this may have
-          far-reaching effects.  When in doubt, add "-D" (or <code>/D</code> on Windows) flags to
-          <a href="#cc_binary.copts"><code>copts</code></a> instead.
+          is prepended with <code>-D</code> and added to the compile command line to this target,
+          as well as to every rule that depends on it. Be very careful, since this may have
+          far-reaching effects. When in doubt, add define values to
+          <a href="#cc_binary.local_defines"><code>local_defines</code></a> instead.
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("defines", STRING_LIST))
+          /*<!-- #BLAZE_RULE($cc_decl_rule).ATTRIBUTE(local_defines) -->
+          List of defines to add to the compile line.
+          Subject to <a href="${link make-variables}">"Make" variable</a> substitution and
+          <a href="${link common-definitions#sh-tokenization}">Bourne shell tokenization</a>.
+          Each string, which must consist of a single Bourne shell token,
+          is prepended with <code>-D</code> and added to the compile command line for this target,
+          but not to its dependents.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("local_defines", STRING_LIST))
           /*<!-- #BLAZE_RULE($cc_decl_rule).ATTRIBUTE(includes) -->
           List of include dirs to be added to the compile line.
           <p>
@@ -215,7 +192,7 @@ public class BazelCppRuleClasses {
           Each string is prepended with <code>-isystem</code> and added to <code>COPTS</code>.
           Unlike <a href="#cc_binary.copts">COPTS</a>, these flags are added for this rule
           and every rule that depends on it. (Note: not the rules it depends upon!) Be
-          very careful, since this may have far-reaching effects.  When in doubt, add
+          very careful, since this may have far-reaching effects. When in doubt, add
           "-I" flags to <a href="#cc_binary.copts">COPTS</a> instead.
           </p>
           <p>
@@ -224,11 +201,6 @@ public class BazelCppRuleClasses {
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("includes", STRING_LIST))
-          .add(
-              attr(":lipo_context_collector", LABEL)
-                  .cfg(LipoContextCollectorTransition.INSTANCE)
-                  .value(CppRuleClasses.LIPO_CONTEXT_COLLECTOR)
-                  .skipPrereqValidatorCheck())
           .build();
     }
 
@@ -247,7 +219,7 @@ public class BazelCppRuleClasses {
    */
   public static final class CcRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, final RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, final RuleDefinitionEnvironment env) {
       return builder
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(srcs) -->
           The list of C and C++ files that are processed to create the target.
@@ -286,7 +258,7 @@ public class BazelCppRuleClasses {
             <li>C and C++ source files: <code>.c</code>, <code>.cc</code>, <code>.cpp</code>,
               <code>.cxx</code>, <code>.c++</code>, <code>.C</code></li>
             <li>C and C++ header files: <code>.h</code>, <code>.hh</code>, <code>.hpp</code>,
-              <code>.hxx</code>, <code>.inc</code></li>
+              <code>.hxx</code>, <code>.inc</code>, <code>.inl</code>, <code>.H</code></li>
             <li>Assembler with C preprocessor: <code>.S</code></li>
             <li>Archive: <code>.a</code>, <code>.pic.a</code></li>
             <li>"Always link" library: <code>.lo</code>, <code>.pic.lo</code></li>
@@ -306,14 +278,15 @@ public class BazelCppRuleClasses {
                   .allowedFileTypes(ALLOWED_SRC_FILES))
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(deps) -->
           The list of other libraries to be linked in to the binary target.
-          <p>These can be <code>cc_library</code>, <code>cc_inc_library</code>, or
-          <code>objc_library</code> targets.</p>
+          <p>These can be <code>cc_library</code> or <code>objc_library</code>
+          targets.</p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .override(
               attr("deps", LABEL_LIST)
                   .allowedRuleClasses(DEPS_ALLOWED_RULES)
                   .allowedFileTypes(CppFileTypes.LINKER_SCRIPT)
-                  .skipAnalysisTimeFileTypeCheck())
+                  .skipAnalysisTimeFileTypeCheck()
+                  .mandatoryProviders(StarlarkProviderIdentifier.forKey(CcInfo.PROVIDER.getKey())))
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(win_def_file) -->
           The Windows DEF file to be passed to linker.
           <p>This attribute should only be used when Windows is the target platform.
@@ -335,9 +308,9 @@ public class BazelCppRuleClasses {
           linking the binary target.
           <p>
             Each element of this list that does not start with <code>$</code> or <code>-</code> is
-            assumed to be the label of a target in <code>deps</code>.  The
+            assumed to be the label of a target in <code>deps</code>. The
             list of files generated by that target is appended to the linker
-            options.  An error is reported if the label is invalid, or is
+            options. An error is reported if the label is invalid, or is
             not declared in <code>deps</code>.
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
@@ -355,7 +328,7 @@ public class BazelCppRuleClasses {
           .add(attr("nocopts", STRING))
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(linkstatic) -->
            For <a href="${link cc_binary}"><code>cc_binary</code></a> and
-           <a href="${link cc_test}"><code>cc_test</code></a>: link the binary in mostly-static
+           <a href="${link cc_test}"><code>cc_test</code></a>: link the binary in static
            mode. For <code>cc_library.linkstatic</code>: see below.
            <p>
              By default this option is on for <code>cc_binary</code> and off for the rest.
@@ -369,42 +342,53 @@ public class BazelCppRuleClasses {
            </p>
            <p>There are really three different ways to link an executable:</p>
            <ul>
-           <li> FULLY STATIC, in which everything is linked statically; e.g. "<code>gcc -static
-             foo.o libbar.a libbaz.a -lm</code>".<br/>
-             This mode is enabled by specifying <code>-static</code> in the
-             <a href="#cc_binary.linkopts"><code>linkopts</code></a> attribute.</li>
-           <li> MOSTLY STATIC, in which all user libraries are linked statically (if a static
-             version is available), but where system libraries are linked dynamically, e.g.
-             "<code>gcc foo.o libfoo.a libbaz.a -lm</code>".<br/>
-             This mode is enabled by specifying <code>linkstatic=1</code>.</li>
+           <li> STATIC with fully_static_link feature, in which everything is linked statically;
+             e.g. "<code>gcc -static foo.o libbar.a libbaz.a -lm</code>".<br/>
+             This mode is enabled by specifying <code>fully_static_link</code> in the
+             <a href="${link common-definitions#features}"><code>features</code></a> attribute.</li>
+           <li> STATIC, in which all user libraries are linked statically (if a static
+             version is available), but where system libraries (excluding C/C++ runtime libraries)
+             are linked dynamically, e.g. "<code>gcc foo.o libfoo.a libbaz.a -lm</code>".<br/>
+             This mode is enabled by specifying <code>linkstatic=True</code>.</li>
            <li> DYNAMIC, in which all libraries are linked dynamically (if a dynamic version is
              available), e.g. "<code>gcc foo.o libfoo.so libbaz.so -lm</code>".<br/>
-             This mode is enabled by specifying <code>linkstatic=0</code>.</li>
+             This mode is enabled by specifying <code>linkstatic=False</code>.</li>
            </ul>
            <p>
            The <code>linkstatic</code> attribute has a different meaning if used on a
            <a href="${link cc_library}"><code>cc_library()</code></a> rule.
-           For a C++ library, <code>linkstatic=1</code> indicates that only
-           static linking is allowed, so no <code>.so</code> will be produced.
+           For a C++ library, <code>linkstatic=True</code> indicates that only
+           static linking is allowed, so no <code>.so</code> will be produced. linkstatic=False does
+           not prevent static libraries from being created. The attribute is meant to control the
+           creation of dynamic libraries.
            </p>
            <p>
-           If <code>linkstatic=0</code>, then the build tool will create symlinks to
+           If <code>linkstatic=False</code>, then the build tool will create symlinks to
            depended-upon shared libraries in the <code>*.runfiles</code> area.
            </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("linkstatic", BOOLEAN).value(true))
-          .override(
-              attr("$stl_default", LABEL)
+          .add(
+              attr("$def_parser", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .singleArtifact()
                   .value(
                       new Attribute.ComputedDefault() {
                         @Override
                         public Object getDefault(AttributeMap rule) {
-                          // Every cc_rule depends implicitly on STL to make
-                          // sure that the correct headers are used for inclusion.
-                          // The only exception is STL itself,
-                          // to avoid cycles in the dependency graph.
-                          Label stl = env.getToolsLabel("//tools/cpp:stl");
-                          return rule.getLabel().equals(stl) ? null : stl;
+                          // Every cc_rule depends implicitly on the def_parser tool.
+                          // The only exceptions are the rules for building def_parser itself.
+                          // To avoid cycles in the dependency graph, return null for rules under
+                          // @bazel_tools//third_party/def_parser and @bazel_tools//tools/cpp
+                          String label = rule.getLabel().toString();
+                          String toolsRepository = env.getToolsRepository();
+                          return label.startsWith(toolsRepository + "//third_party/def_parser")
+                                  // @bazel_tools//tools/cpp:malloc and @bazel_tools//tools/cpp:stl
+                                  // are implicit dependencies of all cc rules,
+                                  // thus a dependency of the def_parser.
+                                  || label.startsWith(toolsRepository + "//tools/cpp")
+                              ? null
+                              : env.getToolsLabel("//tools/def_parser:def_parser");
                         }
                       }))
           .build();
@@ -419,22 +403,12 @@ public class BazelCppRuleClasses {
     }
   }
 
-  /** Implementation for the :lipo_context attribute. */
-  static final LateBoundDefault<?, Label> LIPO_CONTEXT =
-      LateBoundDefault.fromTargetConfiguration(
-          CppConfiguration.class,
-          null,
-          (rule, attributes, cppConfig) -> {
-            Label result = cppConfig.getLipoContextLabel();
-            return (rule == null || rule.getLabel().equals(result)) ? null : result;
-          });
-
   /**
    * Helper rule class.
    */
   public static final class CcLibraryBaseRule implements RuleDefinition {
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           /*<!-- #BLAZE_RULE($cc_library).ATTRIBUTE(hdrs) -->
            The list of header files published by
@@ -487,7 +461,17 @@ public class BazelCppRuleClasses {
                   .orderIndependent()
                   .direct_compile_time_input()
                   .legacyAllowAnyFileType())
-          // TODO(bazel-team): document or remove.
+          /* <!-- #BLAZE_RULE($cc_library).ATTRIBUTE(linkstamp) -->
+          Simultaneously compiles and links the specified C++ source file into the final
+          binary. This trickery is required to introduce timestamp
+          information into binaries; if we compiled the source file to an
+          object file in the usual way, the timestamp would be incorrect.
+          A linkstamp compilation may not include any particular set of
+          compiler flags and so should not depend on any particular
+          header, compiler option, or other build variable.
+          <em class='harmful'>This option should only be needed in the
+          <code>base</code> package.</em>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("linkstamp", LABEL).allowedFileTypes(CPP_SOURCE, C_SOURCE))
           .build();
     }
@@ -504,9 +488,45 @@ public class BazelCppRuleClasses {
 
   /** Helper rule class. */
   public static final class CcBinaryBaseRule implements RuleDefinition {
+    private final GraphNodeAspect graphNodeAspect;
+
+    public CcBinaryBaseRule(GraphNodeAspect graphNodeAspect) {
+      this.graphNodeAspect = graphNodeAspect;
+    }
+
     @Override
-    public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+    public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
+          /*<!-- #BLAZE_RULE($cc_binary_base).ATTRIBUTE(additional_linker_inputs) -->
+           Pass these files to the C++ linker command.
+           <p>
+           For example, compiled Windows .res files can be provided here to be embedded in
+           the binary target.
+           </p>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(
+              attr("additional_linker_inputs", LABEL_LIST)
+                  .orderIndependent()
+                  .direct_compile_time_input()
+                  .allowedFileTypes(FileTypeSet.ANY_FILE))
+          .override(
+              attr("deps", LABEL_LIST)
+                  .allowedRuleClasses(DEPS_ALLOWED_RULES)
+                  .allowedFileTypes(CppFileTypes.LINKER_SCRIPT)
+                  .skipAnalysisTimeFileTypeCheck()
+                  .mandatoryProviders(StarlarkProviderIdentifier.forKey(CcInfo.PROVIDER.getKey()))
+                  .aspect(graphNodeAspect, GraphNodeAspect.ASPECT_PARAMETERS))
+          .add(
+              attr("dynamic_deps", LABEL_LIST)
+                  .allowedFileTypes(FileTypeSet.NO_FILE)
+                  .mandatoryProvidersList(
+                      ImmutableList.of(
+                          ImmutableList.of(
+                              StarlarkProviderIdentifier.forKey(
+                                  BazelCppSemantics.CC_SHARED_INFO_PROVIDER)),
+                          ImmutableList.of(
+                              StarlarkProviderIdentifier.forKey(
+                                  BazelCppSemantics.CC_SHARED_INFO_PROVIDER_RULES_CC)))))
           /*<!-- #BLAZE_RULE($cc_binary_base).ATTRIBUTE(malloc) -->
           Override the default dependency on malloc.
           <p>
@@ -514,14 +534,15 @@ public class BazelCppRuleClasses {
             which is an empty library so the binary ends up using libc malloc.
             This label must refer to a <code>cc_library</code>. If compilation is for a non-C++
             rule, this option has no effect. The value of this attribute is ignored if
-            <code>linkshared=1</code> is specified.
+            <code>linkshared=True</code> is specified.
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(
               attr("malloc", LABEL)
                   .value(env.getToolsLabel("//tools/cpp:malloc"))
                   .allowedFileTypes()
-                  .allowedRuleClasses("cc_library"))
+                  .allowedRuleClasses("cc_library")
+                  .aspect(graphNodeAspect, GraphNodeAspect.ASPECT_PARAMETERS))
           .add(attr(":default_malloc", LABEL).value(CppRuleClasses.DEFAULT_MALLOC))
           /*<!-- #BLAZE_RULE($cc_binary_base).ATTRIBUTE(stamp) -->
           Enable link stamping.

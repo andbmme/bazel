@@ -13,18 +13,21 @@
 // limitations under the License.
 package com.google.devtools.build.lib.testutil;
 
+import com.google.devtools.build.lib.analysis.BlazeDirectories;
+import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
+import com.google.devtools.build.lib.packages.BuilderFactoryForTesting;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.PackageFactory;
+import com.google.devtools.build.lib.packages.PackageLoadingListener;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.skyframe.packages.PackageFactoryBuilderWithSkyframeForTesting;
 import com.google.devtools.build.lib.vfs.FileSystem;
 
 /**
- * A {@link PackageFactory.BuilderFactoryForTesting} implementation that injects a
- * {@link BazelPackageBuilderHelperForTesting}.
+ * A {@link BuilderFactoryForTesting} implementation that injects a {@link
+ * BazelPackageLoadingListenerForTesting}.
  */
-class PackageFactoryBuilderFactoryForBazelUnitTests
-    extends PackageFactory.BuilderFactoryForTesting {
+class PackageFactoryBuilderFactoryForBazelUnitTests implements BuilderFactoryForTesting {
   static final PackageFactoryBuilderFactoryForBazelUnitTests INSTANCE =
       new PackageFactoryBuilderFactoryForBazelUnitTests();
 
@@ -32,25 +35,31 @@ class PackageFactoryBuilderFactoryForBazelUnitTests
   }
 
   @Override
-  public PackageFactoryBuilderWithSkyframeForTesting builder() {
-    return new PackageFactoryBuilderForBazelUnitTests();
+  public PackageFactoryBuilderWithSkyframeForTesting builder(BlazeDirectories directories) {
+    return new PackageFactoryBuilderForBazelUnitTests(directories);
   }
 
   private static class PackageFactoryBuilderForBazelUnitTests
       extends PackageFactoryBuilderWithSkyframeForTesting {
+
+    private final BlazeDirectories directories;
+
+    public PackageFactoryBuilderForBazelUnitTests(BlazeDirectories directories) {
+      this.directories = directories;
+    }
+
     @Override
     public PackageFactory build(RuleClassProvider ruleClassProvider, FileSystem fs) {
-      Package.Builder.Helper packageBuilderHelperForTesting = doChecksForTesting
-          ? new BazelPackageBuilderHelperForTesting(ruleClassProvider)
-          : Package.Builder.DefaultHelper.INSTANCE;
       return new PackageFactory(
           ruleClassProvider,
-          platformSetRegexps,
-          attributeContainerFactory,
           environmentExtensions,
           version,
-          packageBuilderHelperForTesting);
+          Package.Builder.DefaultHelper.INSTANCE,
+          packageValidator,
+          doChecksForTesting
+              ? new BazelPackageLoadingListenerForTesting(
+                  (ConfiguredRuleClassProvider) ruleClassProvider, directories)
+              : PackageLoadingListener.NOOP_LISTENER);
     }
   }
 }
-

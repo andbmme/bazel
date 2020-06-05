@@ -23,6 +23,10 @@ source "${CURRENT_DIR}/../shell_utils.sh" \
 source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
 
+# Load the helper utils.
+source "${CURRENT_DIR}/java_integration_test_utils.sh" \
+  || { echo "java_integration_test_utils.sh not found!" >&2; exit 1; }
+
 set -eu
 
 declare -r runfiles_relative_javabase="$1"
@@ -254,14 +258,20 @@ function assert_singlejar_works() {
   mkdir -p "$pkg/jvm"
   cat > "$pkg/jvm/BUILD" <<EOF
 package(default_visibility=["//visibility:public"])
-java_runtime_suite(name='suite', default=':runtime')
-java_runtime(name='runtime', java_home='$javabase')
+java_runtime(
+    name='runtime',
+    java_home='$javabase',
+)
 EOF
 
+  create_java_test_platforms
 
   # Set javabase to an absolute path.
   bazel build //$pkg/java/hello:hello //$pkg/java/hello:hello_deploy.jar \
-      "$stamp_arg" --javabase="//$pkg/jvm:suite" "$embed_label" >&"$TEST_log" \
+      "$stamp_arg" --javabase="//$pkg/jvm:runtime" \
+      --extra_toolchains="//$pkg/jvm:all,//tools/jdk:all" \
+      --platforms="//$pkg/jvm:platform" \
+      "$embed_label" >&"$TEST_log" \
       || fail "Build failed"
 
   mkdir $pkg/ugly/ || fail "mkdir failed"
@@ -317,7 +327,7 @@ function test_deterministic_nostamp_build() {
   # https://github.com/bazelbuild/bazel/issues/3156
   local -r first_run="$(md5_file $(find "${PRODUCT_NAME}-out/" -type f '!' \
       -name build-changelist.txt -a '!' -name volatile-status.txt \
-      -a '!' -name stderr-* -a '!' -name *.a \
+      -a '!' -name 'stderr-*' -a '!' -name '*.a' \
       -a '!' -name __xcodelocatorcache -a '!' -name __xcruncache \
       | sort -u))"
 
@@ -328,7 +338,7 @@ function test_deterministic_nostamp_build() {
       || fail "Build failed"
   local -r second_run="$(md5_file $(find "${PRODUCT_NAME}-out/" -type f '!' \
       -name build-changelist.txt -a '!' -name volatile-status.txt \
-      -a '!' -name stderr-* -a '!' -name *.a \
+      -a '!' -name 'stderr-*' -a '!' -name '*.a' \
       -a '!' -name __xcodelocatorcache -a '!' -name __xcruncache \
       | sort -u))"
 
@@ -635,22 +645,21 @@ EOF
 function test_jvm_flags_are_passed_verbatim() {
   local -r pkg="${FUNCNAME[0]}"
   mkdir -p $pkg/java/com/google/jvmflags || fail "mkdir"
-  cat >$pkg/java/com/google/jvmflags/BUILD <<'EOF'
+  cat >$pkg/java/com/google/jvmflags/BUILD <<EOF
 java_binary(
     name = 'foo',
     srcs = ['Foo.java'],
     main_class = 'com.google.jvmflags.Foo',
+    toolchains = ['${TOOLS_REPOSITORY}//tools/jdk:current_java_runtime'],
     jvm_flags = [
         # test quoting
-        '--a=\'single_single\'',
+        '--a=\\'single_single\\'',
         '--b="single_double"',
         "--c='double_single'",
-        "--d=\"double_double\"",
+        "--d=\\"double_double\\"",
         '--e=no_quotes',
         # no escaping expected
-        '--f=stuff$$to"escape\\',
-        # test make variable expansion
-        '--g=$(JAVABASE)',
+        '--f=stuff\$\$to"escape\\\\',
     ],
 )
 EOF
@@ -672,7 +681,6 @@ EOF
       " --d=\"double_double\" " \
       ' --e=no_quotes ' \
       ' --f=stuff$to"escape\\ ' \
-      " --g=${runfiles_relative_javabase}" \
       ; do
     # NOTE: don't test the full path of the JDK, it's architecture-dependent.
     assert_contains $flag $STUBSCRIPT
@@ -809,8 +817,8 @@ java_library(
 )
 EOF
   bazel build --java_header_compilation=true \
-    //$pkg/java/test:a >& "$TEST_log" && fail "Unexpected success"
-  expect_log "package missing does not exist"
+    //$pkg/java/test:liba.jar >& "$TEST_log" && fail "Unexpected success"
+  expect_log "symbol not found missing.NoSuch"
 }
 
 function test_java_import_with_empty_jars_attribute() {

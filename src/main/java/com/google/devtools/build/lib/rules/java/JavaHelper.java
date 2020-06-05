@@ -16,50 +16,49 @@ package com.google.devtools.build.lib.rules.java;
 import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL_LIST;
 
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.Type;
 import com.google.devtools.build.lib.shell.ShellUtils;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Utility methods for use by Java-related parts of Bazel.
- */
+/** Utility methods for use by Java-related parts of Bazel. */
 // TODO(bazel-team): Merge with JavaUtil.
 public abstract class JavaHelper {
 
   private JavaHelper() {}
 
   /**
-   * Returns the java launcher implementation for the given target, if any.
-   * A null return value means "use the JDK launcher".
+   * Returns the java launcher implementation for the given target, if any. A null return value
+   * means "use the JDK launcher".
    */
-  public static TransitiveInfoCollection launcherForTarget(JavaSemantics semantics,
-      RuleContext ruleContext) {
+  public static TransitiveInfoCollection launcherForTarget(
+      JavaSemantics semantics, RuleContext ruleContext) {
     String launcher = filterLauncherForTarget(ruleContext);
-    return (launcher == null) ? null : ruleContext.getPrerequisite(launcher, Mode.TARGET);
+    return (launcher == null) ? null : ruleContext.getPrerequisite(launcher, TransitionMode.TARGET);
   }
 
   /**
-   * Returns the java launcher artifact for the given target, if any.
-   * A null return value means "use the JDK launcher".
+   * Returns the java launcher artifact for the given target, if any. A null return value means "use
+   * the JDK launcher".
    */
-  public static Artifact launcherArtifactForTarget(JavaSemantics semantics,
-      RuleContext ruleContext) {
+  public static Artifact launcherArtifactForTarget(
+      JavaSemantics semantics, RuleContext ruleContext) {
     String launcher = filterLauncherForTarget(ruleContext);
-    return (launcher == null) ? null : ruleContext.getPrerequisiteArtifact(launcher, Mode.TARGET);
+    return (launcher == null)
+        ? null
+        : ruleContext.getPrerequisiteArtifact(launcher, TransitionMode.TARGET);
   }
 
   /**
-   * Control structure abstraction for safely extracting a prereq from the launcher attribute
-   * or --java_launcher flag.
+   * Control structure abstraction for safely extracting a prereq from the launcher attribute or
+   * --java_launcher flag.
    */
   private static String filterLauncherForTarget(RuleContext ruleContext) {
     // create_executable=0 disables the launcher
@@ -86,8 +85,8 @@ public abstract class JavaHelper {
   }
 
   /**
-   * Javac options require special processing - People use them and expect the
-   * options to be tokenized.
+   * Javac options require special processing - People use them and expect the options to be
+   * tokenized.
    */
   public static List<String> tokenizeJavaOptions(Iterable<String> inOpts) {
     // Ideally, this would be in the options parser. Unfortunately,
@@ -100,7 +99,7 @@ public abstract class JavaHelper {
         ShellUtils.tokenize(result, current);
       } catch (ShellUtils.TokenizationException ex) {
         // Tokenization failed; this likely means that the user
-        // did not want tokenization to happen on his argument.
+        // did not want tokenization to happen on their argument.
         // (Any tokenization where we should produce an error
         // has already been done by the shell that invoked
         // blaze). Therefore, pass the argument through to
@@ -112,11 +111,15 @@ public abstract class JavaHelper {
   }
 
   public static PathFragment getJavaResourcePath(
-      JavaSemantics semantics, RuleContext ruleContext, Artifact resource) {
+      JavaSemantics semantics, RuleContext ruleContext, Artifact resource)
+      throws InterruptedException {
     PathFragment rootRelativePath = resource.getRootRelativePath();
+    StarlarkSemantics starlarkSemantics =
+        ruleContext.getAnalysisEnvironment().getStarlarkSemantics();
 
-    if (!resource.getOwner().getWorkspaceRoot().isEmpty()) {
-      PathFragment workspace = PathFragment.create(resource.getOwner().getWorkspaceRoot());
+    if (!ruleContext.getLabel().getWorkspaceRoot(starlarkSemantics).isEmpty()) {
+      PathFragment workspace =
+          PathFragment.create(ruleContext.getLabel().getWorkspaceRoot(starlarkSemantics));
       rootRelativePath = rootRelativePath.relativeTo(workspace);
     }
 
@@ -129,56 +132,14 @@ public abstract class JavaHelper {
         PathFragment.create(ruleContext.attributes().get("resource_strip_prefix", Type.STRING));
 
     if (!rootRelativePath.startsWith(prefix)) {
-      ruleContext.attributeError("resource_strip_prefix", String.format(
-          "Resource file '%s' is not under the specified prefix to strip", rootRelativePath));
+      ruleContext.attributeError(
+          "resource_strip_prefix",
+          String.format(
+              "Resource file '%s' is not under the specified prefix to strip", rootRelativePath));
       return rootRelativePath;
     }
 
     return rootRelativePath.relativeTo(prefix);
-  }
-
-  /** Returns the configured target found under the {@code :host_jdk} attribute of a given rule. */
-  public static TransitiveInfoCollection getHostJavabaseTarget(RuleContext ruleContext) {
-    return getHostJavabaseTarget(ruleContext, "");
-  }
-
-  /**
-   * Returns the configured target found under the {@code :host_jdk + implicitAttributesSuffix}
-   * attribute of a given rule.
-   * */
-  public static TransitiveInfoCollection getHostJavabaseTarget(
-      RuleContext ruleContext, String implicitAttributesSuffix) {
-    return ruleContext.getPrerequisite(":host_jdk" + implicitAttributesSuffix, Mode.HOST);
-  }
-
-  /** Returns the artifacts required to invoke {@code javahome} relative binary in the action. */
-  public static NestedSet<Artifact> getHostJavabaseInputs(RuleContext ruleContext) {
-    return getHostJavabaseInputs(ruleContext, "");
-  }
-
-  /** Returns the artifacts required to invoke {@code javahome} relative binary in the action. */
-  public static NestedSet<Artifact> getHostJavabaseInputs(
-      RuleContext ruleContext, String implicitAttributesSuffix) {
-    return AnalysisUtils.getMiddlemanFor(
-        ruleContext, ":host_jdk" + implicitAttributesSuffix, Mode.HOST);
-  }
-
-  public static JavaRuntimeInfo getJavaRuntime(RuleContext ruleContext) {
-    if (!ruleContext.attributes().has(":jvm", BuildType.LABEL)) {
-      return null;
-    }
-
-    TransitiveInfoCollection jvm = ruleContext.getPrerequisite(":jvm", Mode.TARGET);
-    return jvm == null ? null :  jvm.get(JavaRuntimeInfo.PROVIDER);
-  }
-
-  public static JavaRuntimeInfo getHostJavaRuntime(RuleContext ruleContext) {
-    if (!ruleContext.attributes().has(":host_jdk", BuildType.LABEL)) {
-      return null;
-    }
-
-    TransitiveInfoCollection jvm = ruleContext.getPrerequisite(":host_jdk", Mode.HOST);
-    return jvm == null ? null :  jvm.get(JavaRuntimeInfo.PROVIDER);
   }
 
   /**
@@ -187,6 +148,11 @@ public abstract class JavaHelper {
    * will ever be used.
    */
   public static boolean isJdkLauncher(RuleContext ruleContext, Label label) {
-    return ruleContext.attributes().get("$no_launcher", NODEP_LABEL_LIST).contains(label);
+    if (!ruleContext.attributes().has("$no_launcher")) {
+      return false;
+    }
+    List<Label> noLauncherAttribute =
+        ruleContext.attributes().get("$no_launcher", NODEP_LABEL_LIST);
+    return noLauncherAttribute != null && noLauncherAttribute.contains(label);
   }
 }

@@ -20,10 +20,11 @@ import com.google.common.eventbus.SubscriberExceptionHandler;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
-import com.google.devtools.build.lib.analysis.config.BinTools;
+import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.profiler.memory.AllocationTracker;
 import com.google.devtools.build.lib.skyframe.DiffAwareness;
+import com.google.devtools.build.lib.skyframe.ManagedDirectoriesKnowledge;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutorFactory;
 import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
@@ -52,6 +53,7 @@ public final class WorkspaceBuilder {
   private final ImmutableList.Builder<SkyValueDirtinessChecker> customDirtinessCheckers =
       ImmutableList.builder();
   private AllocationTracker allocationTracker;
+  private ManagedDirectoriesKnowledge managedDirectoriesKnowledge;
 
   WorkspaceBuilder(BlazeDirectories directories, BinTools binTools) {
     this.directories = directories;
@@ -65,7 +67,8 @@ public final class WorkspaceBuilder {
       SubscriberExceptionHandler eventBusExceptionHandler) throws AbruptExitException {
     // Set default values if none are set.
     if (skyframeExecutorFactory == null) {
-      skyframeExecutorFactory = new SequencedSkyframeExecutorFactory();
+      skyframeExecutorFactory =
+          new SequencedSkyframeExecutorFactory(runtime.getDefaultBuildOptions());
     }
 
     SkyframeExecutor skyframeExecutor =
@@ -75,10 +78,10 @@ public final class WorkspaceBuilder {
             directories,
             runtime.getActionKeyContext(),
             workspaceStatusActionFactory,
-            ruleClassProvider.getBuildInfoFactories(),
             diffAwarenessFactories.build(),
             skyFunctions.build(),
-            customDirtinessCheckers.build());
+            customDirtinessCheckers.build(),
+            managedDirectoriesKnowledge);
     return new BlazeWorkspace(
         runtime,
         directories,
@@ -150,6 +153,12 @@ public final class WorkspaceBuilder {
   public WorkspaceBuilder addCustomDirtinessChecker(
       SkyValueDirtinessChecker customDirtinessChecker) {
     this.customDirtinessCheckers.add(Preconditions.checkNotNull(customDirtinessChecker));
+    return this;
+  }
+
+  public WorkspaceBuilder setManagedDirectoriesKnowledge(
+      ManagedDirectoriesKnowledge managedDirectoriesKnowledge) {
+    this.managedDirectoriesKnowledge = managedDirectoriesKnowledge;
     return this;
   }
 }

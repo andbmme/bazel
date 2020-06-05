@@ -18,12 +18,14 @@ import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.google.devtools.build.docgen.DocCheckerUtils;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
+import com.google.devtools.build.lib.exec.TestPolicy;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
 import com.google.devtools.build.lib.runtime.BlazeCommandUtils;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
-import com.google.devtools.build.lib.runtime.BuiltinCommandModule;
 import com.google.devtools.build.lib.runtime.ServerBuilder;
+import com.google.devtools.build.lib.runtime.commands.BuiltinCommandModule;
+import com.google.devtools.build.lib.runtime.commands.RunCommand;
 import com.google.devtools.common.options.Options;
 import com.google.devtools.common.options.OptionsBase;
 import java.util.HashSet;
@@ -34,6 +36,12 @@ import java.util.regex.Pattern;
 
 /** Utility functions for validating correctness of Bazel documentation. */
 public abstract class DocumentationTestUtil {
+
+  private static final class DummyBuiltinCommandModule extends BuiltinCommandModule {
+    DummyBuiltinCommandModule() {
+      super(new RunCommand(TestPolicy.EMPTY_POLICY));
+    }
+  }
 
   private DocumentationTestUtil() {}
 
@@ -49,7 +57,8 @@ public abstract class DocumentationTestUtil {
   public static void validateUserManual(
       List<Class<? extends BlazeModule>> modules,
       ConfiguredRuleClassProvider ruleClassProvider,
-      String documentationSource)
+      String documentationSource,
+      Set<String> extraValidOptions)
       throws Exception {
     // if there is a class missing, one can find it using
     //   find . -name "*.java" -exec grep -Hn "@Option(name = " {} \; | grep "xxx"
@@ -63,13 +72,11 @@ public abstract class DocumentationTestUtil {
         BlazeCommandUtils.getStartupOptions(blazeModules)) {
       validOptions.addAll(Options.getDefaults(optionsClass).asMap().keySet());
     }
-    // --bazelrc and --master_bazelrc are aliases for blaze equivalents. Add these explicitly.
-    validOptions.add("bazelrc");
-    validOptions.add("master_bazelrc");
+    validOptions.addAll(extraValidOptions);
 
     // collect all command options
     ServerBuilder serverBuilder = new ServerBuilder();
-    new BuiltinCommandModule().serverInit(null, serverBuilder);
+    new DummyBuiltinCommandModule().serverInit(null, serverBuilder);
     for (BlazeModule module : blazeModules) {
       module.serverInit(null, serverBuilder);
     }
@@ -97,7 +104,7 @@ public abstract class DocumentationTestUtil {
         found = validOptions.contains(flag.substring(4));
       }
 
-      assertWithMessage("flag '" + flag + "' is not a blaze option (anymore)").that(found).isTrue();
+      assertWithMessage("flag '" + flag + "' is not a bazel option (anymore)").that(found).isTrue();
     }
 
     String unclosedTag = DocCheckerUtils.getFirstUnclosedTagAndPrintHelp(documentationSource);

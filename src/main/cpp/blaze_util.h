@@ -21,22 +21,16 @@
 
 #include <sys/types.h>
 
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "src/main/cpp/util/path.h"
+
 namespace blaze {
 
 extern const char kServerPidFile[];
-
-// Returns the given path in absolute form.  Does not change paths that are
-// already absolute.
-//
-// If called from working directory "/bar":
-//   MakeAbsolute("foo") --> "/bar/foo"
-//   MakeAbsolute("/foo") ---> "/foo"
-//   MakeAbsolute("C:/foo") ---> "C:/foo"
-std::string MakeAbsolute(const std::string &path);
 
 // If 'arg' matches 'key=value', returns address of 'value'.
 // If it matches 'key' alone, returns address of next_arg.
@@ -52,43 +46,37 @@ bool GetNullaryOption(const char *arg, const char *key);
 
 // Searches for 'key' in 'args' using GetUnaryOption. Arguments found after '--'
 // are omitted from the search.
+// When 'warn_if_dupe' is true, the method checks if 'key' is specified more
+// than once and prints a warning if so.
 // Returns the value of the 'key' flag iff it occurs in args.
 // Returns NULL otherwise.
 const char* SearchUnaryOption(const std::vector<std::string>& args,
-                              const char* key);
+                              const char* key, bool warn_if_dupe);
 
-// Searches for 'key' in 'args' using GetNullaryOption.
-// Arguments found after '--' are omitted from the search.
-// Returns true iff key is a flag in args.
+// Searches for '--flag_name' and '--noflag_name' in 'args' using
+// GetNullaryOption. Arguments found after '--' are omitted from the search.
+// Returns true if '--flag_name' is a flag in args and '--noflag_name' does not
+// appear after its last occurrence. If neither '--flag_name' nor
+// '--noflag_name' appear, returns 'default_value'. Otherwise, returns false.
 bool SearchNullaryOption(const std::vector<std::string>& args,
-                         const char* key);
-
-// Enable messages mostly of interest to developers.
-bool VerboseLogging();
-
-// Read the JVM version from a string. The string should contain the output of a
-// "java -version" execution and is supposed to contain a string of the form
-// 'version "version-number"' in the first 255 bytes. If the string is found,
-// version-number is returned, else the empty string is returned.
-std::string ReadJvmVersion(const std::string &version_string);
-
-// Returns true iff jvm_version is at least the version specified by
-// version_spec.
-// jvm_version is supposed to be a string specifying a java runtime version
-// as specified by the JSR-56 appendix A. version_spec is supposed to be a
-// version is the format [0-9]+(.[1-9]+)*.
-bool CheckJavaVersionIsAtLeast(const std::string &jvm_version,
-                               const std::string &version_spec);
+                         const std::string& flag_name,
+                         const bool default_value);
 
 // Returns true iff arg is a valid command line argument for bazel.
 bool IsArg(const std::string& arg);
+
+// Returns the flag value as an absolute path. For legacy reasons, it accepts
+// the empty string as cwd.
+// TODO(b/109874628): Assess if removing the empty string case would break
+// legitimate uses, and if not, remove it.
+std::string AbsolutePathFromFlag(const std::string& value);
 
 // Wait to see if the server process terminates. Checks the server's status
 // immediately, and repeats the check every 100ms until approximately
 // wait_seconds elapses or the server process terminates. Returns true if a
 // check sees that the server process terminated. Logs to stderr after 5, 10,
 // and 30 seconds if the wait lasts that long.
-bool AwaitServerProcessTermination(int pid, const std::string& output_base,
+bool AwaitServerProcessTermination(int pid, const blaze_util::Path& output_base,
                                    unsigned int wait_seconds);
 
 // The number of seconds the client will wait for the server process to
@@ -102,23 +90,45 @@ extern const unsigned int kPostShutdownGracePeriodSeconds;
 // time, if the server process remains, the client will die.
 extern const unsigned int kPostKillGracePeriodSeconds;
 
-// Returns the string representation of `value`.
-// Workaround for mingw where std::to_string is not implemented.
-// See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=52015.
-template <typename T>
-std::string ToString(const T &value) {
-  std::ostringstream oss;
-  oss << value;
-  return oss.str();
-}
-
 // Control the output of debug information by debug_log.
 // Revisit once client logging is fixed (b/32939567).
 void SetDebugLog(bool enabled);
 
-// Output debug information from client.
-// Revisit once client logging is fixed (b/32939567).
-void debug_log(const char *format, ...);
+// Returns true if this Bazel instance is running inside of a Bazel test.
+// This method observes the TEST_TMPDIR envvar.
+bool IsRunningWithinTest();
+
+// What WithEnvVar should do with an environment variable
+enum EnvVarAction { UNSET, SET };
+
+// What WithEnvVar should do with an environment variable
+struct EnvVarValue {
+  // What should be done with the given variable
+  EnvVarAction action;
+
+  // The value of the variable; ignored if action == UNSET
+  std::string value;
+
+  EnvVarValue() {}
+
+  EnvVarValue(EnvVarAction action, const std::string& value)
+      : action(action),
+        value(value) {}
+};
+
+// While this class is in scope, the specified environment variables will be set
+// to a specified value (or unset). When it leaves scope, changed variables will
+// be set to their original values.
+class WithEnvVars {
+ private:
+  std::map<std::string, EnvVarValue> _old_values;
+
+  void SetEnvVars(const std::map<std::string, EnvVarValue>& vars);
+
+ public:
+  WithEnvVars(const std::map<std::string, EnvVarValue>& vars);
+  ~WithEnvVars();
+};
 
 }  // namespace blaze
 

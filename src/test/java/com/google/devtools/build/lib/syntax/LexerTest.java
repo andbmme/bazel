@@ -15,13 +15,9 @@ package com.google.devtools.build.lib.syntax;
 
 import static com.google.common.truth.Truth.assertThat;
 
-import com.google.common.eventbus.EventBus;
-import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.EventKind;
-import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.events.Reporter;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.common.base.Joiner;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -31,48 +27,73 @@ import org.junit.runners.JUnit4;
  */
 @RunWith(JUnit4.class)
 public class LexerTest {
+
+  // TODO(adonovan): make these these tests less unnecessarily stateful.
+
+  private final List<SyntaxError> errors = new ArrayList<>();
   private String lastError;
-  private Location lastErrorLocation;
 
   /**
    * Create a lexer which takes input from the specified string. Resets the
    * error handler beforehand.
    */
   private Lexer createLexer(String input) {
-    PathFragment somePath = PathFragment.create("/some/path.txt");
-    ParserInputSource inputSource = ParserInputSource.create(input, somePath);
-    Reporter reporter = new Reporter(new EventBus());
-    reporter.addHandler(new EventHandler() {
-      @Override
-      public void handle(Event event) {
-        if (EventKind.ERRORS.contains(event.getKind())) {
-          lastErrorLocation = event.getLocation();
-          lastError = lastErrorLocation.getPath() + ":"
-              + event.getLocation().getStartLineAndColumn().getLine() + ": " + event.getMessage();
-        }
-      }
-    });
-
-    return new Lexer(inputSource, reporter);
+    ParserInput inputSource = ParserInput.create(input, "/some/path.txt");
+    errors.clear();
+    lastError = null;
+    return new Lexer(inputSource, FileOptions.DEFAULT, errors);
   }
 
-  public Token[] tokens(String input) {
-    return createLexer(input).getTokens().toArray(new Token[0]);
+  private static class Token {
+    TokenKind kind;
+    int start;
+    int end;
+    Object value;
+
+    @Override
+    public String toString() {
+      return kind == TokenKind.STRING
+          ? "\"" + value + "\""
+          : value == null ? kind.toString() : value.toString();
+    }
+  }
+
+  private ArrayList<Token> allTokens(Lexer lexer) {
+    ArrayList<Token> result = new ArrayList<>();
+    do {
+      lexer.nextToken();
+      Token tok = new Token();
+      tok.kind = lexer.kind;
+      tok.start = lexer.start;
+      tok.end = lexer.end;
+      tok.value = lexer.value;
+      result.add(tok);
+    } while (lexer.kind != TokenKind.EOF);
+
+    for (SyntaxError error : errors) {
+      lastError = error.location().file() + ":" + error.location().line() + ": " + error.message();
+    }
+
+    return result;
+  }
+
+  private Token[] tokens(String input) {
+    ArrayList<Token> result = allTokens(createLexer(input));
+    return result.toArray(new Token[0]);
   }
 
   /**
-   * Lexes the specified input string, and returns a string containing just the
-   * linenumbers of each token.
+   * Lexes the specified input string, and returns a string containing just the line numbers of each
+   * token.
    */
   private String linenums(String input) {
     Lexer lexer = createLexer(input);
     StringBuilder buf = new StringBuilder();
-    for (Token tok : lexer.getTokens()) {
+    for (Token tok : allTokens(lexer)) {
       if (buf.length() > 0) {
         buf.append(' ');
       }
-      int line =
-        lexer.createLocation(tok.left, tok.left).getStartLineAndColumn().getLine();
+      int line = lexer.locs.getLocation(tok.start).line();
       buf.append(line);
     }
     return buf.toString();
@@ -120,11 +141,7 @@ public class LexerTest {
       if (buf.length() > 0) {
         buf.append(' ');
       }
-      buf.append('[')
-         .append(tok.left)
-         .append(',')
-         .append(tok.right)
-         .append(')');
+      buf.append('[').append(tok.start).append(',').append(tok.end).append(')');
     }
     return buf.toString();
   }
@@ -133,37 +150,49 @@ public class LexerTest {
   public void testBasics1() throws Exception {
     assertThat(names(tokens("wiz) "))).isEqualTo("IDENTIFIER RPAREN NEWLINE EOF");
     assertThat(names(tokens("wiz )"))).isEqualTo("IDENTIFIER RPAREN NEWLINE EOF");
-    assertThat(names(tokens(" wiz)"))).isEqualTo("IDENTIFIER RPAREN NEWLINE EOF");
-    assertThat(names(tokens(" wiz ) "))).isEqualTo("IDENTIFIER RPAREN NEWLINE EOF");
+    assertThat(names(tokens(" wiz)")))
+        .isEqualTo("INDENT IDENTIFIER RPAREN NEWLINE OUTDENT NEWLINE EOF");
+    assertThat(names(tokens(" wiz ) ")))
+        .isEqualTo("INDENT IDENTIFIER RPAREN NEWLINE OUTDENT NEWLINE EOF");
     assertThat(names(tokens("wiz\t)"))).isEqualTo("IDENTIFIER RPAREN NEWLINE EOF");
   }
 
   @Test
   public void testBasics2() throws Exception {
     assertThat(names(tokens(")"))).isEqualTo("RPAREN NEWLINE EOF");
-    assertThat(names(tokens(" )"))).isEqualTo("RPAREN NEWLINE EOF");
-    assertThat(names(tokens(" ) "))).isEqualTo("RPAREN NEWLINE EOF");
+    assertThat(names(tokens(" )"))).isEqualTo("INDENT RPAREN NEWLINE OUTDENT NEWLINE EOF");
+    assertThat(names(tokens(" ) "))).isEqualTo("INDENT RPAREN NEWLINE OUTDENT NEWLINE EOF");
     assertThat(names(tokens(") "))).isEqualTo("RPAREN NEWLINE EOF");
   }
 
   @Test
   public void testBasics3() throws Exception {
-    assertThat(names(tokens("123#456\n789"))).isEqualTo("INT COMMENT NEWLINE INT NEWLINE EOF");
-    assertThat(names(tokens("123 #456\n789"))).isEqualTo("INT COMMENT NEWLINE INT NEWLINE EOF");
-    assertThat(names(tokens("123#456 \n789"))).isEqualTo("INT COMMENT NEWLINE INT NEWLINE EOF");
+    assertThat(names(tokens("123#456\n789"))).isEqualTo("INT NEWLINE INT NEWLINE EOF");
+    assertThat(names(tokens("123 #456\n789"))).isEqualTo("INT NEWLINE INT NEWLINE EOF");
+    assertThat(names(tokens("123#456 \n789"))).isEqualTo("INT NEWLINE INT NEWLINE EOF");
     assertThat(names(tokens("123#456\n 789")))
-        .isEqualTo("INT COMMENT NEWLINE INDENT INT NEWLINE OUTDENT NEWLINE EOF");
-    assertThat(names(tokens("123#456\n789 "))).isEqualTo("INT COMMENT NEWLINE INT NEWLINE EOF");
+        .isEqualTo("INT NEWLINE INDENT INT NEWLINE OUTDENT NEWLINE EOF");
+    assertThat(names(tokens("123#456\n789 "))).isEqualTo("INT NEWLINE INT NEWLINE EOF");
   }
 
   @Test
   public void testBasics4() throws Exception {
     assertThat(names(tokens(""))).isEqualTo("NEWLINE EOF");
-    assertThat(names(tokens("# foo"))).isEqualTo("COMMENT NEWLINE EOF");
+    assertThat(names(tokens("# foo"))).isEqualTo("NEWLINE EOF");
     assertThat(names(tokens("1 2 3 4"))).isEqualTo("INT INT INT INT NEWLINE EOF");
     assertThat(names(tokens("1.234"))).isEqualTo("INT DOT INT NEWLINE EOF");
     assertThat(names(tokens("foo(bar, wiz)")))
         .isEqualTo("IDENTIFIER LPAREN IDENTIFIER COMMA IDENTIFIER RPAREN " + "NEWLINE EOF");
+  }
+
+  @Test
+  public void testNoWhiteSpaceBetweenTokens() throws Exception {
+    assertThat(names(tokens("6or()"))).isEqualTo("INT OR LPAREN RPAREN NEWLINE EOF");
+    assertThat(names(tokens("0in(''and[])")))
+        .isEqualTo("INT IN LPAREN STRING AND LBRACKET RBRACKET RPAREN NEWLINE EOF");
+
+    assertThat(values(tokens("0or()"))).isEqualTo("INT(0) IDENTIFIER(r) LPAREN RPAREN NEWLINE EOF");
+    assertThat(lastError).isEqualTo("/some/path.txt:1: invalid base-8 integer constant: 0o");
   }
 
   @Test
@@ -177,9 +206,8 @@ public class LexerTest {
   @Test
   public void testCrLf() throws Exception {
     assertThat(names(tokens("\r\n\r\n"))).isEqualTo("NEWLINE EOF");
-    assertThat(names(tokens("\r\n\r1\r\r\n"))).isEqualTo("NEWLINE INT NEWLINE EOF");
-    assertThat(names(tokens("# foo\r\n# bar\r\n")))
-        .isEqualTo("COMMENT NEWLINE COMMENT NEWLINE EOF");
+    assertThat(names(tokens("\r\n\r1\r\r\n"))).isEqualTo("INT NEWLINE EOF");
+    assertThat(names(tokens("# foo\r\n# bar\r\n"))).isEqualTo("NEWLINE EOF");
   }
 
   @Test
@@ -191,7 +219,6 @@ public class LexerTest {
     assertThat(values(tokens("12345-"))).isEqualTo("INT(12345) MINUS NEWLINE EOF");
 
     // octal
-    assertThat(values(tokens("012345-"))).isEqualTo("INT(5349) MINUS NEWLINE EOF");
     assertThat(values(tokens("0o12345-"))).isEqualTo("INT(5349) MINUS NEWLINE EOF");
     assertThat(values(tokens("0O77"))).isEqualTo("INT(63) NEWLINE EOF");
 
@@ -203,6 +230,10 @@ public class LexerTest {
     assertThat(values(tokens("0o"))).isEqualTo("INT(0) NEWLINE EOF");
     assertThat(lastError.toString())
         .isEqualTo("/some/path.txt:1: invalid base-8 integer constant: 0o");
+
+    assertThat(values(tokens("012345"))).isEqualTo("INT(5349) NEWLINE EOF");
+    assertThat(lastError.toString())
+        .isEqualTo("/some/path.txt:1: invalid octal value `012345`, should be: `0o12345`");
 
     // hexadecimal (uppercase)
     assertThat(values(tokens("0X12345F-"))).isEqualTo("INT(1193055) MINUS NEWLINE EOF");
@@ -220,13 +251,13 @@ public class LexerTest {
 
     assertThat(values(tokens("1.2.345"))).isEqualTo("INT(1) DOT INT(2) DOT INT(345) NEWLINE EOF");
 
-    assertThat(values(tokens("1.23E10"))).isEqualTo("INT(1) DOT INT(0) NEWLINE EOF");
+    assertThat(values(tokens("1.0E10"))).isEqualTo("INT(1) DOT INT(0) NEWLINE EOF");
     assertThat(lastError.toString())
-        .isEqualTo("/some/path.txt:1: invalid base-10 integer constant: 23E10");
+        .isEqualTo("/some/path.txt:1: invalid base-8 integer constant: 0E10");
 
-    assertThat(values(tokens("1.23E-10"))).isEqualTo("INT(1) DOT INT(0) MINUS INT(10) NEWLINE EOF");
+    assertThat(values(tokens("1.03E-10"))).isEqualTo("INT(1) DOT INT(0) MINUS INT(10) NEWLINE EOF");
     assertThat(lastError.toString())
-        .isEqualTo("/some/path.txt:1: invalid base-10 integer constant: 23E");
+        .isEqualTo("/some/path.txt:1: invalid base-8 integer constant: 03E");
 
     assertThat(values(tokens(". 123"))).isEqualTo("DOT INT(123) NEWLINE EOF");
     assertThat(values(tokens(".123"))).isEqualTo("DOT INT(123) NEWLINE EOF");
@@ -263,8 +294,7 @@ public class LexerTest {
     assertThat(values(tokens("'a\\\nb'")))
         .isEqualTo("STRING(ab) NEWLINE EOF"); // escape end of line
     assertThat(values(tokens("\"ab\\ucd\""))).isEqualTo("STRING(abcd) NEWLINE EOF");
-    assertThat(lastError.toString())
-        .isEqualTo("/some/path.txt:1: escape sequence not implemented: \\u");
+    assertThat(lastError).isEqualTo("/some/path.txt:1: invalid escape sequence: \\u");
   }
 
   @Test
@@ -366,7 +396,7 @@ public class LexerTest {
   @Test
   public void testIndentationWithTab() throws Exception {
     tokens("def x():\n\tpass");
-    assertThat(lastError.toString()).contains("Tabulations are not allowed");
+    assertThat(lastError).contains("Tab characters are not allowed");
   }
 
   @Test
@@ -406,35 +436,24 @@ public class LexerTest {
   }
 
   @Test
-  public void testBlankLineIndentation() throws Exception {
-    // Blank lines and comment lines should not generate any newlines indents
-    // (but note that every input ends with NEWLINE EOF).
-    assertThat(names(tokens("\n      #\n"))).isEqualTo("COMMENT NEWLINE EOF");
-    assertThat(names(tokens("      #"))).isEqualTo("COMMENT NEWLINE EOF");
-    assertThat(names(tokens("      #\n"))).isEqualTo("COMMENT NEWLINE EOF");
-    assertThat(names(tokens("      #comment\n"))).isEqualTo("COMMENT NEWLINE EOF");
-    assertThat(names(tokens("def f(x):\n" + "  # comment\n" + "\n" + "  \n" + "  return x\n")))
-        .isEqualTo(
-            "DEF IDENTIFIER LPAREN IDENTIFIER RPAREN COLON NEWLINE "
-                + "COMMENT INDENT RETURN IDENTIFIER NEWLINE "
-                + "OUTDENT NEWLINE EOF");
+  public void testIndentationOnFirstLine() throws Exception {
+    assertThat(values(tokens("    1"))).isEqualTo("INDENT INT(1) NEWLINE OUTDENT NEWLINE EOF");
+    assertThat(values(tokens("\n\n    1"))).isEqualTo("INDENT INT(1) NEWLINE OUTDENT NEWLINE EOF");
   }
 
   @Test
-  public void testMultipleCommentLines() throws Exception {
-    assertThat(
-            names(
-                tokens(
-                    "# Copyright\n"
-                        + "#\n"
-                        + "# A comment line\n"
-                        + "# An adjoining line\n"
-                        + "def f(x):\n"
-                        + "  return x\n")))
+  public void testBlankLineIndentation() throws Exception {
+    // Blank lines and comment lines should not generate any newlines indents
+    // (but note that every input ends with NEWLINE EOF).
+    assertThat(names(tokens("\n      #\n"))).isEqualTo("NEWLINE EOF");
+    assertThat(names(tokens("      #"))).isEqualTo("NEWLINE EOF");
+    assertThat(names(tokens("      #\n"))).isEqualTo("NEWLINE EOF");
+    assertThat(names(tokens("      #comment\n"))).isEqualTo("NEWLINE EOF");
+    assertThat(names(tokens("def f(x):\n" + "  # comment\n" + "\n" + "  \n" + "  return x\n")))
         .isEqualTo(
-            "COMMENT NEWLINE COMMENT COMMENT COMMENT "
-                + "DEF IDENTIFIER LPAREN IDENTIFIER RPAREN COLON NEWLINE "
-                + "INDENT RETURN IDENTIFIER NEWLINE OUTDENT NEWLINE EOF");
+            "DEF IDENTIFIER LPAREN IDENTIFIER RPAREN COLON NEWLINE "
+                + "INDENT RETURN IDENTIFIER NEWLINE "
+                + "OUTDENT NEWLINE EOF");
   }
 
   @Test
@@ -452,7 +471,7 @@ public class LexerTest {
             // foo (     bar   ,     {      1       :
             "[0,3) [3,4) [4,7) [7,8) [9,10) [10,11) [11,12)"
                 //  'quux'  }       ,       """b""" ,       r""     )       NEWLINE EOF
-                + " [13,19) [19,20) [20,21) [22,29) [29,30) [31,34) [34,35) [34,35) [35,35)");
+                + " [13,19) [19,20) [20,21) [22,29) [29,30) [31,34) [34,35) [35,35) [35,35)");
   }
 
   @Test
@@ -476,16 +495,17 @@ public class LexerTest {
   @Test
   public void testContainsErrors() throws Exception {
     Lexer lexerSuccess = createLexer("foo");
-    assertThat(lexerSuccess.containsErrors()).isFalse();
+    allTokens(lexerSuccess); // ensure the file has been completely scanned
+    assertThat(errors).isEmpty();
 
     Lexer lexerFail = createLexer("f$o");
-    assertThat(lexerFail.containsErrors()).isTrue();
+    allTokens(lexerFail);
+    assertThat(errors).isNotEmpty();
 
     String s = "'unterminated";
     lexerFail = createLexer(s);
-    assertThat(lexerFail.containsErrors()).isTrue();
-    assertThat(lastErrorLocation.getStartOffset()).isEqualTo(0);
-    assertThat(lastErrorLocation.getEndOffset()).isEqualTo(s.length());
+    allTokens(lexerFail);
+    assertThat(errors).isNotEmpty();
     assertThat(values(tokens(s))).isEqualTo("STRING(unterminated) NEWLINE EOF");
   }
 
@@ -493,5 +513,34 @@ public class LexerTest {
   public void testUnterminatedRawStringWithEscapingError() throws Exception {
     assertThat(names(tokens("r'\\"))).isEqualTo("STRING NEWLINE EOF");
     assertThat(lastError).isEqualTo("/some/path.txt:1: unterminated string literal at eof");
+  }
+
+  @Test
+  public void testFirstCharIsTab() {
+    assertThat(names(tokens("\t"))).isEqualTo("NEWLINE EOF");
+    assertThat(lastError)
+        .isEqualTo(
+            "/some/path.txt:1: Tab characters are not allowed for indentation. Use spaces"
+                + " instead.");
+  }
+
+  /**
+   * Returns the first error whose string form contains the specified substring, or throws an
+   * informative AssertionError if there is none.
+   *
+   * <p>Exposed for use by other frontend tests.
+   */
+  static SyntaxError assertContainsError(List<SyntaxError> errors, String substr) {
+    for (SyntaxError error : errors) {
+      if (error.toString().contains(substr)) {
+        return error;
+      }
+    }
+    if (errors.isEmpty()) {
+      throw new AssertionError("no errors, want '" + substr + "'");
+    } else {
+      throw new AssertionError(
+          "error '" + substr + "' not found, but got these:\n" + Joiner.on("\n").join(errors));
+    }
   }
 }

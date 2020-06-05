@@ -14,17 +14,12 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
-import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.pkgcache.FilteringPolicy;
 import com.google.devtools.build.lib.skyframe.PrepareDepsOfTargetsUnderDirectoryValue.PrepareDepsOfTargetsUnderDirectoryKey;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
-import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -51,25 +46,18 @@ public class PrepareDepsOfTargetsUnderDirectoryFunction implements SkyFunction {
     ProcessPackageDirectory processPackageDirectory =
         new ProcessPackageDirectory(
             directories,
-            new ProcessPackageDirectory.SkyKeyTransformer() {
-              @Override
-              public SkyKey makeSkyKey(
-                  RepositoryName repository,
-                  RootedPath subdirectory,
-                  ImmutableSet<PathFragment> excludedSubdirectoriesBeneathSubdirectory) {
-                return PrepareDepsOfTargetsUnderDirectoryValue.key(
+            (repository, subdirectory, excludedSubdirectoriesBeneathSubdirectory) ->
+                PrepareDepsOfTargetsUnderDirectoryValue.key(
                     repository,
                     subdirectory,
                     excludedSubdirectoriesBeneathSubdirectory,
-                    filteringPolicy);
-              }
-            });
+                    filteringPolicy));
     ProcessPackageDirectoryResult packageExistenceAndSubdirDeps =
         processPackageDirectory.getPackageExistenceAndSubdirDeps(
             recursivePkgKey.getRootedPath(),
-            recursivePkgKey.getRepository(),
-            env,
-            recursivePkgKey.getExcludedPaths());
+            recursivePkgKey.getRepositoryName(),
+            recursivePkgKey.getExcludedPaths(),
+            env);
     if (env.valuesMissing()) {
       return null;
     }
@@ -80,8 +68,8 @@ public class PrepareDepsOfTargetsUnderDirectoryFunction implements SkyFunction {
               ImmutableList.of(
                   CollectTargetsInPackageValue.key(
                       PackageIdentifier.create(
-                          recursivePkgKey.getRepository(),
-                          recursivePkgKey.getRootedPath().getRelativePath()),
+                          recursivePkgKey.getRepositoryName(),
+                          recursivePkgKey.getRootedPath().getRootRelativePath()),
                       filteringPolicy)),
               keysToRequest);
     }

@@ -13,12 +13,15 @@
 // limitations under the License.
 package com.google.devtools.common.options;
 
-import com.google.common.base.Joiner;
+import static java.util.stream.Collectors.joining;
+
 import com.google.common.base.Verify;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
+import com.google.common.flogger.GoogleLogger;
+import com.google.common.flogger.LazyArgs;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.AllowValues;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.DisallowValues;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.FlagPolicy;
@@ -36,8 +39,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.logging.Level;
-import java.util.logging.Logger;
-import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
 /**
@@ -47,8 +48,7 @@ import javax.annotation.Nullable;
  * <p>"Flag" and "Option" are used interchangeably in this file.
  */
 public final class InvocationPolicyEnforcer {
-
-  private static final Logger logger = Logger.getLogger(InvocationPolicyEnforcer.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   private static final String INVOCATION_POLICY_SOURCE = "Invocation policy";
   @Nullable private final InvocationPolicy invocationPolicy;
@@ -134,9 +134,8 @@ public final class InvocationPolicyEnforcer {
         // This flag doesn't exist. We are deliberately lenient if the flag policy has a flag
         // we don't know about. This is for better future proofing so that as new flags are added,
         // new policies can use the new flags without worrying about older versions of Bazel.
-        logger.log(
-            loglevel,
-            String.format("Flag '%s' specified by invocation policy does not exist", flagName));
+        logger.at(loglevel).log(
+            "Flag '%s' specified by invocation policy does not exist", flagName);
         continue;
       }
 
@@ -187,10 +186,9 @@ public final class InvocationPolicyEnforcer {
           throw new PolicyOperationNotSetException(flagName);
 
         default:
-          logger.warning(
-              String.format(
-                  "Unknown operation '%s' from invocation policy for flag '%s'",
-                  flagPolicy.policy.getOperationCase(), flagName));
+          logger.atWarning().log(
+              "Unknown operation '%s' from invocation policy for flag '%s'",
+              flagPolicy.policy.getOperationCase(), flagName);
           break;
       }
     }
@@ -248,6 +246,15 @@ public final class InvocationPolicyEnforcer {
     OptionPriority nextPriority =
         OptionPriority.lowestOptionPriorityAtCategory(PriorityCategory.INVOCATION_POLICY);
     for (FlagPolicy policy : invocationPolicy.getFlagPoliciesList()) {
+      // Explicitly disallow --config in invocation policy.
+      if (policy.getFlagName().equals("config")) {
+        throw new OptionsParsingException(
+            "Invocation policy is applied after --config expansion, changing config values now "
+                + "would have no effect and is disallowed to prevent confusion. Please remove the "
+                + "following policy : "
+                + policy);
+      }
+
       // These policies are high-level, before expansion, and so are not the implicitDependents or
       // expansions of any other flag, other than in an obtuse sense from --invocation_policy.
       OptionPriority currentPriority = nextPriority;
@@ -263,11 +270,9 @@ public final class InvocationPolicyEnforcer {
       if (optionDescription == null) {
         // InvocationPolicy ignores policy on non-existing flags by design, for version
         // compatibility.
-        logger.log(
-            loglevel,
-            String.format(
-                "Flag '%s' specified by invocation policy does not exist, and will be ignored",
-                policy.getFlagName()));
+        logger.at(loglevel).log(
+            "Flag '%s' specified by invocation policy does not exist, and will be ignored",
+            policy.getFlagName());
         continue;
       }
       FlagPolicyWithContext policyWithContext =
@@ -306,9 +311,7 @@ public final class InvocationPolicyEnforcer {
    * <p>None of the flagPolicies returned should be on expansion flags.
    */
   private static List<FlagPolicyWithContext> expandPolicy(
-      FlagPolicyWithContext originalPolicy,
-      OptionsParser parser,
-      Level loglevel)
+      FlagPolicyWithContext originalPolicy, OptionsParser parser, Level loglevel)
       throws OptionsParsingException {
     List<FlagPolicyWithContext> expandedPolicies = new ArrayList<>();
 
@@ -322,25 +325,17 @@ public final class InvocationPolicyEnforcer {
       return ImmutableList.of(originalPolicy);
     }
 
-    if (logger.isLoggable(loglevel)) {
-      // Log the expansion. This is only really useful for understanding the invocation policy
-      // itself.
-      List<String> subflagNames = new ArrayList<>(subflags.size());
-      for (ParsedOptionDescription subflag : subflags) {
-        subflagNames.add("--" + subflag.getOptionDefinition().getOptionName());
-      }
-
-      logger.logp(
-          loglevel,
-          "InvocationPolicyEnforcer",
-          "expandPolicy",
-          String.format(
-              "Expanding %s on option %s to its %s: %s.",
-              originalPolicy.policy.getOperationCase(),
-              originalPolicy.policy.getFlagName(),
-              isExpansion ? "expansions" : "implied flags",
-              Joiner.on("; ").join(subflagNames)));
-    }
+    // Log the expansion. This is only really useful for understanding the invocation policy itself.
+    logger.at(loglevel).log(
+        "Expanding %s on option %s to its %s: %s.",
+        originalPolicy.policy.getOperationCase(),
+        originalPolicy.policy.getFlagName(),
+        isExpansion ? "expansions" : "implied flags",
+        LazyArgs.lazy(
+            () ->
+                subflags.stream()
+                    .map(f -> "--" + f.getOptionDefinition().getOptionName())
+                    .collect(joining("; "))));
 
     // Repeated flags are special, and could set multiple times in an expansion, with the user
     // expecting both values to be valid. Collect these separately.
@@ -385,11 +380,10 @@ public final class InvocationPolicyEnforcer {
       OptionInstanceOrigin originOfSubflags =
           new OptionInstanceOrigin(
               arbitraryFirstOptionOrigin.getPriority(),
-              origins
-                  .stream()
+              origins.stream()
                   .map(OptionInstanceOrigin::getSource)
                   .distinct()
-                  .collect(Collectors.joining(", ")),
+                  .collect(joining(", ")),
               arbitraryFirstOptionOrigin.getImplicitDependent(),
               arbitraryFirstOptionOrigin.getExpandedFrom());
       expandedPolicies.add(
@@ -522,17 +516,6 @@ public final class InvocationPolicyEnforcer {
     return subflagAsPolicy;
   }
 
-  private static void logInApplySetValueOperation(
-      Level loglevel, String formattingString, Object... objects) {
-    // Finding the caller here is relatively expensive and shows up in profiling, so provide it
-    // manually.
-    logger.logp(
-        loglevel,
-        "InvocationPolicyEnforcer",
-        "applySetValueOperation",
-        String.format(formattingString, objects));
-  }
-
   private static void applySetValueOperation(
       OptionsParser parser,
       FlagPolicyWithContext flagPolicy,
@@ -563,8 +546,7 @@ public final class InvocationPolicyEnforcer {
     if (setValue.getOverridable() && valueDescription != null) {
       // The user set the value for the flag but the flag policy is overridable, so keep the user's
       // value.
-      logInApplySetValueOperation(
-          loglevel,
+      logger.at(loglevel).log(
           "Keeping value '%s' from source '%s' for %s because the invocation policy specifying "
               + "the value(s) '%s' is overridable",
           valueDescription.getValue(),
@@ -581,16 +563,12 @@ public final class InvocationPolicyEnforcer {
       // Set all the flag values from the policy.
       for (String flagValue : setValue.getFlagValueList()) {
         if (valueDescription == null) {
-          logInApplySetValueOperation(
-              loglevel,
+          logger.at(loglevel).log(
               "Setting value for %s from invocation policy to '%s', overriding the default value "
                   + "'%s'",
-              optionDefinition,
-              flagValue,
-              optionDefinition.getDefaultValue());
+              optionDefinition, flagValue, optionDefinition.getDefaultValue());
         } else {
-          logInApplySetValueOperation(
-              loglevel,
+          logger.at(loglevel).log(
               "Setting value for %s from invocation policy to '%s', overriding value '%s' from "
                   + "'%s'",
               optionDefinition,
@@ -613,16 +591,14 @@ public final class InvocationPolicyEnforcer {
       String clearedFlagName = clearedValueDescription.getOptionDefinition().getOptionName();
       Object clearedFlagDefaultValue =
           clearedValueDescription.getOptionDefinition().getDefaultValue();
-      logger.log(
-          loglevel,
-          String.format(
-              "Using default value '%s' for flag '%s' as specified by %s invocation policy, "
-                  + "overriding original value '%s' from '%s'",
-              clearedFlagDefaultValue,
-              clearedFlagName,
-              policyType,
-              clearedValueDescription.getValue(),
-              clearedValueDescription.getSourceString()));
+      logger.at(loglevel).log(
+          "Using default value '%s' for flag '%s' as specified by %s invocation policy, "
+              + "overriding original value '%s' from '%s'",
+          clearedFlagDefaultValue,
+          clearedFlagName,
+          policyType,
+          clearedValueDescription.getValue(),
+          clearedValueDescription.getSourceString());
     }
   }
 
@@ -701,11 +677,15 @@ public final class InvocationPolicyEnforcer {
       }
 
       // Check that if the default value of the flag is disallowed by the policy, that the policy
-      // does not also set use_default. Otherwise the default value would will still be set if the
+      // does not also set use_default. Otherwise the default value would still be set if the
       // user uses a disallowed value. This doesn't apply to repeatable flags since the default
-      // value for repeatable flags is always the empty list.
-      if (!optionDescription.getOptionDefinition().allowsMultiple()) {
-
+      // value for repeatable flags is always the empty list. It also doesn't apply to flags that
+      // are null by default, since these flags' default value is not parsed by the converter, so
+      // there is no guarantee that there exists an accepted user-input value that would also set
+      // the value to NULL. In these cases, we assume that "unset" is a distinct value that is
+      // always allowed.
+      if (!optionDescription.getOptionDefinition().allowsMultiple()
+          && !optionDescription.getOptionDefinition().isSpecialNullDefault()) {
         boolean defaultValueAllowed =
             isFlagValueAllowed(
                 convertedPolicyValues, optionDescription.getOptionDefinition().getDefaultValue());
@@ -749,20 +729,22 @@ public final class InvocationPolicyEnforcer {
         throws OptionsParsingException {
 
       OptionDefinition optionDefinition = optionDescription.getOptionDefinition();
-      if (!isFlagValueAllowed(
-          convertedPolicyValues, optionDescription.getOptionDefinition().getDefaultValue())) {
+      if (optionDefinition.isSpecialNullDefault()) {
+        // Do nothing, the unset value by definition cannot be set. In option filtering operations,
+        // the value is being filtered, but the value that is `no value` passes any filter.
+        // Otherwise, there is no way to "usedefault" on one of these options that has no value by
+        // default.
+      } else if (!isFlagValueAllowed(convertedPolicyValues, optionDefinition.getDefaultValue())) {
         if (newValue != null) {
           // Use the default value from the policy, since the original default is not allowed
-          logger.log(
-              loglevel,
-              String.format(
-                  "Overriding default value '%s' for %s with value '%s' specified by invocation "
-                      + "policy. %sed values are: %s",
-                  optionDefinition.getDefaultValue(),
-                  optionDefinition,
-                  newValue,
-                  policyType,
-                  policyValues));
+          logger.at(loglevel).log(
+              "Overriding default value '%s' for %s with value '%s' specified by invocation "
+                  + "policy. %sed values are: %s",
+              optionDefinition.getDefaultValue(),
+              optionDefinition,
+              newValue,
+              policyType,
+              policyValues);
           parser.clearValue(optionDefinition);
           parser.addOptionValueAtSpecificPriority(origin, optionDefinition, newValue);
         } else {
@@ -812,12 +794,10 @@ public final class InvocationPolicyEnforcer {
 
         if (!isFlagValueAllowed(convertedPolicyValues, valueDescription.getValue())) {
           if (newValue != null) {
-            logger.log(
-                loglevel,
-                String.format(
-                    "Overriding disallowed value '%s' for %s with value '%s' "
-                        + "specified by invocation policy. %sed values are: %s",
-                    valueDescription.getValue(), option, newValue, policyType, policyValues));
+            logger.at(loglevel).log(
+                "Overriding disallowed value '%s' for %s with value '%s' "
+                    + "specified by invocation policy. %sed values are: %s",
+                valueDescription.getValue(), option, newValue, policyType, policyValues);
             parser.clearValue(option);
             parser.addOptionValueAtSpecificPriority(origin, option, newValue);
           } else if (useDefault) {

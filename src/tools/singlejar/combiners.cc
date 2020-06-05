@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include "src/tools/singlejar/combiners.h"
+
+#include <cctype>
+
 #include "src/tools/singlejar/diag.h"
 
 Combiner::~Combiner() {}
@@ -28,18 +31,18 @@ bool Concatenator::Merge(const CDH *cdh, const LH *lh) {
   if (Z_NO_COMPRESSION == lh->compression_method()) {
     buffer_->ReadEntryContents(lh);
   } else if (Z_DEFLATED == lh->compression_method()) {
-    if (!inflater_.get()) {
+    if (!inflater_) {
       inflater_.reset(new Inflater());
     }
     buffer_->DecompressEntryContents(cdh, lh, inflater_.get());
   } else {
-    errx(2, "%s is neither stored nor deflated", filename_.c_str());
+    diag_errx(2, "%s is neither stored nor deflated", filename_.c_str());
   }
   return true;
 }
 
 void *Concatenator::OutputEntry(bool compress) {
-  if (!buffer_.get()) {
+  if (!buffer_) {
     return nullptr;
   }
 
@@ -64,8 +67,8 @@ void *Concatenator::OutputEntry(bool compress) {
   lh->signature();
   lh->version(20);
   lh->bit_flag(0x0);
-  lh->last_mod_file_time(1);   // 00:00:01
-  lh->last_mod_file_date(33);  // 1980-01-01
+  lh->last_mod_file_time(1);                     // 00:00:01
+  lh->last_mod_file_date(30 << 9 | 1 << 5 | 1);  // 2010-01-01
   lh->crc32(0x12345678);
   lh->compressed_file_size32(0);
   lh->file_name(filename_.c_str(), filename_.size());
@@ -113,14 +116,16 @@ void *Concatenator::OutputEntry(bool compress) {
 
 NullCombiner::~NullCombiner() {}
 
-bool NullCombiner::Merge(const CDH *cdh, const LH *lh) { return true; }
+bool NullCombiner::Merge(const CDH * /*cdh*/, const LH * /*lh*/) {
+  return true;
+}
 
-void *NullCombiner::OutputEntry(bool compress) { return nullptr; }
+void *NullCombiner::OutputEntry(bool /*compress*/) { return nullptr; }
 
 XmlCombiner::~XmlCombiner() {}
 
 bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
-  if (!concatenator_.get()) {
+  if (!concatenator_) {
     concatenator_.reset(new Concatenator(filename_, false));
     concatenator_->Append(start_tag_);
     concatenator_->Append("\n");
@@ -131,12 +136,12 @@ bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
   if (Z_NO_COMPRESSION == lh->compression_method()) {
     bytes_.ReadEntryContents(lh);
   } else if (Z_DEFLATED == lh->compression_method()) {
-    if (!inflater_.get()) {
+    if (!inflater_) {
       inflater_.reset(new Inflater());
     }
     bytes_.DecompressEntryContents(cdh, lh, inflater_.get());
   } else {
-    errx(2, "%s is neither stored nor deflated", filename_.c_str());
+    diag_errx(2, "%s is neither stored nor deflated", filename_.c_str());
   }
   uint32_t checksum;
   char *buf = reinterpret_cast<char *>(malloc(bytes_.data_size()));
@@ -161,7 +166,7 @@ bool XmlCombiner::Merge(const CDH *cdh, const LH *lh) {
 }
 
 void *XmlCombiner::OutputEntry(bool compress) {
-  if (!concatenator_.get()) {
+  if (!concatenator_) {
     return nullptr;
   }
   concatenator_->Append(end_tag_);
@@ -171,6 +176,6 @@ void *XmlCombiner::OutputEntry(bool compress) {
 
 PropertyCombiner::~PropertyCombiner() {}
 
-bool PropertyCombiner::Merge(const CDH *cdh, const LH *lh) {
+bool PropertyCombiner::Merge(const CDH * /*cdh*/, const LH * /*lh*/) {
   return false;  // This should not be called.
 }

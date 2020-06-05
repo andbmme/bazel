@@ -15,14 +15,10 @@ package com.google.devtools.build.android;
 
 import com.android.builder.core.VariantType;
 import com.android.repository.Revision;
-import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
-import com.google.common.io.CharStreams;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
@@ -127,9 +123,10 @@ public class AaptCommandBuilder {
     if (values.size() > 200) {
       add(
           flag,
-          "@" + Files.write(
-              Files.createDirectories(workingDirectory).resolve("params" + flag),
-              ImmutableList.of(values.stream().collect(Collectors.joining(" ")))));
+          "@"
+              + Files.write(
+                  Files.createDirectories(workingDirectory).resolve("params" + flag),
+                  ImmutableList.of(values.stream().collect(Collectors.joining(" ")))));
     } else {
       addRepeated(flag, values);
     }
@@ -297,21 +294,6 @@ public class AaptCommandBuilder {
    * @throws IOException when the process cannot execute.
    */
   public String execute(String action) throws IOException {
-    final StringBuilder processLog = new StringBuilder();
-    List<String> command = build();
-
-    final Process process = new ProcessBuilder().command(command).redirectErrorStream(true).start();
-    processLog.append("Command: ");
-    Joiner.on("\n\t").appendTo(processLog, command);
-    processLog.append("\n");
-    final InputStreamReader stdout =
-        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8);
-    while (process.isAlive()) {
-      processLog.append(CharStreams.toString(stdout));
-    }
-    if (process.exitValue() != 0) {
-      throw new RuntimeException(String.format("Error during %s:", action) + "\n" + processLog);
-    }
-    return processLog.toString();
+    return CommandHelper.execute(action, build());
   }
 }

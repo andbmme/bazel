@@ -14,10 +14,9 @@
 package com.google.devtools.build.lib.rules.python;
 
 import com.google.common.collect.ImmutableSet;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationEnvironment;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.Fragment;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 
@@ -27,20 +26,24 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
 public class PythonConfigurationLoader implements ConfigurationFragmentFactory {
   @Override
   public ImmutableSet<Class<? extends FragmentOptions>> requiredOptions() {
-    return ImmutableSet.<Class<? extends FragmentOptions>>of(PythonOptions.class);
+    return ImmutableSet.of(PythonOptions.class);
   }
 
   @Override
-  public PythonConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions)
-      throws InvalidConfigurationException, InterruptedException {
+  public PythonConfiguration create(BuildOptions buildOptions)
+      throws InvalidConfigurationException {
     PythonOptions pythonOptions = buildOptions.get(PythonOptions.class);
-    boolean ignorePythonVersionAttribute = pythonOptions.forcePython != null;
     PythonVersion pythonVersion = pythonOptions.getPythonVersion();
     return new PythonConfiguration(
         pythonVersion,
-        ignorePythonVersionAttribute,
+        pythonOptions.getDefaultPythonVersion(),
         pythonOptions.buildPythonZip,
-        pythonOptions.buildTransitiveRunfilesTrees);
+        pythonOptions.buildTransitiveRunfilesTrees,
+        /*py2OutputsAreSuffixed=*/ pythonOptions.incompatiblePy2OutputsAreSuffixed,
+        /*disallowLegacyPyProvider=*/ pythonOptions.incompatibleDisallowLegacyPyProvider,
+        /*useToolchains=*/ pythonOptions.incompatibleUsePythonToolchains,
+        /*loadPythonRulesFromBzl=*/ pythonOptions.loadPythonRulesFromBzl,
+        /*defaultToExplicitInitPy=*/ pythonOptions.incompatibleDefaultToExplicitInitPy);
   }
 
   @Override

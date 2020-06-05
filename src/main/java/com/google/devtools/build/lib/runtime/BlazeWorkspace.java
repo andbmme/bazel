@@ -13,20 +13,21 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
-import static com.google.devtools.build.lib.profiler.AutoProfiler.profiledAndLogged;
+import static com.google.devtools.build.lib.profiler.GoogleAutoProfilerUtils.profiledAndLogged;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Range;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.SubscriberExceptionHandler;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.actions.cache.CompactPersistentActionCache;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.WorkspaceStatusAction;
-import com.google.devtools.build.lib.analysis.config.BinTools;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.profiler.AutoProfiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.profiler.memory.AllocationTracker;
@@ -34,10 +35,10 @@ import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.util.LoggingUtil;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
+import java.util.List;
 import java.util.logging.Level;
-import java.util.logging.Logger;
 import javax.annotation.Nullable;
 
 /**
@@ -51,7 +52,7 @@ import javax.annotation.Nullable;
 public final class BlazeWorkspace {
   public static final String DO_NOT_BUILD_FILE_NAME = "DO_NOT_BUILD_HERE";
 
-  private static final Logger logger = Logger.getLogger(BlazeRuntime.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   private final BlazeRuntime runtime;
   private final SubscriberExceptionHandler eventBusExceptionHandler;
@@ -77,7 +78,7 @@ public final class BlazeWorkspace {
       BinTools binTools,
       @Nullable AllocationTracker allocationTracker) {
     this.runtime = runtime;
-    this.eventBusExceptionHandler = eventBusExceptionHandler;
+    this.eventBusExceptionHandler = Preconditions.checkNotNull(eventBusExceptionHandler);
     this.workspaceStatusActionFactory = workspaceStatusActionFactory;
     this.binTools = binTools;
     this.allocationTracker = allocationTracker;
@@ -89,7 +90,7 @@ public final class BlazeWorkspace {
       writeOutputBaseReadmeFile();
       writeDoNotBuildHereFile();
     }
-    setupExecRoot();
+
     // Here we use outputBase instead of outputPath because we need a file system to create the
     // latter.
     this.outputBaseFilesystemTypeName = FileSystemUtils.getFileSystem(getOutputBase());
@@ -146,13 +147,6 @@ public final class BlazeWorkspace {
     return outputBaseFilesystemTypeName;
   }
 
-  /**
-   * Returns the output path associated with this Blaze server process..
-   */
-  public Path getOutputPath() {
-    return directories.getOutputPath();
-  }
-
   public Path getInstallBase() {
     return directories.getInstallBase();
   }
@@ -186,13 +180,30 @@ public final class BlazeWorkspace {
   /**
    * Initializes a CommandEnvironment to execute a command in this workspace.
    *
-   * <p>This method should be called from the "main" thread on which the command will execute;
-   * that thread will receive interruptions if a module requests an early exit.
+   * <p>This method should be called from the "main" thread on which the command will execute; that
+   * thread will receive interruptions if a module requests an early exit.
+   *
+   * @param warnings a list of warnings to which the CommandEnvironment can add any warning
+   *     generated during initialization. This is needed because Blaze's output handling is not yet
+   *     fully configured at this point.
    */
-  public CommandEnvironment initCommand(Command command, OptionsProvider options) {
-    CommandEnvironment env = new CommandEnvironment(
-        runtime, this, new EventBus(eventBusExceptionHandler), Thread.currentThread(), command,
-        options);
+  public CommandEnvironment initCommand(
+      Command command,
+      OptionsParsingResult options,
+      List<String> warnings,
+      long waitTimeInMs,
+      long commandStartTime) {
+    CommandEnvironment env =
+        new CommandEnvironment(
+            runtime,
+            this,
+            new EventBus(eventBusExceptionHandler),
+            Thread.currentThread(),
+            command,
+            options,
+            warnings,
+            waitTimeInMs,
+            commandStartTime);
     skyframeExecutor.setClientEnv(env.getClientEnv());
     return env;
   }
@@ -210,29 +221,27 @@ public final class BlazeWorkspace {
     skyframeExecutor.resetEvaluator();
   }
 
-  /**
-   * Removes in-memory caches.
-   */
+  /** Removes in-memory and on-disk action caches. */
   public void clearCaches() throws IOException {
     if (actionCache != null) {
       actionCache.clear();
     }
     actionCache = null;
-    FileSystemUtils.deleteTree(getCacheDirectory());
+    getCacheDirectory().deleteTree();
   }
 
   /**
-   * Returns reference to the lazily instantiated persistent action cache
-   * instance. Note, that method may recreate instance between different build
-   * requests, so return value should not be cached.
+   * Returns reference to the lazily instantiated persistent action cache instance. Note, that
+   * method may recreate instance between different build requests, so return value should not be
+   * cached.
    */
-  public ActionCache getPersistentActionCache(Reporter reporter) throws IOException {
+  ActionCache getPersistentActionCache(Reporter reporter) throws IOException {
     if (actionCache == null) {
-      try (AutoProfiler p = profiledAndLogged("Loading action cache", ProfilerTask.INFO, logger)) {
+      try (AutoProfiler p = profiledAndLogged("Loading action cache", ProfilerTask.INFO)) {
         try {
           actionCache = new CompactPersistentActionCache(getCacheDirectory(), runtime.getClock());
         } catch (IOException e) {
-          logger.log(Level.WARNING, "Failed to load action cache: " + e.getMessage(), e);
+          logger.atWarning().withCause(e).log("Failed to load action cache");
           LoggingUtil.logToRemote(
               Level.WARNING, "Failed to load action cache: " + e.getMessage(), e);
           reporter.handle(
@@ -269,15 +278,15 @@ public final class BlazeWorkspace {
           "reverse engineer the set of source trees or the --package_path from the output",
           "tree, and if you attempt it, you will fail, creating subtle and",
           "hard-to-diagnose bugs, that will no doubt get blamed on changes made by the",
-          "Blaze team.",
+          "Bazel team.",
           "",
-          "This directory was generated by Blaze.",
+          "This directory was generated by Bazel.",
           "Do not attempt to modify or delete any files in this directory.",
-          "Among other issues, Blaze's file system caching assumes that",
-          "only Blaze will modify this directory and the files in it,",
-          "so if you change anything here you may mess up Blaze's cache.");
+          "Among other issues, Bazel's file system caching assumes that",
+          "only Bazel will modify this directory and the files in it,",
+          "so if you change anything here you may mess up Bazel's cache.");
     } catch (IOException e) {
-      logger.warning("Couldn't write to '" + outputBaseReadmeFile + "': " + e.getMessage());
+      logger.atWarning().withCause(e).log("Couldn't write to '%s'", outputBaseReadmeFile);
     }
   }
 
@@ -286,7 +295,7 @@ public final class BlazeWorkspace {
       FileSystemUtils.createDirectoryAndParents(filePath.getParentDirectory());
       FileSystemUtils.writeContent(filePath, ISO_8859_1, getWorkspace().toString());
     } catch (IOException e) {
-      logger.warning("Couldn't write to '" + filePath + "': " + e.getMessage());
+      logger.atWarning().withCause(e).log("Couldn't write to '%s'", filePath);
     }
   }
 
@@ -295,18 +304,6 @@ public final class BlazeWorkspace {
     writeDoNotBuildHereFile(getOutputBase().getRelative(DO_NOT_BUILD_FILE_NAME));
     writeDoNotBuildHereFile(
         getOutputBase().getRelative("execroot").getRelative(DO_NOT_BUILD_FILE_NAME));
-  }
-
-  /**
-   * Creates the execRoot dir under outputBase.
-   */
-  private void setupExecRoot() {
-    try {
-      FileSystemUtils.createDirectoryAndParents(directories.getExecRoot());
-    } catch (IOException e) {
-      logger.warning(
-          "failed to create execution root '" + directories.getExecRoot() + "': " + e.getMessage());
-    }
   }
 
   @Nullable

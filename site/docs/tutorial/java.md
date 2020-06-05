@@ -3,8 +3,7 @@ layout: documentation
 title: Build Tutorial - Java
 ---
 
-Introduction to Bazel: Build a Java Project
-==========
+# Introduction to Bazel: Building a Java Project
 
 In this tutorial, you'll learn the basics of building Java applications with
 Bazel. You will set up your workspace and build a simple Java project that
@@ -24,21 +23,11 @@ In this tutorial you'll learn how to:
 *  Deploy a target
 
 ## Contents
+{:.no_toc}
 
-*  [Before you begin](#before-you-begin)
-   *  [Install Bazel](#install-bazel)
-   *  [Get the sample project](#get-the-sample-project)
-*  [Build with Bazel](#build-with-bazel)
-   *  [Set up the workspace](#set-up-the-workspace)
-   *  [Understand the BUILD file](#understand-the-build-file)
-   *  [Build the project](#build-the-project)
-   *  [Review the dependency graph](#review-the-dependency-graph)
-*  [Refine your Bazel build](#refine-your-bazel-build)
-   *  [Specify multiple build targets](#specify-multiple-build-targets)
-   *  [Use multiple packages](#use-multiple-packages)
-*  [Use labels to reference targets](#use-labels-to-reference-targets)
-*  [Package a Java target for deployment](#package-a-java-target-for-deployment)
-*  [Further reading](#further-reading)
+* ToC
+{:toc}
+
 
 ## Before you begin
 
@@ -47,12 +36,29 @@ In this tutorial you'll learn how to:
 To prepare for the tutorial, first [Install Bazel](../install.md) if
 you don't have it installed already.
 
+### Install the JDK
+
+1.  Install Java 8 JDK.
+
+2.  Set the JAVA\_HOME environment variable to point to the JDK.
+    *   On Linux/macOS:
+
+            export JAVA_HOME="$(dirname $(dirname $(realpath $(which javac))))"
+    *   On Windows:
+        1.  Open Control Panel.
+        2.  Go to "System&nbsp;and&nbsp;Security" &gt; "System" &gt; "Advanced&nbsp;System&nbsp;Settings" &gt; "Advanced"&nbsp;tab &gt; "Environment&nbsp;Variables..." .
+        3.  Under the "User&nbsp;variables" list (the one on the top), click "New...".
+        4.  In the "Variable&nbsp;name" field, enter `JAVA_HOME`.
+        5.  Click "Browse&nbsp;Directory...".
+        6.  Navigate to the JDK directory (for example `C:\Program Files\Java\jdk1.8.0_152`).
+        7.  Click "OK" on all dialog windows.
+
 ### Get the sample project
 
 Retrieve the sample project from Bazel's GitHub repository:
 
 ```sh
-git clone https://github.com/bazelbuild/examples/
+git clone https://github.com/bazelbuild/examples
 ```
 
 The sample project for this tutorial is in the `examples/java-tutorial`
@@ -60,7 +66,6 @@ directory and is structured as follows:
 
 ```
 java-tutorial
-│
 ├── BUILD
 ├── src
 │   └── main
@@ -108,7 +113,7 @@ targets.
 
 Take a look at the `java-tutorial/BUILD` file:
 
-```
+```python
 java_binary(
     name = "ProjectRunner",
     srcs = glob(["src/main/java/com/example/*.java"]),
@@ -170,8 +175,7 @@ Let's visualize our sample project's dependencies. First, generate a text
 representation of the dependency graph (run the command at the workspace root):
 
 ```
-bazel query  --nohost_deps --noimplicit_deps 'deps(//:ProjectRunner)' \
-  --output graph
+bazel query  --notool_deps --noimplicit_deps "deps(//:ProjectRunner)" --output graph
 ```
 
 The above command tells Bazel to look for all dependencies for the target
@@ -201,7 +205,7 @@ building multiple parts of a project at once.
 Let's split our sample project build into two targets. Replace the contents of
 the `java-tutorial/BUILD` file with the following:
 
-```
+```python
 java_binary(
     name = "ProjectRunner",
     srcs = ["src/main/java/com/example/ProjectRunner.java"],
@@ -216,7 +220,7 @@ java_library(
 ```
 
 With this configuration, Bazel first builds the `greeter` library, then the
-`ProjectRunner` library. The `deps` attribute in `java_binary` tells Bazel that
+`ProjectRunner` binary. The `deps` attribute in `java_binary` tells Bazel that
 the `greeter` library is required to build the `ProjectRunner` binary.
 
 Let's build this new version of our project. Run the following command:
@@ -247,8 +251,8 @@ recompiles that file.
 Looking at the dependency graph, you can see that `ProjectRunner` depends on the
 same inputs as it did before, but the structure of the build is different:
 
-![Dependency graph of the target 'ProjectRunner' after adding a dependency]
-(/assets/tutorial_java_02.svg)
+![Dependency graph of the target 'ProjectRunner' after adding a dependency](
+/assets/tutorial_java_02.svg)
 
 You've now built the project with two targets. The `ProjectRunner` target builds
 two source files and depends on one other target (`:greeter`), which builds
@@ -264,12 +268,12 @@ there is a `BUILD` file at the root of the workspace).
 
 Take a look at the `src/main/java/com/example/cmdline/BUILD` file:
 
-```
+```python
 java_binary(
     name = "runner",
     srcs = ["Runner.java"],
     main_class = "com.example.cmdline.Runner",
-    deps = ["//:greeter"]
+    deps = ["//:greeter"],
 )
 ```
 
@@ -289,12 +293,12 @@ leaking into public APIs.)
 To do this, add the `visibility` attribute to the `greeter` target in
 `java-tutorial/BUILD` as shown below:
 
-```
+```python
 java_library(
     name = "greeter",
     srcs = ["src/main/java/com/example/Greeting.java"],
     visibility = ["//src/main/java/com/example/cmdline:__pkg__"],
-    )
+)
 ```
 
 Let's now build the new package. Run the following command at the root of the
@@ -318,7 +322,6 @@ Now test your freshly built binary:
 
 ```
 ./bazel-bin/src/main/java/com/example/cmdline/runner
-
 ```
 
 You've now modified the project to build as two packages, each containing one
@@ -341,8 +344,8 @@ target in the `BUILD` file (the `name` attribute). If the target is a file
 target, then `path/to/package` is the path to the root of the package, and
 `target-name` is the name of the target file, including its full path.
 
-When referencing targets within the same package, you can skip the package path
-and just use `//:target-name`. When referencing targets within the same `BUILD`
+When referencing targets at the repository root, the package path is empty,
+just use `//:target-name`. When referencing targets within the same `BUILD`
 file, you can even skip the `//` workspace root identifier and just use
 `:target-name`.
 
@@ -382,9 +385,8 @@ As you can see, `runner.jar` contains `Runner.class`, but not its dependency,
 `Greeting.class`. The `runner` script that Bazel generates adds `greeter.jar`
 to the classpath, so if you leave it like this, it will run locally, but it
 won't run standalone on another machine. Fortunately, the `java_binary` rule
-allows you to build a self-contained, deployable binary. To build it, add the
-`_deploy.jar` suffix to the file name when building `runner.jar`
-(<target-name>_deploy.jar):
+allows you to build a self-contained, deployable binary. To build it, append
+`_deploy.jar` to the target name:
 
 ```
 bazel build //src/main/java/com/example/cmdline:runner_deploy.jar
@@ -404,15 +406,19 @@ dependencies.
 
 ## Further reading
 
+*  [rules_jvm_external](https://github.com/bazelbuild/rules_jvm_external) for
+   rules to manage transitive Maven dependencies.
+
 *  [External Dependencies](../external.html) to learn more about working with
    local and remote repositories.
 
-*  The [Build Encyclopedia](../be/overview.html) to learn more about Bazel.
+*  The [other rules](../rules.html) to learn more about Bazel.
 
 *  The [C++ build tutorial](../tutorial/cpp.md) to get started with building
    C++ projects with Bazel.
 
-*  The [mobile application tutorial](../tutorial/app.md) to get started with
+*  The [Android application tutorial](../tutorial/android-app.md) and
+   [iOS application tutorial](../tutorial/ios-app.md) to get started with
    building mobile applications for Android and iOS with Bazel.
 
 Happy building!

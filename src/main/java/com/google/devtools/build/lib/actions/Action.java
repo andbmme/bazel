@@ -15,11 +15,9 @@
 package com.google.devtools.build.lib.actions;
 
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ConditionallyThreadCompatible;
-import com.google.devtools.build.lib.profiler.Describable;
-import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.skyframe.SkyFunction;
 import java.io.IOException;
 import javax.annotation.Nullable;
 
@@ -36,6 +34,7 @@ import javax.annotation.Nullable;
  * a new custom subclass.
  *
  * <p>These are the most important requirements for subclasses:
+ *
  * <ul>
  *   <li>Actions must be generally immutable; we currently make an exception for C++, and that has
  *       been a constant source of correctness issues; there are still ongoing incremental
@@ -75,8 +74,7 @@ import javax.annotation.Nullable;
  * known set of fields is covered, not that all fields are covered), so carefully check all changes
  * to action subclasses.
  */
-public interface Action extends ActionExecutionMetadata, Describable {
-
+public interface Action extends ActionExecutionMetadata {
   /**
    * Prepares for executing this action; called by the Builder prior to executing the Action itself.
    * This method should prepare the file system, so that the execution of the Action can write the
@@ -85,35 +83,82 @@ public interface Action extends ActionExecutionMetadata, Describable {
    *
    * @throws IOException if there is an error deleting the outputs.
    */
-  void prepare(FileSystem fileSystem, Path execRoot) throws IOException;
+  void prepare(Path execRoot) throws IOException;
 
   /**
-   * Executes this action; called by the Builder when all of this Action's inputs have been
-   * successfully created. (Behaviour is undefined if the prerequisites are not up to date.) This
-   * method <i>actually does the work of the Action, unconditionally</i>; in other words, it is
-   * invoked by the Builder only when dependency analysis has deemed it necessary.
+   * Executes this action. This method <i>unconditionally does the work of the Action</i>, although
+   * it may delegate some of that work to {@link ActionContext} instances obtained from the {@link
+   * ActionExecutionContext}, which may in turn perform caching at smaller granularity than an
+   * entire action.
    *
-   * <p>The framework guarantees that the output directory for each file in <code>getOutputs()
-   * </code> has already been created, and will check to ensure that each of those files is indeed
-   * created.
+   * <p>This method may not be invoked if an equivalent action (as determined by the hashes of the
+   * input files, the list of output files, and the action cache key) has been previously executed,
+   * possibly on another machine.
    *
-   * <p>Implementations of this method should try to honour the {@link java.lang.Thread#interrupted}
-   * contract: if an interrupt is delivered to the thread in which execution occurs, the action
-   * should detect this on a best-effort basis and terminate as quickly as possible by throwing an
-   * ActionExecutionException.
+   * <p>The framework guarantees that:
    *
-   * <p>Action execution must be ThreadCompatible in order to be safely used with a concurrent
-   * Builder implementation such as ParallelBuilder.
+   * <ul>
+   *   <li>all declared inputs have already been successfully created,
+   *   <li>the output directory for each file in <code>getOutputs()</code> has already been created,
+   *   <li>this method is only called by at most one thread at a time, but subsequent calls may be
+   *       made from different threads,
+   *   <li>for shared actions, at most one instance is executed per build.
+   * </ul>
+   *
+   * <p>Multiple instances of the same action implementation may be called in parallel.
+   * Implementations must therefore be thread-compatible. Also see the class documentation for
+   * additional invariants.
+   *
+   * <p>Implementations should attempt to detect interrupts, and exit quickly with an {@link
+   * InterruptedException}.
    *
    * @param actionExecutionContext services in the scope of the action, like the output and error
    *     streams to use for messages arising during action execution
    * @return returns an ActionResult containing action execution metadata
    * @throws ActionExecutionException if execution fails for any reason
-   * @throws InterruptedException
+   * @throws InterruptedException if the execution is interrupted
    */
   @ConditionallyThreadCompatible
-  ActionResult execute(ActionExecutionContext actionExecutionContext)
-      throws ActionExecutionException, InterruptedException;
+  default ActionResult execute(ActionExecutionContext actionExecutionContext)
+      throws ActionExecutionException, InterruptedException {
+    ActionContinuationOrResult continuation = beginExecution(actionExecutionContext);
+    while (!continuation.isDone()) {
+      continuation = continuation.execute();
+    }
+    return continuation.get();
+  }
+
+  /**
+   * Actions that want to support async execution can use this interface to do so. While this is
+   * still disabled by default, we want to eventually deprecate the {@link #execute} method in favor
+   * of this new interface.
+   *
+   * <p>If the relevant command-line flag is enabled, Skyframe will call this method rather than
+   * {@link #execute}. As such, actions implementing both should exhibit identical behavior, and all
+   * requirements from the {@link #execute} documentation apply.
+   *
+   * <p>This method allows an action to return a continuation representing future work to be done,
+   * in combination with a listenable future representing concurrent ongoing work in another thread
+   * pool or even on another machine. When the concurrent work finishes, the listenable future must
+   * be completed to notify Skyframe of this fact.
+   *
+   * <p>Once the listenable future is completed, Skyframe will re-execute the corresponding Skyframe
+   * node representing this action, which will eventually call into the continuation returned here.
+   *
+   * <p>Actions implementing this method are not required to run asynchronously, although we expect
+   * the majority of actions to do so eventually. They can block the current thread for any amount
+   * of time as long as they return eventually, and also honor interrupt signals.
+   *
+   * @param actionExecutionContext services in the scope of the action, like the output and error
+   *     streams to use for messages arising during action execution
+   * @return returns an ActionResult containing action execution metadata
+   * @throws ActionExecutionException if execution fails for any reason
+   * @throws InterruptedException if the execution is interrupted
+   */
+  default ActionContinuationOrResult beginExecution(ActionExecutionContext actionExecutionContext)
+      throws ActionExecutionException, InterruptedException {
+    return ActionContinuationOrResult.of(execute(actionExecutionContext));
+  }
 
   /**
    * Returns true iff action must be executed regardless of its current state.
@@ -140,50 +185,39 @@ public interface Action extends ActionExecutionMetadata, Describable {
   boolean isVolatile();
 
   /**
-   * Method used to find inputs before execution for an action that
-   * {@link ActionExecutionMetadata#discoversInputs}. Returns null if action's inputs will be
-   * discovered during execution proper.
+   * Method used to find inputs before execution for an action that {@link
+   * ActionExecutionMetadata#discoversInputs}. Returns the set of discovered inputs (may be the
+   * empty set) or null if this action declared additional Skyframe dependencies that must be
+   * computed before it can make a decision.
    */
   @Nullable
-  Iterable<Artifact> discoverInputs(ActionExecutionContext actionExecutionContext)
+  NestedSet<Artifact> discoverInputs(ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException;
 
   /**
-   * Used in combination with {@link #discoverInputs} if inputs need to be found before execution in
-   * multiple steps. Returns null if two-stage input discovery isn't necessary.
+   * Returns the set of artifacts that can possibly be inputs. It will be called iff {@link
+   * #inputsDiscovered()} is false for the given action instance and there is a related cache entry
+   * in the action cache.
    *
-   * <p>Any deps requested here must not change unless one of the action's inputs changes.
-   * Otherwise, changes to nodes that should cause re-execution of actions might be prevented by the
-   * action cache.
-   */
-  @Nullable
-  Iterable<Artifact> discoverInputsStage2(SkyFunction.Environment env)
-      throws ActionExecutionException, InterruptedException;
-
-  /**
-   * Returns the set of artifacts that can possibly be inputs. It will be called iff inputsKnown()
-   * is false for the given action instance and there is a related cache entry in the action cache.
-   *
-   * <p>Method must be redefined for any action that may return inputsKnown() == false.
+   * <p>Method must be redefined for any action for which {@link #inputsDiscovered()} may return
+   * false.
    *
    * <p>The method is allowed to return source artifacts. They are useless, though, since exec paths
    * in the action cache referring to source artifacts are always resolved.
    */
-  Iterable<Artifact> getAllowedDerivedInputs();
+  NestedSet<Artifact> getAllowedDerivedInputs();
 
   /**
    * Informs the action that its inputs are {@code inputs}, and that its inputs are now known. Can
-   * only be called for actions that discover inputs. After this method is called,
-   * {@link ActionExecutionMetadata#inputsDiscovered} should return true.
+   * only be called for actions that discover inputs. After this method is called, {@link
+   * ActionExecutionMetadata#inputsDiscovered} should return true.
    */
-  void updateInputs(Iterable<Artifact> inputs);
+  void updateInputs(NestedSet<Artifact> inputs);
 
   /**
    * Returns true if the output should bypass output filtering. This is used for test actions.
    */
   boolean showsOutputUnconditionally();
-
-  boolean canRemoveAfterExecution();
 
   /**
    * Called by {@link com.google.devtools.build.lib.analysis.extra.ExtraAction} at execution time to

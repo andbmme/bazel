@@ -19,17 +19,16 @@ import static com.google.devtools.build.skyframe.WalkableGraphUtils.exists;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
-import com.google.devtools.build.skyframe.BuildDriver;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
-import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -46,23 +45,16 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class RecursivePkgFunctionTest extends BuildViewTestCase {
 
-  private SkyframeExecutor skyframeExecutor;
-
-  @Before
-  public final void createSkyframeExecutor() throws Exception {
-    skyframeExecutor = getSkyframeExecutor();
-  }
-
-  private SkyKey buildRecursivePkgKey(
+  private static SkyKey buildRecursivePkgKey(
       Path root, PathFragment rootRelativePath, ImmutableSet<PathFragment> excludedPaths) {
-    RootedPath rootedPath = RootedPath.toRootedPath(root, rootRelativePath);
+    RootedPath rootedPath = RootedPath.toRootedPath(Root.fromPath(root), rootRelativePath);
     return RecursivePkgValue.key(
         RepositoryName.MAIN, rootedPath, excludedPaths);
   }
 
   private RecursivePkgValue buildRecursivePkgValue(Path root, PathFragment rootRelativePath)
       throws Exception {
-    return buildRecursivePkgValue(root, rootRelativePath, ImmutableSet.<PathFragment>of());
+    return buildRecursivePkgValue(root, rootRelativePath, ImmutableSet.of());
   }
 
   private RecursivePkgValue buildRecursivePkgValue(
@@ -74,13 +66,14 @@ public class RecursivePkgFunctionTest extends BuildViewTestCase {
 
   private EvaluationResult<RecursivePkgValue> getEvaluationResult(SkyKey key)
       throws InterruptedException {
-    BuildDriver driver = skyframeExecutor.getDriverForTesting();
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(SequencedSkyframeExecutor.DEFAULT_THREAD_COUNT)
+            .setEventHander(reporter)
+            .build();
     EvaluationResult<RecursivePkgValue> evaluationResult =
-        driver.evaluate(
-            ImmutableList.of(key),
-            /*keepGoing=*/ false,
-            SequencedSkyframeExecutor.DEFAULT_THREAD_COUNT,
-            reporter);
+        skyframeExecutor.getDriver().evaluate(ImmutableList.of(key), evaluationContext);
     Preconditions.checkState(!evaluationResult.hasError());
     return evaluationResult;
   }
@@ -95,20 +88,24 @@ public class RecursivePkgFunctionTest extends BuildViewTestCase {
 
   @Test
   public void testPackagesUnderMultipleRoots() throws Exception {
+    // PackageLoader doesn't support --package_path.
+    initializeSkyframeExecutor(/*doPackageLoadingChecks=*/ false);
+    skyframeExecutor = getSkyframeExecutor();
+
     Path root1 = rootDirectory.getRelative("root1");
     Path root2 = rootDirectory.getRelative("root2");
     scratch.file(root1 + "/WORKSPACE");
     scratch.file(root2 + "/WORKSPACE");
     scratch.file(root1 + "/a/BUILD");
     scratch.file(root2 + "/a/b/BUILD");
-    setPackageCacheOptions("--package_path=" + "root1" + ":" + "root2");
+    setPackageOptions("--package_path=" + "root1" + ":" + "root2");
 
     RecursivePkgValue valueForRoot1 = buildRecursivePkgValue(root1, PathFragment.create("a"));
-    String root1Pkg = Iterables.getOnlyElement(valueForRoot1.getPackages());
+    String root1Pkg = valueForRoot1.getPackages().getSingleton();
     assertThat(root1Pkg).isEqualTo("a");
 
     RecursivePkgValue valueForRoot2 = buildRecursivePkgValue(root2, PathFragment.create("a"));
-    String root2Pkg = Iterables.getOnlyElement(valueForRoot2.getPackages());
+    String root2Pkg = valueForRoot2.getPackages().getSingleton();
     assertThat(root2Pkg).isEqualTo("a/b");
   }
 
@@ -128,18 +125,17 @@ public class RecursivePkgFunctionTest extends BuildViewTestCase {
     RecursivePkgValue value = evaluationResult.get(key);
 
     // Then the package corresponding to "a/b" is not present in the result,
-    assertThat(value.getPackages()).doesNotContain("a/b");
+    assertThat(value.getPackages().toList()).doesNotContain("a/b");
 
     // And the "a" package and "a/c" package are.
-    assertThat(value.getPackages()).contains("a");
-    assertThat(value.getPackages()).contains("a/c");
+    assertThat(value.getPackages().toList()).contains("a");
+    assertThat(value.getPackages().toList()).contains("a/c");
 
     // Also, the computation graph does not contain a cached value for "a/b".
     WalkableGraph graph = Preconditions.checkNotNull(evaluationResult.getWalkableGraph());
     assertThat(
             exists(
-                buildRecursivePkgKey(
-                    rootDirectory, excludedPathFragment, ImmutableSet.<PathFragment>of()),
+                buildRecursivePkgKey(rootDirectory, excludedPathFragment, ImmutableSet.of()),
                 graph))
         .isFalse();
 
@@ -147,8 +143,7 @@ public class RecursivePkgFunctionTest extends BuildViewTestCase {
     // because that key was evaluated.
     assertThat(
             exists(
-                buildRecursivePkgKey(
-                    rootDirectory, PathFragment.create("a/c"), ImmutableSet.<PathFragment>of()),
+                buildRecursivePkgKey(rootDirectory, PathFragment.create("a/c"), ImmutableSet.of()),
                 graph))
         .isTrue();
   }
@@ -167,11 +162,11 @@ public class RecursivePkgFunctionTest extends BuildViewTestCase {
     RecursivePkgValue value = evaluationResult.get(key);
 
     // Then the package corresponding to the excluded subdirectory is not present in the result,
-    assertThat(value.getPackages()).doesNotContain("a/b/c");
+    assertThat(value.getPackages().toList()).doesNotContain("a/b/c");
 
     // And the top package and other subsubdirectory package are.
-    assertThat(value.getPackages()).contains("a");
-    assertThat(value.getPackages()).contains("a/b/d");
+    assertThat(value.getPackages().toList()).contains("a");
+    assertThat(value.getPackages().toList()).contains("a/b/d");
 
     // Also, the computation graph contains a cached value for "a/b" with "a/b/c" excluded, because
     // "a/b/c" does live underneath "a/b".

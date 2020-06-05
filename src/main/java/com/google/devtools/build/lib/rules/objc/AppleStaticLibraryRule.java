@@ -23,15 +23,15 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.analysis.config.ComposingRuleTransitionFactory;
+import com.google.devtools.build.lib.analysis.config.transitions.ComposingTransitionFactory;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.config.ConfigFeatureFlagProvider;
 import com.google.devtools.build.lib.rules.config.ConfigFeatureFlagTransitionFactory;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 
 /**
  * Rule definition for apple_static_library.
@@ -57,13 +57,15 @@ public class AppleStaticLibraryRule implements RuleDefinition {
   static final String AVOID_DEPS_ATTR_NAME = "avoid_deps";
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     MultiArchSplitTransitionProvider splitTransitionProvider =
         new MultiArchSplitTransitionProvider();
 
     return builder
         .requiresConfigurationFragments(
-            ObjcConfiguration.class, J2ObjcConfiguration.class, AppleConfiguration.class,
+            ObjcConfiguration.class,
+            J2ObjcConfiguration.class,
+            AppleConfiguration.class,
             CppConfiguration.class)
         /* <!-- #BLAZE_RULE(apple_static_library).ATTRIBUTE(avoid_deps) -->
         <p>A list of targets which should not be included (nor their transitive dependencies
@@ -73,7 +75,7 @@ public class AppleStaticLibraryRule implements RuleDefinition {
         <p>This attribute effectively serves to remove portions of the dependency tree from a static
         library, and is useful most commonly in scenarios where static libraries depend on each
         other.</p>
-        
+
         <p>That is, suppose static libraries X and C are typically distributed to consumers
         separately. C is a very-common base library, and X contains less-common functionality; X
         depends on C, such that applications seeking to import library X must also import library
@@ -85,7 +87,7 @@ public class AppleStaticLibraryRule implements RuleDefinition {
             attr(AVOID_DEPS_ATTR_NAME, LABEL_LIST)
                 .direct_compile_time_input()
                 .allowedRuleClasses(ObjcRuleClasses.CompilingRule.ALLOWED_CC_DEPS_RULE_CLASSES)
-                .mandatoryProviders(ObjcProvider.SKYLARK_CONSTRUCTOR.id())
+                .mandatoryProviders(ObjcProvider.STARLARK_CONSTRUCTOR.id())
                 .cfg(splitTransitionProvider)
                 .allowedFileTypes()
                 .aspect(objcProtoAspect))
@@ -105,9 +107,10 @@ public class AppleStaticLibraryRule implements RuleDefinition {
         <!-- #END_BLAZE_RULE.IMPLICIT_OUTPUTS -->*/
         .setImplicitOutputsFunction(ImplicitOutputsFunction.fromFunctions(LIPO_ARCHIVE))
         .cfg(
-            new ComposingRuleTransitionFactory(
+            ComposingTransitionFactory.of(
                 (rule) -> AppleCrosstoolTransition.APPLE_CROSSTOOL_TRANSITION,
                 new ConfigFeatureFlagTransitionFactory("feature_flags")))
+        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(env))
         .build();
   }
 
@@ -116,8 +119,7 @@ public class AppleStaticLibraryRule implements RuleDefinition {
     return RuleDefinition.Metadata.builder()
         .name("apple_static_library")
         .factoryClass(AppleStaticLibrary.class)
-        .ancestors(BaseRuleClasses.BaseRule.class, ObjcRuleClasses.MultiArchPlatformRule.class,
-            ObjcRuleClasses.SimulatorRule.class)
+        .ancestors(BaseRuleClasses.BaseRule.class, ObjcRuleClasses.MultiArchPlatformRule.class)
         .build();
   }
 }

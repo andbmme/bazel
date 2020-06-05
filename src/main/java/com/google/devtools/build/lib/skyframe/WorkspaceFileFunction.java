@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSortedSet;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
@@ -23,12 +24,13 @@ import com.google.devtools.build.lib.packages.Package.NameConflictException;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.packages.WorkspaceFactory;
-import com.google.devtools.build.lib.skyframe.WorkspaceFileValue.WorkspaceFileKey;
-import com.google.devtools.build.lib.syntax.BuildFileAST;
-import com.google.devtools.build.lib.syntax.Environment.Extension;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue.WorkspaceFileKey;
+import com.google.devtools.build.lib.skyframe.PackageFunction.BzlLoadResult;
+import com.google.devtools.build.lib.syntax.Module;
 import com.google.devtools.build.lib.syntax.Mutability;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.syntax.StarlarkFile;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
@@ -37,23 +39,24 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
 
-/**
- * A SkyFunction to parse WORKSPACE files.
- */
+/** A SkyFunction to parse the WORKSPACE file at a given path. */
 public class WorkspaceFileFunction implements SkyFunction {
 
   private final PackageFactory packageFactory;
   private final BlazeDirectories directories;
   private final RuleClassProvider ruleClassProvider;
+  private final BzlLoadFunction bzlLoadFunctionForInlining;
   private static final PackageIdentifier rootPackage = PackageIdentifier.createInMainRepo("");
 
   public WorkspaceFileFunction(
       RuleClassProvider ruleClassProvider,
       PackageFactory packageFactory,
-      BlazeDirectories directories) {
+      BlazeDirectories directories,
+      BzlLoadFunction bzlLoadFunctionForInlining) {
     this.packageFactory = packageFactory;
     this.directories = directories;
     this.ruleClassProvider = ruleClassProvider;
+    this.bzlLoadFunctionForInlining = bzlLoadFunctionForInlining;
   }
 
   @Override
@@ -61,36 +64,40 @@ public class WorkspaceFileFunction implements SkyFunction {
       throws WorkspaceFileFunctionException, InterruptedException {
 
     WorkspaceFileKey key = (WorkspaceFileKey) skyKey.argument();
-    RootedPath workspaceRoot = key.getPath();
-    WorkspaceASTValue workspaceASTValue = (WorkspaceASTValue) env.getValue(
-        WorkspaceASTValue.key(workspaceRoot));
+    RootedPath workspaceFile = key.getPath();
+    WorkspaceASTValue workspaceASTValue =
+        (WorkspaceASTValue) env.getValue(WorkspaceASTValue.key(workspaceFile));
     if (workspaceASTValue == null) {
       return null;
     }
-    SkylarkSemantics skylarkSemantics = PrecomputedValue.SKYLARK_SEMANTICS.get(env);
-    if (skylarkSemantics == null) {
+    StarlarkSemantics starlarkSemantics = PrecomputedValue.STARLARK_SEMANTICS.get(env);
+    if (starlarkSemantics == null) {
       return null;
     }
 
-    Path repoWorkspace = workspaceRoot.getRoot().getRelative(workspaceRoot.getRelativePath());
-    Package.Builder builder = packageFactory.newExternalPackageBuilder(
-        repoWorkspace, ruleClassProvider.getRunfilesPrefix());
+    Package.Builder builder =
+        packageFactory.newExternalPackageBuilder(
+            workspaceFile, ruleClassProvider.getRunfilesPrefix(), starlarkSemantics);
 
     if (workspaceASTValue.getASTs().isEmpty()) {
       try {
         return new WorkspaceFileValue(
-            builder.build(), // resulting package
-            ImmutableMap.<String, Extension>of(), // list of imports
-            ImmutableMap.<String, Object>of(), // list of symbol bindings
-            workspaceRoot, // Workspace root
-            0, // first fragment, idx = 0
-            false); // last fragment
+            /* pkg = */ builder.build(),
+            /* loadedModules = */ ImmutableMap.<String, Module>of(),
+            /* loadToChunkMap = */ ImmutableMap.<String, Integer>of(),
+            /* bindings = */ ImmutableMap.<String, Object>of(),
+            workspaceFile,
+            /* idx = */ 0, // first fragment
+            /* hasNext = */ false,
+            ImmutableMap.of(),
+            ImmutableSortedSet.of());
       } catch (NoSuchPackageException e) {
         throw new WorkspaceFileFunctionException(e, Transience.TRANSIENT);
       }
     }
     WorkspaceFactory parser;
-    try (Mutability mutability = Mutability.create("workspace %s", repoWorkspace)) {
+    WorkspaceFileValue prevValue = null;
+    try (Mutability mutability = Mutability.create("workspace", workspaceFile)) {
       parser =
           new WorkspaceFactory(
               builder,
@@ -99,25 +106,36 @@ public class WorkspaceFileFunction implements SkyFunction {
               mutability,
               key.getIndex() == 0,
               directories.getEmbeddedBinariesRoot(),
-              directories.getWorkspace());
+              directories.getWorkspace(),
+              directories.getLocalJavabase(),
+              starlarkSemantics);
       if (key.getIndex() > 0) {
-        WorkspaceFileValue prevValue = (WorkspaceFileValue) env.getValue(
-            WorkspaceFileValue.key(key.getPath(), key.getIndex() - 1));
+        prevValue =
+            (WorkspaceFileValue)
+                env.getValue(WorkspaceFileValue.key(workspaceFile, key.getIndex() - 1));
         if (prevValue == null) {
           return null;
         }
         if (prevValue.next() == null) {
           return prevValue;
         }
-        parser.setParent(prevValue.getPackage(), prevValue.getImportMap(), prevValue.getBindings());
+        parser.setParent(
+            prevValue.getPackage(), prevValue.getLoadedModules(), prevValue.getBindings());
       }
-      BuildFileAST ast = workspaceASTValue.getASTs().get(key.getIndex());
-      PackageFunction.SkylarkImportResult importResult = PackageFunction.fetchImportsFromBuildFile(
-          repoWorkspace, rootPackage, ast, env, null);
-      if (importResult == null) {
+      StarlarkFile ast = workspaceASTValue.getASTs().get(key.getIndex());
+      BzlLoadResult loadResult =
+          PackageFunction.fetchLoadsFromBuildFile(
+              workspaceFile,
+              rootPackage,
+              /*repoMapping=*/ ImmutableMap.of(),
+              ast,
+              key.getIndex(),
+              env,
+              bzlLoadFunctionForInlining);
+      if (loadResult == null) {
         return null;
       }
-      parser.execute(ast, importResult.importMap, skylarkSemantics);
+      parser.execute(ast, loadResult.loadedModules, key);
     } catch (NoSuchPackageException e) {
       throw new WorkspaceFileFunctionException(e, Transience.PERSISTENT);
     } catch (NameConflictException e) {
@@ -127,14 +145,54 @@ public class WorkspaceFileFunction implements SkyFunction {
     try {
       return new WorkspaceFileValue(
           builder.build(),
-          parser.getImportMap(),
+          parser.getLoadedModules(),
+          createLoadToChunkMap(prevValue, parser, key),
           parser.getVariableBindings(),
-          workspaceRoot,
+          workspaceFile,
           key.getIndex(),
-          key.getIndex() < workspaceASTValue.getASTs().size() - 1);
+          key.getIndex() < workspaceASTValue.getASTs().size() - 1,
+          ImmutableMap.copyOf(parser.getManagedDirectories()),
+          parser.getDoNotSymlinkInExecrootPaths());
     } catch (NoSuchPackageException e) {
       throw new WorkspaceFileFunctionException(e, Transience.TRANSIENT);
     }
+  }
+
+  /**
+   * This returns a map from load statement to the chunk the load statement originated from.
+   *
+   * <p>For example, if the WORKSPACE file looked like the following:
+   *
+   * <pre>
+   * load(":a.bzl", "a")
+   * x = 0
+   * load(":b.bzl", "b")
+   * x = 1
+   * load(":a.bzl", "a1")
+   * load(":c.bzl", "c")
+   * x = 2
+   * </pre>
+   *
+   * Then the map for chunk 0 would be {@code {":a.bzl" : 0}}, for chunk 1 it'd be: {@code {":a.bzl"
+   * : 0, ":b.bzl" : 1}}, and for chunk 2 it'd be: {@code {":a.bzl" : 0, ":b.bzl" : 1, ":c.bzl" :
+   * 2}}
+   */
+  private static ImmutableMap<String, Integer> createLoadToChunkMap(
+      WorkspaceFileValue prevValue, WorkspaceFactory parser, WorkspaceFileKey key) {
+    ImmutableMap.Builder<String, Integer> builder = new ImmutableMap.Builder<String, Integer>();
+    if (prevValue == null) {
+      for (String loadString : parser.getLoadedModules().keySet()) {
+        builder.put(loadString, key.getIndex());
+      }
+    } else {
+      builder.putAll(prevValue.getLoadToChunkMap());
+      for (String label : parser.getLoadedModules().keySet()) {
+        if (!prevValue.getLoadToChunkMap().containsKey(label)) {
+          builder.put(label, key.getIndex());
+        }
+      }
+    }
+    return builder.build();
   }
 
   @Override

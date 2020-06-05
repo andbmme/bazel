@@ -17,18 +17,23 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSortedSet;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
+import com.google.devtools.build.lib.packages.NoSuchPackageException;
+import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.pkgcache.LoadingResult;
+import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.TestFilter;
-import com.google.devtools.build.lib.skyframe.serialization.NotSerializableRuntimeException;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import java.io.Serializable;
+import java.util.Collection;
 import java.util.Objects;
 import javax.annotation.Nullable;
 
@@ -39,42 +44,68 @@ import javax.annotation.Nullable;
 @Immutable
 @ThreadSafe
 @VisibleForTesting
+@AutoCodec
 public final class TargetPatternPhaseValue implements SkyValue {
 
-  private final ImmutableSet<Target> targets;
-  @Nullable private final ImmutableSet<Target> testsToRun;
+  private final ImmutableSet<Label> targetLabels;
+  @Nullable private final ImmutableSet<Label> testsToRunLabels;
   private final boolean hasError;
   private final boolean hasPostExpansionError;
-
-  private final ImmutableSet<Target> filteredTargets;
-  private final ImmutableSet<Target> testFilteredTargets;
-
-  // This field is only for the purposes of generating the LoadingPhaseCompleteEvent.
-  // TODO(ulfjack): Support EventBus event posting in Skyframe, and remove this code again.
-  private final ImmutableSet<Target> testSuiteTargets;
   private final String workspaceName;
+  private final ImmutableSortedSet<String> notSymlinkedInExecrootDirectories;
 
-  TargetPatternPhaseValue(ImmutableSet<Target> targets, @Nullable ImmutableSet<Target> testsToRun,
-      boolean hasError, boolean hasPostExpansionError, ImmutableSet<Target> filteredTargets,
-      ImmutableSet<Target> testFilteredTargets, ImmutableSet<Target> testSuiteTargets,
-      String workspaceName) {
-    this.targets = Preconditions.checkNotNull(targets);
-    this.testsToRun = testsToRun;
+  TargetPatternPhaseValue(
+      ImmutableSet<Label> targetLabels,
+      ImmutableSet<Label> testsToRunLabels,
+      boolean hasError,
+      boolean hasPostExpansionError,
+      String workspaceName,
+      ImmutableSortedSet<String> notSymlinkedInExecrootDirectories) {
+    this.targetLabels = targetLabels;
+    this.testsToRunLabels = testsToRunLabels;
     this.hasError = hasError;
     this.hasPostExpansionError = hasPostExpansionError;
-    this.filteredTargets = Preconditions.checkNotNull(filteredTargets);
-    this.testFilteredTargets = Preconditions.checkNotNull(testFilteredTargets);
-    this.testSuiteTargets = Preconditions.checkNotNull(testSuiteTargets);
     this.workspaceName = workspaceName;
+    this.notSymlinkedInExecrootDirectories = notSymlinkedInExecrootDirectories;
   }
 
-  public ImmutableSet<Target> getTargets() {
-    return targets;
+  private static ImmutableSet<Target> getTargetsFromLabels(
+      Collection<Label> labels, ExtendedEventHandler eventHandler, PackageManager packageManager)
+      throws InterruptedException {
+    ImmutableSet.Builder<Target> result = ImmutableSet.builderWithExpectedSize(labels.size());
+    for (Label label : labels) {
+      try {
+        result.add(
+            packageManager
+                .getPackage(eventHandler, label.getPackageIdentifier())
+                .getTarget(label.getName()));
+      } catch (NoSuchTargetException | NoSuchPackageException e) {
+        throw new IllegalStateException(
+            "Failed to get preloaded package from TargetPatternPhaseValue for " + label, e);
+      }
+    }
+    return result.build();
+  }
+
+  public ImmutableSet<Target> getTargets(
+      ExtendedEventHandler eventHandler, PackageManager packageManager)
+      throws InterruptedException {
+    return getTargetsFromLabels(targetLabels, eventHandler, packageManager);
+  }
+
+  public ImmutableSet<Target> getTestsToRun(
+      ExtendedEventHandler eventHandler, PackageManager packageManager)
+      throws InterruptedException {
+    return getTargetsFromLabels(testsToRunLabels, eventHandler, packageManager);
+  }
+
+  public ImmutableSet<Label> getTargetLabels() {
+    return targetLabels;
   }
 
   @Nullable
-  public ImmutableSet<Target> getTestsToRun() {
-    return testsToRun;
+  public ImmutableSet<Label> getTestsToRunLabels() {
+    return testsToRunLabels;
   }
 
   public boolean hasError() {
@@ -85,40 +116,41 @@ public final class TargetPatternPhaseValue implements SkyValue {
     return hasPostExpansionError;
   }
 
-  public ImmutableSet<Target> getFilteredTargets() {
-    return filteredTargets;
-  }
-
-  public ImmutableSet<Target> getTestFilteredTargets() {
-    return testFilteredTargets;
-  }
-
-  public ImmutableSet<Target> getTestSuiteTargets() {
-    return testSuiteTargets;
-  }
-
   public String getWorkspaceName() {
     return workspaceName;
   }
 
-  public LoadingResult toLoadingResult() {
-    return new LoadingResult(
-        hasError(), hasPostExpansionError(), getTargets(), getTestsToRun(), getWorkspaceName());
+  public ImmutableSortedSet<String> getNotSymlinkedInExecrootDirectories() {
+    return notSymlinkedInExecrootDirectories;
   }
 
-  @SuppressWarnings("unused")
-  private void writeObject(ObjectOutputStream out) {
-    throw new NotSerializableRuntimeException();
+  @Override
+  public boolean equals(Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof TargetPatternPhaseValue)) {
+      return false;
+    }
+    TargetPatternPhaseValue that = (TargetPatternPhaseValue) obj;
+    return Objects.equals(this.targetLabels, that.targetLabels)
+        && Objects.equals(this.testsToRunLabels, that.testsToRunLabels)
+        && Objects.equals(this.workspaceName, that.workspaceName)
+        && Objects.equals(
+            this.notSymlinkedInExecrootDirectories, that.notSymlinkedInExecrootDirectories)
+        && this.hasError == that.hasError
+        && this.hasPostExpansionError == that.hasPostExpansionError;
   }
 
-  @SuppressWarnings("unused")
-  private void readObject(ObjectInputStream in) {
-    throw new NotSerializableRuntimeException();
-  }
-
-  @SuppressWarnings("unused")
-  private void readObjectNoData() {
-    throw new IllegalStateException();
+  @Override
+  public int hashCode() {
+    return Objects.hash(
+        this.targetLabels,
+        this.testsToRunLabels,
+        this.workspaceName,
+        this.hasError,
+        this.hasPostExpansionError,
+        this.notSymlinkedInExecrootDirectories);
   }
 
   /** Create a target pattern phase value key. */
@@ -131,6 +163,7 @@ public final class TargetPatternPhaseValue implements SkyValue {
       boolean determineTests,
       ImmutableList<String> buildTargetFilter,
       boolean buildManualTests,
+      boolean expandTestSuites,
       @Nullable TestFilter testFilter) {
     return new TargetPatternPhaseKey(
         targetPatterns,
@@ -140,12 +173,28 @@ public final class TargetPatternPhaseValue implements SkyValue {
         determineTests,
         buildTargetFilter,
         buildManualTests,
+        expandTestSuites,
         testFilter);
+  }
+
+  /**
+   * Creates a new target pattern sky key which represents the given target patterns without
+   * attempting to filter them in any way (for example, ignores options such as only loading tests).
+   *
+   * @param targetPatterns list of targets to evaluate
+   * @param offset relative path to the working directory
+   */
+  @ThreadSafe
+  public static SkyKey keyWithoutFilters(ImmutableList<String> targetPatterns, String offset) {
+    return new TargetPatternPhaseKey(
+        targetPatterns, offset, false, false, false, ImmutableList.of(), false, false, null);
   }
 
   /** The configuration needed to run the target pattern evaluation phase. */
   @ThreadSafe
-  static final class TargetPatternPhaseKey implements SkyKey, Serializable {
+  @VisibleForSerialization
+  @AutoCodec
+  public static final class TargetPatternPhaseKey implements SkyKey, Serializable {
     private final ImmutableList<String> targetPatterns;
     private final String offset;
     private final boolean compileOneDependency;
@@ -153,9 +202,10 @@ public final class TargetPatternPhaseValue implements SkyValue {
     private final boolean determineTests;
     private final ImmutableList<String> buildTargetFilter;
     private final boolean buildManualTests;
+    private final boolean expandTestSuites;
     @Nullable private final TestFilter testFilter;
 
-    public TargetPatternPhaseKey(
+    TargetPatternPhaseKey(
         ImmutableList<String> targetPatterns,
         String offset,
         boolean compileOneDependency,
@@ -163,6 +213,7 @@ public final class TargetPatternPhaseValue implements SkyValue {
         boolean determineTests,
         ImmutableList<String> buildTargetFilter,
         boolean buildManualTests,
+        boolean expandTestSuites,
         @Nullable TestFilter testFilter) {
       this.targetPatterns = Preconditions.checkNotNull(targetPatterns);
       this.offset = Preconditions.checkNotNull(offset);
@@ -171,6 +222,7 @@ public final class TargetPatternPhaseValue implements SkyValue {
       this.determineTests = determineTests;
       this.buildTargetFilter = Preconditions.checkNotNull(buildTargetFilter);
       this.buildManualTests = buildManualTests;
+      this.expandTestSuites = expandTestSuites;
       this.testFilter = testFilter;
       if (buildTestsOnly || determineTests) {
         Preconditions.checkNotNull(testFilter);
@@ -214,6 +266,10 @@ public final class TargetPatternPhaseValue implements SkyValue {
       return testFilter;
     }
 
+    public boolean isExpandTestSuites() {
+      return expandTestSuites;
+    }
+
     @Override
     public String toString() {
       StringBuilder result = new StringBuilder();
@@ -224,15 +280,22 @@ public final class TargetPatternPhaseValue implements SkyValue {
       result.append(compileOneDependency ? " COMPILE_ONE_DEPENDENCY" : "");
       result.append(buildTestsOnly ? " BUILD_TESTS_ONLY" : "");
       result.append(determineTests ? " DETERMINE_TESTS" : "");
-      result.append(testFilter != null ? testFilter : "");
+      result.append(expandTestSuites ? " EXPAND_TEST_SUITES" : "");
+      result.append(testFilter != null ? " " + testFilter : "");
       return result.toString();
     }
 
     @Override
     public int hashCode() {
       return Objects.hash(
-          targetPatterns, offset, compileOneDependency, buildTestsOnly, determineTests,
-          buildManualTests, testFilter);
+          targetPatterns,
+          offset,
+          compileOneDependency,
+          buildTestsOnly,
+          determineTests,
+          buildManualTests,
+          expandTestSuites,
+          testFilter);
     }
 
     @Override
@@ -251,6 +314,7 @@ public final class TargetPatternPhaseValue implements SkyValue {
           && other.determineTests == determineTests
           && other.buildTargetFilter.equals(buildTargetFilter)
           && other.buildManualTests == buildManualTests
+          && other.expandTestSuites == expandTestSuites
           && Objects.equals(other.testFilter, testFilter);
     }
   }

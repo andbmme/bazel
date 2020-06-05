@@ -27,7 +27,7 @@ function test_glob_local_repository_dangling_symlink() {
   r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<EOF
 filegroup(name='fg', srcs=glob(["fg/**"]), visibility=["//visibility:public"])
 EOF
@@ -36,7 +36,7 @@ EOF
   ln -s /doesnotexist $r/fg/symlink
   touch $r/fg/file
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="r", path="$r")
 bind(name="e", actual="@r//:fg")
 EOF
@@ -82,7 +82,7 @@ EOF
 
   cd ${WORKSPACE_DIR}
   mkdir -p {zoo,red}
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name = 'pandas', path = '${repo2}')
 EOF
 
@@ -141,7 +141,7 @@ public class Mongoose {
 EOF
 
   cd ${WORKSPACE_DIR}
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name = 'endangered', path = '$repo2')
 EOF
 
@@ -231,7 +231,7 @@ EOF
       build_file_str="//:${build_file}"
       cat > BUILD
     fi
-    cat > WORKSPACE <<EOF
+    cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = 'endangered',
     path = '$project_dir',
@@ -247,7 +247,7 @@ java_library(
 )
 EOF
   else
-    cat > WORKSPACE <<EOF
+    cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = 'endangered',
     path = '$project_dir',
@@ -309,7 +309,7 @@ function test_default_ws() {
 function test_external_hdrs() {
   local external_ws=$TEST_TMPDIR/path/to/my/lib
   mkdir -p $external_ws
-  touch $external_ws/WORKSPACE
+  create_workspace_with_default_repos $external_ws/WORKSPACE
   cat > $external_ws/greet_lib.h <<EOF
 void greet();
 EOF
@@ -346,7 +346,7 @@ cc_binary(
     deps = ["@greet_ws//:greet_lib"],
 )
 EOF
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "greet_ws",
     path = "$external_ws",
@@ -361,7 +361,7 @@ EOF
 function test_external_includes() {
   clib=$TEST_TMPDIR/clib
   mkdir -p $clib/include
-  touch $clib/WORKSPACE
+  create_workspace_with_default_repos $clib/WORKSPACE
   cat > $clib/include/clib.h <<EOF
 int x();
 EOF
@@ -381,7 +381,7 @@ cc_library(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "clib_repo",
     path = "$clib",
@@ -415,8 +415,8 @@ EOF
 function test_external_query() {
   local external_dir=$TEST_TMPDIR/x
   mkdir -p $external_dir
-  touch $external_dir/WORKSPACE
-  cat > WORKSPACE <<EOF
+  create_workspace_with_default_repos $external_dir/WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "my_repo",
     path = "$external_dir",
@@ -431,7 +431,7 @@ function test_repository_package_query() {
   mkdir a b b/b
   echo "local_repository(name='b', path='b')" > WORKSPACE
   echo "sh_library(name='a', deps=['@b//b'])" > a/BUILD
-  touch b/WORKSPACE
+  create_workspace_with_default_repos b/WORKSPACE
   echo "sh_library(name='b')" > b/b/BUILD
   bazel query --output package "deps(//a)" >& $TEST_log || fail "query failed"
   expect_log "a"
@@ -456,28 +456,6 @@ EOF
   expect_log "@b//c"
 }
 
-function test_warning() {
-  local bar=$TEST_TMPDIR/bar
-  rm -rf "$bar"
-  mkdir -p "$bar"
-  touch "$bar/WORKSPACE" "$bar/BUILD"
-  cat > WORKSPACE <<EOF
-local_repository(
-    name = "bar",
-    path = "$bar",
-)
-EOF
-  touch BUILD
-  bazel build @bar//... &> $TEST_log || fail "Build failed"
-  expect_not_log "Workspace name in .* does not match the name given in the repository's definition (@bar); this will cause a build error in future versions."
-
-  cat > "$bar/WORKSPACE" <<EOF
-workspace(name = "foo")
-EOF
-  bazel build @bar//... &> $TEST_log || fail "Build failed"
-  expect_log "Workspace name in .* does not match the name given in the repository's definition (@bar); this will cause a build error in future versions."
-}
-
 function test_override_workspace_file() {
   local bar=$TEST_TMPDIR/bar
   mkdir -p "$bar"
@@ -485,7 +463,7 @@ function test_override_workspace_file() {
 workspace(name = "foo")
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "bar",
     path = "$bar",
@@ -498,11 +476,99 @@ EOF
 }
 
 
+function test_missing_path_reported_as_user_defined_it() {
+  cat >WORKSPACE <<eof
+local_repository(name = "foo1", path = "./missing")
+
+new_local_repository(name = "foo2", path = "./missing", build_file_content = "")
+
+android_sdk_repository(name = "foo3a", path = "./missing")
+
+android_sdk_repository(name = "foo3b")
+
+android_ndk_repository(name = "foo4a", path = "./missing")
+
+android_ndk_repository(name = "foo4b")
+eof
+
+  # All repositories can be used as a kind of marker and be queried, even if they can't be fetched.
+  for repo in foo1 foo2 foo3a foo3b foo4a foo4b; do
+    bazel query "//external:$repo" >& "$TEST_log" || fail "Expected success"
+  done
+
+  # Fetching the repositories should attempt to create symlinks to their directory.
+  # Since the directories don't exist, we expect failure.
+  bazel query @foo1//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo1.* path is \"./missing\" (absolute: \"[^\"]*workspace/missing\").*does not exist"
+
+  bazel query @foo2//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo2.* path is \"./missing\" (absolute: \"[^\"]*workspace/missing\").*does not exist"
+
+  bazel query @foo3a//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo3a.* path is \"./missing\" (absolute: \"[^\"]*workspace/missing\").*symlink could not be created"
+
+  ANDROID_HOME=./fake bazel query @foo3b//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo3b.* path is \"./fake\" (absolute: \"[^\"]*workspace/fake\").*symlink could not be created"
+
+  bazel query @foo4a//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo4a.* path is \"./missing\" (absolute: \"[^\"]*workspace/missing\").*symlink could not be created"
+
+  ANDROID_NDK_HOME=./fake bazel query @foo4b//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo4b.* path is \"./fake\" (absolute: \"[^\"]*workspace/fake\").*symlink could not be created"
+}
+
+function test_path_looking_like_home_directory_is_reported_as_user_defined_it() {
+  cat >WORKSPACE <<eof
+local_repository(name = "foo1", path = "~/missing")
+
+new_local_repository(name = "foo2", path = "~/missing", build_file_content = "")
+
+android_sdk_repository(name = "foo3a", path = "~/missing")
+
+android_sdk_repository(name = "foo3b")
+
+android_ndk_repository(name = "foo4a", path = "~/missing")
+
+android_ndk_repository(name = "foo4b")
+eof
+
+  # All repositories can be used as a kind of marker and be queried, even if they can't be fetched.
+  for repo in foo1 foo2 foo3a foo3b foo4a foo4b; do
+    bazel query "//external:$repo" >& "$TEST_log" || fail "Expected success"
+  done
+
+  # Fetching the repositories should attempt to create symlinks to their directory.
+  # Although "~/missing" looks like a path under the home directory, "~/" is only a Bash shorthand
+  # that Bazel does not resolve, and instead treats "~/missing" as a relative path under the
+  # workspace. Assert that the error message clarifies this.
+  bazel query @foo1//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo1.* path is \"~/missing\" (absolute: \"[^\"]*workspace/~/missing\").*does not exist"
+
+  bazel query @foo2//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo2.* path is \"~/missing\" (absolute: \"[^\"]*workspace/~/missing\").*does not exist"
+
+  bazel query @foo3a//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo3a.* path is \"~/missing\" (absolute: \"[^\"]*workspace/~/missing\").*symlink could not be created"
+
+  # Since "~/" is a Bash shorthand for "$HOME" and setting an envvar is a Bash command, ANDROID_HOME
+  # will actually be expanded to the full path of the home directory.
+  HOME=/fake_home ANDROID_HOME=~/fake bazel query @foo3b//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo3b.* path is \"/fake_home/fake\" (absolute: \"/fake_home/fake\").*symlink could not be created"
+
+  bazel query @foo4a//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo4a.* path is \"~/missing\" (absolute: \"[^\"]*workspace/~/missing\").*symlink could not be created"
+
+  # Since "~/" is a Bash shorthand for "$HOME" and setting an envvar is a Bash command,
+  # ANDROID_NDK_HOME will actually be expanded to the full path of the home directory.
+  HOME=/fake_home ANDROID_NDK_HOME=~/fake bazel query @foo4b//:* >& "$TEST_log" && fail "Expected failure" || true
+  expect_log "@foo4b.* path is \"/fake_home/fake\" (absolute: \"/fake_home/fake\").*symlink could not be created"
+}
+
 function test_overlaid_build_file() {
   local mutant=$TEST_TMPDIR/mutant
   mkdir $mutant
-  touch $mutant/WORKSPACE
-  cat > WORKSPACE <<EOF
+  create_workspace_with_default_repos $mutant/WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "mutant",
     path = "$mutant",
@@ -542,8 +608,8 @@ function test_external_deps_in_remote_repo() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r
-  touch $r/WORKSPACE
-  cat > WORKSPACE <<EOF
+  create_workspace_with_default_repos $r/WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$r",
@@ -580,7 +646,7 @@ function test_local_deps() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
 
   mkdir -p $r/a
   cat > $r/a/BUILD <<'EOF'
@@ -603,7 +669,7 @@ genrule(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$r",
@@ -617,7 +683,7 @@ function test_globs() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
 
   cat > $r/BUILD <<EOF
 filegroup(
@@ -630,7 +696,7 @@ EOF
   mkdir -p $r/b
   touch $r/b/{BUILD,b}
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$r",
@@ -645,7 +711,7 @@ function test_cc_binary_in_local_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<EOF
 cc_binary(
     name = "bin",
@@ -656,7 +722,7 @@ EOF
 int main() { return 0; };
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$r",
@@ -670,7 +736,7 @@ function test_output_file_in_local_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<'EOF'
 genrule(
     name="r",
@@ -680,7 +746,7 @@ genrule(
     visibility=["//visibility:public"])
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="r", path="$r")
 EOF
 
@@ -694,21 +760,21 @@ EOF
 function test_remote_pkg_boundaries() {
   other_ws=$TEST_TMPDIR/ws
   mkdir -p $other_ws/a
-  touch $other_ws/WORKSPACE
+  create_workspace_with_default_repos $other_ws/WORKSPACE
   cat > $other_ws/a/b <<EOF
 abcxyz
 EOF
   cat > $other_ws/BUILD <<EOF
 exports_files(["a/b"])
 EOF
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "other",
     path = "$other_ws",
 )
 EOF
   cat > BUILD <<EOF
-load('/sample', 'sample_bin')
+load('//:sample.bzl', 'sample_bin')
 
 sample_bin(
     name = "x",
@@ -718,7 +784,7 @@ EOF
 def impl(ctx):
     ctx.actions.run_shell(
         command = "cat %s > %s" % (ctx.file._dep.path, ctx.outputs.sh.path),
-        inputs = [ctx.file._dep],
+        tools = [ctx.file._dep],
         outputs = [ctx.outputs.sh]
     )
 
@@ -728,8 +794,7 @@ sample_bin = rule(
             default=Label("@other//:a/b"),
             executable=True,
             cfg="host",
-            allow_files=True,
-            single_file=True)
+            allow_single_file=True)
     },
     outputs = {'sh': "%{name}.sh"},
     implementation = impl,
@@ -745,7 +810,7 @@ function test_visibility_through_bind() {
   rm -fr $r
   mkdir $r
 
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<EOF
 genrule(
     name = "public",
@@ -762,7 +827,7 @@ genrule(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$r",
@@ -798,17 +863,17 @@ EOF
 
   bazel build @r//:public >& $TEST_log || fail "failed to build public target"
   bazel build @r//:private >& $TEST_log && fail "could build private target"
-  expect_log "Target '//:private' is not visible from target '//external:private'"
+  expect_log "target '//:private' is not visible from target '//external:private'"
 }
 
 function test_load_in_remote_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<EOF
 package(default_visibility=["//visibility:public"])
-load("r", "r_filegroup")
+load(":r.bzl", "r_filegroup")
 r_filegroup(name="rfg", srcs=["rfgf"])
 EOF
 
@@ -819,7 +884,7 @@ EOF
 
   touch $r/rfgf
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="r", path="$r")
 EOF
 
@@ -834,7 +899,7 @@ function test_python_in_remote_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r/bin
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/bin/BUILD <<EOF
 package(default_visibility=["//visibility:public"])
 py_binary(name="bin", srcs=["bin.py"], deps=["//lib:lib"])
@@ -843,7 +908,7 @@ EOF
   cat > $r/bin/bin.py <<EOF
 import lib.lib
 
-print "Hello " + lib.lib.User()
+print("Hello " + lib.lib.User())
 EOF
 
   chmod +x $r/bin/bin.py
@@ -859,7 +924,7 @@ def User():
   return "User"
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="r", path="$r")
 EOF
 
@@ -871,7 +936,7 @@ function test_package_wildcard_in_remote_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r/a
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   touch $r/{x,y,a/g,a/h}
   cat > $r/BUILD <<EOF
 exports_files(["x", "y"])
@@ -881,7 +946,7 @@ EOF
 exports_files(["g", "h"])
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name="r", path="$r")
 EOF
 
@@ -896,7 +961,7 @@ function test_recursive_wildcard_in_remote_repository() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r/a/{x,y/z}
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   touch $r/a/{x,y/z}/{m,n}
 
   echo 'exports_files(["m", "n"])' > $r/a/x/BUILD
@@ -920,16 +985,16 @@ function test_package_name_constants() {
   local r=$TEST_TMPDIR/r
   rm -fr $r
   mkdir -p $r/a
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/a/BUILD <<'EOF'
 genrule(
   name = 'b',
   srcs = [],
   outs = ['bo'],
-  cmd = 'echo ' + REPOSITORY_NAME + ' ' + PACKAGE_NAME + ' > $@')
+  cmd = 'echo ' + repository_name() + ' ' + package_name() + ' > $@')
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(name='r', path='$r')
 EOF
 
@@ -943,7 +1008,7 @@ function test_slash_in_repo_name() {
   rm -fr $r
   mkdir -p $r/a
 
-  touch $r/a/WORKSPACE
+  create_workspace_with_default_repos $r/a/WORKSPACE
   cat > $r/a/BUILD <<EOF
 cc_binary(
     name = "bin",
@@ -954,14 +1019,14 @@ EOF
 int main() { return 0; };
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r/a",
     path = "$r/a",
 )
 EOF
 
-  bazel build --noexperimental_skyframe_target_pattern_evaluator @r/a//:bin &> $TEST_log && fail "expected build failure, but succeeded"
+  bazel build @r/a//:bin &> $TEST_log && fail "expected build failure, but succeeded"
   expect_log "workspace names may contain only A-Z, a-z, 0-9, '-', '_' and '.'"
 }
 
@@ -970,7 +1035,7 @@ function test_remote_includes() {
   rm -fr $remote
   mkdir -p $remote/inc
 
-  touch $remote/WORKSPACE
+  create_workspace_with_default_repos $remote/WORKSPACE
   cat > $remote/BUILD <<EOF
 cc_library(
     name = "bar",
@@ -989,7 +1054,7 @@ EOF
 int getNum();
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$remote",
@@ -1024,7 +1089,7 @@ EOF
 int b() { return 42; }
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name="r",
     path="$r",
@@ -1050,7 +1115,7 @@ function test_build_all() {
   local r=$TEST_TMPDIR/r
   rm -rf $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<'EOF'
 genrule(
   name = "dummy1",
@@ -1060,7 +1125,7 @@ genrule(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name="r",
     path="$r",
@@ -1081,14 +1146,14 @@ EOF
 
 function test_local_repository_path_does_not_exist() {
   rm -rf $TEST_TMPDIR/r
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
 )
 EOF
   bazel build @r//... &> $TEST_log && fail "Build succeeded unexpectedly"
-  expect_log "must be an existing directory"
+  expect_log "(absolute: \"$TEST_TMPDIR/r\") but this directory does not exist"
 }
 
 # Regression test for #2841.
@@ -1104,7 +1169,7 @@ genrule(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1115,7 +1180,7 @@ EOF
   expect_log "No WORKSPACE file found"
 
   # Create the workspace and verify it now succeeds.
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   bazel build @r//... &> $TEST_log || fail "Build failed unexpectedly"
   expect_not_log "No WORKSPACE file found"
 
@@ -1130,7 +1195,7 @@ function test_overwrite_build_file() {
   local r=$TEST_TMPDIR/r
   rm -rf $r
   mkdir -p $r
-  touch $r/WORKSPACE
+  create_workspace_with_default_repos $r/WORKSPACE
   cat > $r/BUILD <<'EOF'
 genrule(
     name = "orig",
@@ -1139,7 +1204,7 @@ genrule(
 )
 EOF
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1159,7 +1224,7 @@ EOF
 function test_new_local_repository_path_not_existing() {
   local r=$TEST_TMPDIR/r
   rm -rf $r
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1180,7 +1245,7 @@ function test_new_local_repository_path_not_directory() {
   local r=$TEST_TMPDIR/r
   rm -rf $r
   touch $r
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1205,7 +1270,7 @@ function test_new_local_repository_path_symlink_to_dir() {
   mkdir -p $s
   ln -s $s $r
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1229,7 +1294,7 @@ function test_new_local_repository_path_symlink_to_file() {
   touch $s
   ln -s $s $r
 
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 new_local_repository(
     name = "r",
     path = "$TEST_TMPDIR/r",
@@ -1244,6 +1309,172 @@ genrule(
 EOF
   bazel build @r//:rewrite &> $TEST_log && fail "Build succeeded unexpectedly"
   expect_log "is not a directory"
+}
+
+# Creates an indirect dependency on X from A and make sure the error message
+# refers to the correct label, both in an external repository and not.
+function test_indirect_dep_message() {
+  local external_dir=$TEST_TMPDIR/ext-dir
+  mkdir -p a b $external_dir/x
+  cat > a/A.java <<EOF
+package a;
+
+import x.X;
+
+public class A {
+  public static void main(String args[]) {
+    X.print();
+  }
+}
+EOF
+  cat > a/BUILD <<EOF
+java_binary(
+    name = "a",
+    main_class = "a.A",
+    srcs = ["A.java"],
+    deps = ["//b"],
+)
+EOF
+
+
+  cat > b/B.java <<EOF
+package b;
+
+public class B {
+  public static void print() {
+     System.out.println("B");
+  }
+}
+EOF
+  cat > b/BUILD <<EOF
+java_library(
+    name = "b",
+    srcs = ["B.java"],
+    deps = ["@x_repo//x"],
+    visibility = ["//visibility:public"],
+)
+EOF
+
+  cp -r a b $external_dir
+
+  create_workspace_with_default_repos $external_dir/WORKSPACE
+  cat > $external_dir/x/X.java <<EOF
+package x;
+
+public class X {
+  public static void print() {
+    System.out.println("X");
+  }
+}
+EOF
+  cat > $external_dir/x/BUILD <<EOF
+java_library(
+    name = "x",
+    srcs = ["X.java"],
+    visibility = ["//visibility:public"],
+)
+EOF
+
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+local_repository(
+    name = "x_repo",
+    path = "$external_dir",
+)
+EOF
+
+  bazel build @x_repo//a >& $TEST_log && fail "Building @x_repo//a should error out"
+  expect_log "** Please add the following dependencies:"
+  expect_log "@x_repo//x to @x_repo//a"
+}
+
+# This test verifies that the //... pattern includes external dependencies
+#
+# ${WORKSPACE_DIR}/
+#     WORKSPACE
+#     green/
+#       BUILD
+# repo2/
+#   blue/
+#     BUILD
+#
+# repo2 contains a .sh file whose visibility is set to //...
+# we verify that we can use this file from ${WORKSPACE_DIR} by running it as
+# part of the "run-the-thing" binary.
+function test_slashslashdotdotdot_includes_external_dependencies() {
+  create_new_workspace
+  repo2=${new_workspace_dir}
+  mkdir -p blue
+  cat > blue/BUILD <<EOF
+package_group(
+    name = "slash-slash-dot-dot-dot",
+    packages = ["//..."],
+)
+filegroup(
+    name = "do-the-thing",
+    srcs = ["do-the-thing.sh"],
+    visibility = [":slash-slash-dot-dot-dot"]
+)
+EOF
+  cat > blue/do-the-thing.sh <<EOF
+#!/bin/sh
+echo "WE DID IT FAM"
+EOF
+  chmod +x blue/do-the-thing.sh
+
+  cd ${WORKSPACE_DIR}
+  mkdir -p green
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+local_repository(name = 'blue', path = "${repo2}")
+EOF
+  cat > green/BUILD <<EOF
+sh_binary(
+    name = "run-the-thing",
+    srcs = ["@blue//blue:do-the-thing"],
+)
+EOF
+
+  bazel run //green:run-the-thing >& $TEST_log || fail "failed to run the thing"
+  expect_log "WE DID IT FAM"
+}
+
+## Like test above, but testing an external dep can depend on a local target
+## with //... visibility
+function test_slashslashdotdotdot_includes_main_repo_from_external_dep() {
+  create_new_workspace
+  repo2=${new_workspace_dir}
+  mkdir -p blue
+  cat > blue/BUILD <<EOF
+sh_binary(
+    name = "run-the-thing",
+    srcs = ["@//green:do-the-thing"],
+)
+EOF
+
+  cd ${WORKSPACE_DIR}
+  mkdir -p green
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
+local_repository(name = 'blue', path = "${repo2}")
+EOF
+  cat > green/BUILD <<EOF
+package_group(
+    name = "slash-slash-dot-dot-dot",
+    packages = ["//..."],
+)
+filegroup(
+    name = "do-the-thing",
+    srcs = ["do-the-thing.sh"],
+    visibility = [":slash-slash-dot-dot-dot"]
+)
+
+EOF
+  cat > green/do-the-thing.sh <<EOF
+#!/bin/sh
+echo "WE DID IT FAM"
+EOF
+  chmod +x green/do-the-thing.sh
+
+  bazel run @blue//blue:run-the-thing >& $TEST_log || fail "failed to run the thing"
+  expect_log "WE DID IT FAM"
 }
 
 run_suite "local repository tests"

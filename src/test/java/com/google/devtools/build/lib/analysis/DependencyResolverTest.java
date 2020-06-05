@@ -17,27 +17,23 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
 import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
 import com.google.devtools.build.lib.analysis.util.TestAspects;
+import com.google.devtools.build.lib.causes.Cause;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
-import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
-import com.google.devtools.build.lib.packages.NoSuchThingException;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.testutil.Suite;
 import com.google.devtools.build.lib.testutil.TestSpec;
 import com.google.devtools.build.lib.util.OrderedSetMultimap;
-import java.util.List;
-import java.util.Set;
-import javax.annotation.Nullable;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -59,78 +55,70 @@ public class DependencyResolverTest extends AnalysisTestCase {
 
   @Before
   public final void createResolver() throws Exception {
-    dependencyResolver = new DependencyResolver(ruleClassProvider.getDynamicTransitionMapper()) {
-
-      @Override
-      protected void invalidVisibilityReferenceHook(TargetAndConfiguration node, Label label) {
-        throw new IllegalStateException();
-      }
-
-      @Override
-      protected void invalidPackageGroupReferenceHook(TargetAndConfiguration node, Label label) {
-        throw new IllegalStateException();
-      }
-
-      @Override
-      protected void missingEdgeHook(Target from, Label to, NoSuchThingException e) {
-        throw new IllegalStateException(e);
-      }
-
-      @Nullable
-      @Override
-      protected Target getTarget(Target from, Label label, NestedSetBuilder<Label> rootCauses) {
-        try {
-          return packageManager.getTarget(reporter, label);
-        } catch (NoSuchPackageException | NoSuchTargetException | InterruptedException e) {
-          throw new IllegalStateException(e);
-        }
-      }
-
-      @Nullable
-      @Override
-      protected List<BuildConfiguration> getConfigurations(
-          Set<Class<? extends BuildConfiguration.Fragment>> fragments,
-          Iterable<BuildOptions> buildOptions) {
-        throw new UnsupportedOperationException(
-            "this functionality is covered by analysis-phase integration tests");
-      }
-    };
+    dependencyResolver =
+        new DependencyResolver() {
+          @Override
+          protected Map<Label, Target> getTargets(
+              OrderedSetMultimap<DependencyKind, Label> labelMap,
+              TargetAndConfiguration fromNode,
+              NestedSetBuilder<Cause> rootCauses) {
+            return labelMap.values().stream()
+                .distinct()
+                .collect(
+                    Collectors.toMap(
+                        Function.identity(),
+                        label -> {
+                          try {
+                            return packageManager.getTarget(reporter, label);
+                          } catch (NoSuchPackageException
+                              | NoSuchTargetException
+                              | InterruptedException e) {
+                            throw new IllegalStateException(e);
+                          }
+                        }));
+          }
+        };
   }
 
   private void pkg(String name, String... contents) throws Exception {
     scratch.file("" + name + "/BUILD", contents);
   }
 
-  private OrderedSetMultimap<Attribute, Dependency> dependentNodeMap(
+  private OrderedSetMultimap<DependencyKind, DependencyKey> dependentNodeMap(
       String targetName, NativeAspectClass aspect) throws Exception {
-    Target target = packageManager.getTarget(reporter, Label.parseAbsolute(targetName));
-    return dependencyResolver.dependentNodeMap(
-        new TargetAndConfiguration(target, getTargetConfiguration()),
-        getHostConfiguration(),
-        aspect != null ? Aspect.forNative(aspect) : null,
-        ImmutableMap.<Label, ConfigMatchingProvider>of(),
-        /*toolchainContext=*/ null);
+    Target target =
+        packageManager.getTarget(reporter, Label.parseAbsolute(targetName, ImmutableMap.of()));
+    OrderedSetMultimap<DependencyKind, DependencyKey> prerequisiteMap =
+        dependencyResolver.dependentNodeMap(
+            new TargetAndConfiguration(target, getTargetConfiguration()),
+            getHostConfiguration(),
+            aspect != null ? Aspect.forNative(aspect) : null,
+            ImmutableMap.of(),
+            /*toolchainContext=*/ null,
+            /*trimmingTransitionFactory=*/ null);
+
+    return prerequisiteMap;
   }
 
   @SafeVarargs
-  private final Dependency assertDep(
-      OrderedSetMultimap<Attribute, Dependency> dependentNodeMap,
+  private final DependencyKey assertDep(
+      OrderedSetMultimap<DependencyKind, DependencyKey> dependentNodeMap,
       String attrName,
       String dep,
       AspectDescriptor... aspects) {
-    Attribute attr = null;
-    for (Attribute candidate : dependentNodeMap.keySet()) {
-      if (candidate.getName().equals(attrName)) {
-        attr = candidate;
+    DependencyKind kind = null;
+    for (DependencyKind candidate : dependentNodeMap.keySet()) {
+      if (candidate.getAttribute() != null && candidate.getAttribute().getName().equals(attrName)) {
+        kind = candidate;
         break;
       }
     }
 
-    assertWithMessage("Attribute '" + attrName + "' not found").that(attr).isNotNull();
-    Dependency dependency = null;
-    for (Dependency candidate : dependentNodeMap.get(attr)) {
-      if (candidate.getLabel().toString().equals(dep)) {
-        dependency = candidate;
+    assertWithMessage("Attribute '" + attrName + "' not found").that(kind).isNotNull();
+    DependencyKey dependency = null;
+    for (DependencyKey depCandidate : dependentNodeMap.get(kind)) {
+      if (depCandidate.getLabel().toString().equals(dep)) {
+        dependency = depCandidate;
         break;
       }
     }
@@ -148,7 +136,7 @@ public class DependencyResolverTest extends AnalysisTestCase {
     pkg("a",
         "aspect(name='a', foo=[':b'])",
         "aspect(name='b', foo=[])");
-    OrderedSetMultimap<Attribute, Dependency> map = dependentNodeMap("//a:a", null);
+    OrderedSetMultimap<DependencyKind, DependencyKey> map = dependentNodeMap("//a:a", null);
     assertDep(
         map, "foo", "//a:b",
         new AspectDescriptor(TestAspects.SIMPLE_ASPECT));
@@ -160,7 +148,7 @@ public class DependencyResolverTest extends AnalysisTestCase {
     pkg("a",
         "simple(name='a', foo=[':b'])",
         "simple(name='b', foo=[])");
-    OrderedSetMultimap<Attribute, Dependency> map =
+    OrderedSetMultimap<DependencyKind, DependencyKey> map =
         dependentNodeMap("//a:a", TestAspects.ATTRIBUTE_ASPECT);
     assertDep(
         map, "foo", "//a:b",
@@ -173,7 +161,7 @@ public class DependencyResolverTest extends AnalysisTestCase {
     pkg("a",
         "simple(name='a', foo=[':b'])",
         "simple(name='b', foo=[])");
-    OrderedSetMultimap<Attribute, Dependency> map =
+    OrderedSetMultimap<DependencyKind, DependencyKey> map =
         dependentNodeMap("//a:a", TestAspects.ALL_ATTRIBUTES_ASPECT);
     assertDep(
         map, "foo", "//a:b",
@@ -185,23 +173,9 @@ public class DependencyResolverTest extends AnalysisTestCase {
     setRulesAvailableInTests(TestAspects.BASE_RULE);
     pkg("a", "base(name='a')");
     pkg("extra", "base(name='extra')");
-    OrderedSetMultimap<Attribute, Dependency> map =
+    OrderedSetMultimap<DependencyKind, DependencyKey> map =
         dependentNodeMap("//a:a", TestAspects.EXTRA_ATTRIBUTE_ASPECT);
     assertDep(map, "$dep", "//extra:extra");
-  }
-
-  /**
-   * Null configurations should always be explicit (vs. holding transitions). This lets Bazel skip
-   * its complicated dependency configuration logic for these cases.
-   */
-  @Test
-  public void nullConfigurationsAlwaysExplicit() throws Exception {
-    pkg("a",
-        "genrule(name = 'gen', srcs = ['gen.in'], cmd = '', outs = ['gen.out'])");
-    update();
-    Dependency dep = assertDep(dependentNodeMap("//a:gen", null), "srcs", "//a:gen.in");
-    assertThat(dep.hasExplicitConfiguration()).isTrue();
-    assertThat(dep.getConfiguration()).isNull();
   }
 
   /** Runs the same test with trimmed configurations. */

@@ -36,7 +36,6 @@ public class AndroidSdkTest extends BuildViewTestCase {
         "    framework_aidl = 'framework_aidl',",
         "    android_jar = 'android.jar',",
         "    source_properties = 'platforms/android-25/source.properties',",
-        "    annotations_jar = 'annotations.jar',",
         "    apksigner = 'apksigner',",
         "    dx = 'dx',",
         "    main_dex_classes = 'mainDexClasses.rules',",
@@ -44,9 +43,9 @@ public class AndroidSdkTest extends BuildViewTestCase {
         "    proguard = 'ProGuard',",
         "    shrinked_android_jar = 'android.jar',",
         "    zipalign = 'zipalign',",
+        "    tags = ['__ANDROID_RULES_MIGRATION__'],",
         ")");
-    AndroidSdkProvider sdkProvider =
-        getConfiguredTarget("//sdk").getProvider(AndroidSdkProvider.class);
+    AndroidSdkProvider sdkProvider = getConfiguredTarget("//sdk").get(AndroidSdkProvider.PROVIDER);
     assertThat(sdkProvider.getSourceProperties().toDetailString())
         .isEqualTo("[/workspace[source]]sdk/platforms/android-25/source.properties");
   }

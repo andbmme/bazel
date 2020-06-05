@@ -16,12 +16,51 @@
 #
 # discard_graph_edges_test.sh: basic tests for the --discard_graph_edges flag.
 
-# Load the test setup defined in the parent directory
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${CURRENT_DIR}/../integration_test_setup.sh" \
+# --- begin runfiles.bash initialization ---
+# Copy-pasted from Bazel's Bash runfiles library (tools/bash/runfiles/runfiles.bash).
+set -euo pipefail
+if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  if [[ -f "$0.runfiles_manifest" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
+  elif [[ -f "$0.runfiles/MANIFEST" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
+  elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+    export RUNFILES_DIR="$0.runfiles"
+  fi
+fi
+if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
+elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
+            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
+else
+  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
+  exit 1
+fi
+# --- end runfiles.bash initialization ---
+
+source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
-source "${CURRENT_DIR}/discard_graph_edges_lib.sh" \
-  || { echo "${CURRENT_DIR}/discard_graph_edges_lib.sh not found!" >&2; exit 1; }
+source "$(rlocation "io_bazel/src/test/shell/integration/discard_graph_edges_lib.sh")" \
+  || { echo "discard_graph_edges_lib.sh not found!" >&2; exit 1; }
+
+IS_WINDOWS=false
+case "$(uname | tr [:upper:] [:lower:])" in
+msys*|mingw*|cygwin*)
+  IS_WINDOWS=true
+esac
+
+if "$IS_WINDOWS"; then
+  EXE_EXT=".exe"
+else
+  EXE_EXT=""
+fi
+
+javabase="$1"
+if [[ $javabase = external/* ]]; then
+  javabase=${javabase#external/}
+fi
+jmaptool="$(rlocation "${javabase}/bin/jmap${EXE_EXT}")"
 
 #### SETUP #############################################################
 
@@ -90,15 +129,16 @@ function test_top_level_aspect() {
   mkdir -p "foo" || fail "Couldn't make directory"
   cat > foo/simpleaspect.bzl <<'EOF' || fail "Couldn't write bzl file"
 def _simple_aspect_impl(target, ctx):
-  result=depset()
-  for orig_out in target.files:
+  result=[]
+  for orig_out in target.files.to_list():
     aspect_out = ctx.actions.declare_file(orig_out.basename + ".aspect")
     ctx.actions.write(
         output=aspect_out,
         content = "Hello from aspect for %s" % orig_out.basename)
     result += [aspect_out]
-  for src in ctx.rule.attr.srcs:
-    result += src.aspectouts
+
+  result = depset(result,
+      transitive = [src.aspectouts for src in ctx.rule.attr.srcs])
 
   return struct(output_groups={
       "aspect-out" : result }, aspectouts = result)
@@ -167,7 +207,7 @@ genrule(name = 'histodump',
         local = 1,
         tools = [':cclib'],
         cmd = 'server_pid=\$\$(cat $server_pid_fifo) ; ' +
-              '${bazel_javabase}/bin/jmap -histo:live \$\$server_pid > ' +
+              '${jmaptool} -histo:live \$\$server_pid > ' +
               '\$(location histo.txt) ' +
               '|| echo "server_pid in genrule: \$\$server_pid"'
        )
@@ -209,12 +249,11 @@ function test_packages_cleared() {
   [[ "$package_count" -ge 9 ]] \
       || fail "package count $package_count too low: did you move/rename the class?"
   local glob_count="$(extract_histogram_count "$histo_file" "GlobValue$")"
-  [[ "$glob_count" -ge 8 ]] \
+  [[ "$glob_count" -ge 2 ]] \
       || fail "glob count $glob_count too low: did you move/rename the class?"
-  local env_count="$(extract_histogram_count "$histo_file" \
-      'Environment\$Extension$')"
-  [[ "$env_count" -ge 3 ]] \
-      || fail "env extension count $env_count too low: did you move/rename the class?"
+  local module_count="$(extract_histogram_count "$histo_file" 'syntax.Module$')"
+  [[ "$module_count" -gt 25 ]] \
+      || fail "Module count $module_count too low: was the class renamed/moved?" # was 74
   local ct_count="$(extract_histogram_count "$histo_file" \
        'RuleConfiguredTarget$')"
   [[ "$ct_count" -ge 18 ]] \
@@ -231,15 +270,14 @@ function test_packages_cleared() {
   package_count="$(extract_histogram_count "$histo_file" \
       'devtools\.build\.lib\..*\.Package$')"
   # A few packages aren't cleared.
-  [[ "$package_count" -le 8 ]] \
-      || fail "package count $package_count too high"
+  [[ "$package_count" -le 25 ]] \
+      || fail "package count $package_count too high. Expected <= 25"
   glob_count="$(extract_histogram_count "$histo_file" "GlobValue$")"
   [[ "$glob_count" -le 1 ]] \
       || fail "glob count $glob_count too high"
-  env_count="$(extract_histogram_count "$histo_file" \
-      'Environment\$  Extension$')"
-  [[ "$env_count" -le 7 ]] \
-      || fail "env extension count $env_count too high"
+  module_count="$(extract_histogram_count "$histo_file" 'syntax.Module$')"
+  [[ "$module_count" -lt 25 ]] \
+      || fail "Module count $module_count too high" # was 22
   ct_count="$(extract_histogram_count "$histo_file" \
        'RuleConfiguredTarget$')"
   [[ "$ct_count" -le 1 ]] \
@@ -254,10 +292,6 @@ function test_packages_cleared() {
       || fail "Too many ($node_entry_count) InMemoryNodeEntry instances found in build discarding edges"
 }
 
-function test_actions_deleted_after_execution() {
-  run_test_actions_deleted_after_execution bazel "$bazel_javabase" '' ''
-}
-
 # Action conflicts can cause deletion of nodes, and deletion is tricky with no edges.
 function test_action_conflict() {
   mkdir -p conflict || fail "Couldn't create directory"
@@ -267,11 +301,11 @@ def _create(ctx):
   files_to_build = depset(ctx.outputs.outs)
   intemediate_outputs = [ctx.actions.declare_file("bar")]
   intermediate_cmd = "cat %s > %s" % (ctx.attr.name, intemediate_outputs[0].path)
-  action_cmd = "touch " + list(files_to_build)[0].path
+  action_cmd = "touch " + files_to_build.to_list()[0].path
   ctx.actions.run_shell(outputs=list(intemediate_outputs),
                         command=intermediate_cmd)
   ctx.actions.run_shell(inputs=list(intemediate_outputs),
-                        outputs=list(files_to_build),
+                        outputs=files_to_build.to_list(),
                         command=action_cmd)
   struct(files=files_to_build,
          data_runfiles=ctx.runfiles(transitive_files=files_to_build))
@@ -334,13 +368,13 @@ EOF
 # The following tests are not expected to exercise codepath -- make sure nothing bad happens.
 
 function test_no_batch() {
-  bazel $STARTUP_FLAGS --nobatch test $BUILD_FLAGS --keep_incrementality_data \
+  bazel $STARTUP_FLAGS --nobatch test $BUILD_FLAGS --track_incremental_state \
       //testing:mytest >& "$TEST_log" || fail "Expected success"
 }
 
 function test_no_discard_analysis_cache() {
   bazel $STARTUP_FLAGS test $BUILD_FLAGS --nodiscard_analysis_cache \
-      --keep_incrementality_data //testing:mytest >& "$TEST_log" \
+      --track_incremental_state //testing:mytest >& "$TEST_log" \
       || fail "Expected success"
 }
 
@@ -348,7 +382,7 @@ function test_packages_cleared_nobatch() {
   readonly local old_startup_flags="$STARTUP_FLAGS"
   STARTUP_FLAGS="--nobatch"
   readonly local old_build_flags="$BUILD_FLAGS"
-  BUILD_FLAGS="--nokeep_incrementality_data --discard_analysis_cache"
+  BUILD_FLAGS="--notrack_incremental_state --discard_analysis_cache"
   test_packages_cleared
   STARTUP_FLAGS="$old_startup_flags"
   BUILD_FLAGS="$old_build_flags"
@@ -356,32 +390,41 @@ function test_packages_cleared_nobatch() {
 
 function test_packages_cleared_implicit_noincrementality_data() {
   readonly local old_build_flags="$BUILD_FLAGS"
-  BUILD_FLAGS="$BUILD_FLAGS --keep_incrementality_data"
+  BUILD_FLAGS="$BUILD_FLAGS --track_incremental_state"
   test_packages_cleared
   BUILD_FLAGS="$old_build_flags"
 }
 
-function test_actions_deleted_after_execution_nobatch_keep_analysis () {
-  readonly local old_startup_flags="$STARTUP_FLAGS"
-  STARTUP_FLAGS="--nobatch"
-  readonly local old_build_flags="$BUILD_FLAGS"
-  BUILD_FLAGS="--nokeep_incrementality_data"
-  test_actions_deleted_after_execution
-  STARTUP_FLAGS="$old_startup_flags"
-  BUILD_FLAGS="$old_build_flags"
+function test_actions_not_deleted_after_execution() {
+  mkdir -p foo || fail "Couldn't mkdir"
+  cat > foo/BUILD <<'EOF' || fail "Couldn't write file"
+genrule(name = "foo", cmd = "touch $@", outs = ["foo.out"])
+EOF
+
+  readonly local server_pid="$(bazel info server_pid 2> /dev/null)"
+  bazel build $BUILD_FLAGS //foo:foo \
+      >& "$TEST_log" || fail "Expected success"
+  "$jmaptool" -histo:live $server_pid > histo.txt
+  genrule_action_count="$(extract_histogram_count histo.txt \
+        'GenRuleAction$')"
+  if [[ "$genrule_action_count" -lt 1 ]]; then
+    cat histo.txt >> "$TEST_log"
+    fail "GenRuleAction unexpectedly not found: $genrule_action_count"
+  fi
+
 }
 
 function test_dump_after_discard_incrementality_data() {
-  bazel build --nokeep_incrementality_data //testing:mytest >& "$TEST_log" \
+  bazel build --notrack_incremental_state //testing:mytest >& "$TEST_log" \
        || fail "Expected success"
   bazel dump --skyframe=detailed >& "$TEST_log" || fail "Expected success"
   expect_log "//testing:mytest"
 }
 
 function test_query_after_discard_incrementality_data() {
-  bazel build --nobuild --nokeep_incrementality_data //testing:mytest \
+  bazel build --nobuild --notrack_incremental_state //testing:mytest \
        >& "$TEST_log" || fail "Expected success"
-  bazel query --noexperimental_ui --output=label_kind //testing:mytest \
+  bazel query --experimental_ui_debug_all_events --output=label_kind //testing:mytest \
        >& "$TEST_log" || fail "Expected success"
   expect_log "Loading package: testing"
   expect_log "cc_test rule //testing:mytest"
@@ -390,7 +433,7 @@ function test_query_after_discard_incrementality_data() {
 function test_shutdown_after_discard_incrementality_data() {
   readonly local server_pid="$(bazel info server_pid 2> /dev/null)"
   [[ -z "$server_pid" ]] && fail "Couldn't get server pid"
-  bazel build --nobuild --nokeep_incrementality_data //testing:mytest \
+  bazel build --nobuild --notrack_incremental_state //testing:mytest \
        >& "$TEST_log" || fail "Expected success"
   bazel shutdown || fail "Expected success"
   readonly local new_server_pid="$(bazel info server_pid 2> /dev/null)"
@@ -399,28 +442,28 @@ function test_shutdown_after_discard_incrementality_data() {
 }
 
 function test_clean_after_discard_incrementality_data() {
-  bazel build --nobuild --nokeep_incrementality_data //testing:mytest \
+  bazel build --nobuild --notrack_incremental_state //testing:mytest \
        >& "$TEST_log" || fail "Expected success"
   bazel clean >& "$TEST_log" || fail "Expected success"
 }
 
 function test_switch_back_and_forth() {
   readonly local server_pid="$(bazel info \
-      --nokeep_incrementality_data server_pid 2> /dev/null)"
+      --notrack_incremental_state server_pid 2> /dev/null)"
   [[ -z "$server_pid" ]] && fail "Couldn't get server pid"
-  bazel test --noexperimental_ui --nokeep_incrementality_data \
+  bazel test --experimental_ui_debug_all_events --notrack_incremental_state \
       //testing:mytest >& "$TEST_log" || fail "Expected success"
   expect_log "Loading package: testing"
-  bazel test --noexperimental_ui --nokeep_incrementality_data \
+  bazel test --experimental_ui_debug_all_events --notrack_incremental_state \
       //testing:mytest >& "$TEST_log" || fail "Expected success"
   expect_log "Loading package: testing"
-  bazel test --noexperimental_ui //testing:mytest >& "$TEST_log" \
+  bazel test --experimental_ui_debug_all_events //testing:mytest >& "$TEST_log" \
       || fail "Expected success"
   expect_log "Loading package: testing"
-  bazel test --noexperimental_ui //testing:mytest >& "$TEST_log" \
+  bazel test --experimental_ui_debug_all_events //testing:mytest >& "$TEST_log" \
       || fail "Expected success"
   expect_not_log "Loading package: testing"
-  bazel test --noexperimental_ui --nokeep_incrementality_data \
+  bazel test --experimental_ui_debug_all_events --notrack_incremental_state \
       //testing:mytest >& "$TEST_log" || fail "Expected success"
   expect_log "Loading package: testing"
   readonly local new_server_pid="$(bazel info server_pid 2> /dev/null)"
@@ -431,10 +474,10 @@ function test_switch_back_and_forth() {
 function test_warns_on_unexpected_combos() {
   bazel --batch build --nobuild --discard_analysis_cache >& "$TEST_log" \
       || fail "Expected success"
-  expect_log "--batch and --discard_analysis_cache specified, but --nokeep_incrementality_data not specified"
-  bazel build --nobuild --discard_analysis_cache --nokeep_incrementality_data \
+  expect_log "--batch and --discard_analysis_cache specified, but --notrack_incremental_state not specified"
+  bazel build --nobuild --discard_analysis_cache --notrack_incremental_state \
       >& "$TEST_log" || fail "Expected success"
-  expect_log "--batch not specified with --nokeep_incrementality_data"
+  expect_log "--notrack_incremental_state was specified, but without --nokeep_state_after_build."
 }
 
 run_suite "test for --discard_graph_edges"

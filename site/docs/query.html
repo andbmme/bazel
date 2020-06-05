@@ -1,8 +1,9 @@
 ---
 layout: documentation
-title: Query Language
+title: Query language
 ---
-<h1>The Bazel Query Reference</h1>
+<h1>The Bazel query reference</h1>
+
 
 <p>
   When you use <code>bazel query</code> to analyze build
@@ -12,7 +13,18 @@ title: Query Language
   formats <code>bazel query</code> supports.
 </p>
 
-<h2>Examples</h2>
+<p>
+  If you were looking for a how-to, please see the <a href='query-how-to.md'>Bazel Query How-To</a>.
+</p>
+<h3> bazel cquery </h3>
+<p>Traditional bazel query runs on the post-loading phase target graph and therefore
+  has no concept of configurations and their related concepts. Notably, this means it does not
+  correctly resolve <a href = "be/functions.html#select">select statements</a>
+  and rather returns all possible resolutions of selects. A newer query environment, cquery,
+  properly handles configurations but doesn't provide all of the functionality of this original
+  query. For more information, see the <a href="cquery.html">Bazel cquery reference</a>.
+</p>
+<h2 id='examples'>Examples</h2>
 
 <p>
   How do people use <code>bazel query</code>?  Here are typical examples:
@@ -30,7 +42,7 @@ title: Query Language
   <pre>kind("cc_library", deps(kind(".*test rule", foo/...)) except deps(//foo:foo_bin))</pre>
 
 
-<h2>Tokens: the lexical syntax</h2>
+<h2 id='tokens'>Tokens: The lexical syntax</h2>
 
 <p>
   Expressions in the query language are composed of the following
@@ -56,47 +68,68 @@ title: Query Language
     <li>
       <p>
         <b>Words</b>, such as <code>foo/...</code> or
-        <code>".*test rule"</code> or
-        <code>//bar/baz:all</code>.
-        If a character sequence is "quoted" (begins and ends with a
-        single-quote <code>'</code>, or begins and ends with a
-        double-quote <code>&quot;</code>), it is a word.
-        If a character sequence is not quoted, it may still be parsed as a word.
-        Unquoted words are sequences of characters drawn from
-        the set of alphabet characters, numerals, slash <code>/</code>,
-        hyphen <code>-</code>, underscore <code>_</code>, star <code>*</code>, and
-        period <code>.</code>. Unquoted words may not start with a
-        hyphen or period.
+        <code>".*test rule"</code> or <code>//bar/baz:all</code>. If a
+        character sequence is "quoted" (begins and ends with a single-quote
+        <code>'</code> or begins and ends with a double-quote
+        <code>&quot;</code>), it is a word. If a character sequence is not
+        quoted, it may still be parsed as a word. Unquoted words are sequences
+        of characters drawn from the alphabet characters <code>A-Za-z</code>,
+        the numerals <code>0-9</code>, and the special characters <code>*/@.-_:$~</code>
+        (asterisk, forward slash, at, period, hyphen, underscore, colon, dollar sign, tilde).
+        However, unquoted words may not start with a hyphen <code>-</code> or asterisk
+        <code>*</code> even though relative <a href="build-ref.html#name">target names</a> may
+        start with those characters.
+      </p>
+      <p>
+        Unquoted words also may not include the characters plus sign <code>+</code> or equals sign
+        <code>=</code>, even though those characters are permitted in target names. Thus, when
+        writing code that generates query expressions, target names should be quoted.
+      </p>
+      <p>
+        Quoting <em>is</em> necessary when writing scripts that
+        construct Bazel query expressions from user-supplied values.
+      </p>
+      <pre>
+        //foo:bar+wiz    # WRONG: scanned as //foo:bar + wiz.
+        //foo:bar=wiz    # WRONG: scanned as //foo:bar = wiz.
+        "//foo:bar+wiz"  # OK.
+        "//foo:bar=wiz"  # OK.
+      </pre>
+      <p>
+        Note that this quoting is in addition to any quoting that may
+        be required by your shell. e.g.
+      </p>
+      <pre>bazel query ' "//foo:bar=wiz" '     # single-quotes for shell, double-quotes for Bazel.</pre>
+
+      <p>
+        Keywords, when quoted, are treated as ordinary words, thus
+        <code>some</code> is a keyword but <code>"some"</code> is a word.
+        Both <code>foo</code> and <code>"foo"</code> are words.
       </p>
 
-    <p>We chose this syntax so that quote marks aren't needed in most cases.
-      The (unusual) <code>".*test rule"</code> example needs quotes: it
-      starts with a period and contains a space.
-      Quoting <code>"cc_library"</code> is unnecessary but harmless.
-    </p>
+      <p>
+        However, be careful when using single or double quotes in target names. When quoting one or
+        more target names, use only one type of quotes (either all single or all double quotes).
 
-    <p>
-      Quoting <em>is</em> necessary when writing scripts that
-      construct Bazel query expressions from user-supplied values.
+      </p>
+      <pre>
+        The following are examples of what the Java query string will be:
 
-    </p>
-    <pre>
-      //foo:bar+wiz    # WRONG: scanned as //foo:bar + wiz.
-      //foo:bar=wiz    # WRONG: scanned as //foo:bar = wiz.
-      "//foo:bar+wiz"  # ok.
-      "//foo:bar=wiz"  # ok.
-    </pre>
-    <p>
-      Note that this quoting is in addition to any quoting that may
-      be required by your shell. e.g.
-    </p>
-    <pre>bazel query ' "//foo:bar=wiz" '     # single-quotes for shell, double-quotes for Bazel.</pre>
+        'a"'a'         # WRONG: Error message: unclosed quotation.
+        "a'"a"         # WRONG: Error message: unclosed quotation.
+        '"a" + 'a''    # WRONG: Error message: unexpected token 'a' after query expression '"a" + '
+        "'a' + "a""    # WRONG: Error message: unexpected token 'a' after query expression ''a' + '
+        "a'a"          # OK.
+        'a"a'          # OK.
+        '"a" + "a"'    # OK
+        "'a' + 'a'"    # OK
+      </pre>
 
-    <p>
-      Keywords, when quoted, are treated as ordinary words, thus
-      <code>some</code> is a keyword but <code>"some"</code> is a word.
-      Both <code>foo</code> and <code>"foo"</code> are words.
-    </p>
+      <p>We chose this syntax so that quote marks aren't needed in most cases.
+        The (unusual) <code>".*test rule"</code> example needs quotes: it
+        starts with a period and contains a space.
+        Quoting <code>"cc_library"</code> is unnecessary but harmless.
+      </p>
 
     <li><b>Punctuation</b>, such as parens <code>()</code>, period
     <code>.</code> and comma <code>,</code>, etc.  Words containing
@@ -107,7 +140,7 @@ title: Query Language
   Whitespace characters outside of a quoted word are ignored.
 </p>
 
-<h2 id='concepts'>Bazel Query Language Concepts</h2>
+<h2 id='concepts'>Bazel query language concepts</h2>
 <p>
   The Bazel query language is a language of expressions.  Every
   expression evaluates to a <b>partially-ordered set</b> of targets,
@@ -220,7 +253,32 @@ title: Query Language
   <code>dir/...</code>, etc.
 </p>
 
-<h2>Expressions: syntax and semantics of the grammar</h2>
+<h3 id='sky-query'>Sky query</h3>
+
+<p>
+  Query has two different implementations, with slightly different features. The alternative one is
+  called "Sky Query", and is activated by passing the following two flags:
+  <code>--universe_scope</code> and <code>--order_output=no</code>.
+  <code>--universe_scope=&lt;target_pattern1&gt;,...,&lt;target_patternN&gt;</code> tells query to
+  preload the transitive closure of the target pattern specified by the target patterns, which can
+  be both additive and subtractive. All queries are then evaluated in this "scope". In particular,
+  the <a href='#allrdeps'><code>allrdeps</code></a> and
+  <a href='#rbuildfiles'><code>rbuildfiles</code></a> operators only return results from this scope.
+</p>
+
+<p>
+  Sky Query has some advantages and disadvantages compared to the default query. The main
+  disadvantage is that it cannot order its output according to graph order, and thus certain
+  <a href='#output-formats'>output formats</a> are forbidden. Its advantages are that it provides
+  two operators (<a href='#allrdeps'><code>allrdeps</code></a> and
+  <a href='#rbuildfiles'><code>rbuildfiles</code></a>) that are not available in the default query.
+  As well, Sky Query does its work by introspecting the
+  <a href='https://bazel.build/designs/skyframe.html'>Skyframe</a> graph, rather than creating a new
+  graph, which is what the default implementation does. Thus, there are some circumstances in which
+  it is faster and uses less memory.
+</p>
+
+<h2 id='expressions'>Expressions: Syntax and semantics of the grammar</h2>
 
 <p>
   This is the grammar of the Bazel query language, expressed in EBNF
@@ -288,7 +346,7 @@ title: Query Language
 <p>
   <code>bazel query</code> target patterns work the same as
   <code>bazel build</code> build targets do;
-  refer to <a href='bazel-user-manual.html#target-patterns'>Target Patterns</a>
+  refer to <a href='user-manual.html#target-patterns'>Target Patterns</a>
   in the Bazel User Manual for further details, or type <code>bazel
   help target-syntax</code>.
 
@@ -466,7 +524,7 @@ x intersect (y union z)</pre>
   section below for more detail.
 </p>
 
-<h3 id="functions">Functions</h3>
+<h2 id="functions">Functions</h2>
 <pre>expr ::= <var>word</var> '(' <var>int</var> | <var>word</var> | <var>expr</var> ... ')'</pre>
 <p>
   The query language defines several functions. The name of the function
@@ -479,6 +537,7 @@ x intersect (y union z)</pre>
 <a href="#attr">attr</a><br/>
 
 <a href="#buildfiles">buildfiles</a><br/>
+<a href="#rbuildfiles">rbuildfiles</a><br/>
 
 <a href="#deps">deps</a><br/>
 <a href="#filter">filter</a><br/>
@@ -486,6 +545,8 @@ x intersect (y union z)</pre>
 <a href="#labels">labels</a><br/>
 <a href="#loadfiles">loadfiles</a><br/>
 <a href="#rdeps">rdeps</a><br/>
+<a href="#allrdeps">allrdeps</a><br/>
+<a href="#same_pkg_direct_rdeps">same_pkg_direct_rdeps</a><br/>
 <a href="#siblings">siblings</a><br/>
 <a href="#some">some</a><br/>
 <a href="#path-operators">somepath</a><br/>
@@ -505,9 +566,7 @@ x intersect (y union z)</pre>
   <code>deps(foo/...)</code> is the dependency graphs whose roots are
   all rules in every package beneath the <code>foo</code> directory.
   Please note that 'dependencies' means only rule and file targets
-  in this context, therefore the BUILD,
-
-  and Skylark files needed to
+  in this context, therefore the BUILD and Starlark files needed to
   create these targets are not included here. For that you should use the
   <a href="#buildfiles"><code>buildfiles</code></a> operator.
 </p>
@@ -521,10 +580,12 @@ x intersect (y union z)</pre>
 <p>
   The <code>deps</code> operator accepts an optional second argument,
   which is an integer literal specifying an upper bound on the depth
-  of the search.  So <code>deps(foo:*, 1)</code> evaluates to all the
-  direct prerequisites of any target in the <code>foo</code> package,
-  and <code>deps(foo:*, 2)</code> further includes the nodes directly
-  reachable from the nodes in <code>deps(foo:*, 1)</code>, and so on.
+  of the search. So <code>deps(foo:*, 0)</code> returns all targets
+  in the <code>foo</code> package, while <code>deps(foo:*, 1)</code>
+  further includes the direct prerequisites of any target in the
+  <code>foo</code> package, and <code>deps(foo:*, 2)</code> further
+  includes the nodes directly reachable from the nodes in
+  <code>deps(foo:*, 1)</code>, and so on.
   (These numbers correspond to the ranks shown in
   the <a href='#output-ranked'><code>minrank</code></a> output
   format.)  If the <var>depth</var> parameter is omitted, the search
@@ -556,6 +617,25 @@ x intersect (y union z)</pre>
   <code>//common</code>.  (These numbers correspond to the ranks shown in the
   <a href='#output-ranked'><code>minrank</code></a> output format.)  If the
   <var>depth</var> parameter is omitted, the search is unbounded.
+</p>
+
+<h3 id="allrdeps">Transitive closure of all reverse dependencies: allrdeps</h3>
+<pre>expr ::= allrdeps(<var>expr</var>)
+       | allrdeps(<var>expr</var>, <var>depth</var>)</pre>
+<b>Only available with <a href='#sky-query'>Sky Query</a></b><br/>
+<p>
+  The <code>allrdeps</code> operator behaves just like the <a href='#rdeps'><code>rdeps</code></a>
+  operator, except that the "universe set" is whatever the <code>--universe_scope</code> flag
+  evaluated to, instead of being separately specified. Thus, if
+  <code>--universe_scope=//foo/...</code> was passed, then <code>allrdeps(//bar)</code> is
+  equivalent to <code>rdeps(//foo/..., //bar)</code>.
+</p>
+
+<h3 id="same_pkg_direct_rdeps">Direct reverse dependencies in the same package: same_pkg_direct_rdeps</h3>
+<pre>expr ::= same_pkg_direct_rdeps(<var>expr</var>)</pre>
+<p>
+  The <code>same_pkg_direct_rdeps(<var>x</var>)</code> operator evalutes to the full set of targets
+  that are in the same package as a target in the argument set, and which directly depend on it.
 </p>
 
 <h3 id="siblings">Dealing with a target's package: siblings</h3>
@@ -608,8 +688,7 @@ x intersect (y union z)</pre>
 
 <table style='margin: auto'><tr>
 <td style='text-align: center'>
-<div class='graphviz dot'><!--
-digraph somepath1 {
+<!-- digraph somepath1 {
   graph [size="4,4"]
   node [label="",shape=circle];
   n1;
@@ -634,13 +713,12 @@ digraph somepath1 {
   n3 -> n10;
   n10 -> n4;
   n10 -> n11;
-}
---></div>
+} -->
+<img src="images/somepath1.svg" alt="somepath1.svg" style="margin-left=10;" />
 <p><code>somepath(S1 + S2, E)</code>,<br/>one possible result.</p>
 </td>
 <td style='padding: 40px; text-align: center'>
-<div class='graphviz dot'><!--
-digraph somepath2 {
+<!-- digraph somepath2 {
   graph [size="4,4"]
   node [label="",shape=circle];
 
@@ -664,13 +742,12 @@ digraph somepath2 {
   n3 -> n10;
   n10 -> n4;
   n10 -> n11;
-}
---></div>
+} -->
+<img src="images/somepath2.svg" alt="somepath2.svg" style="margin-left=10;" />
 <p><code>somepath(S1 + S2, E)</code>,<br/>another possible result.</p>
 </td>
 <td style='text-align: center'>
-<div class='graphviz dot'><!--
-digraph allpaths {
+<!-- digraph allpaths {
   graph [size="4,4"]
   node [label="",shape=circle];
   n1;
@@ -696,8 +773,8 @@ digraph allpaths {
   n3 -> n10;
   n10 -> n4;
   n10 -> n11;
-}
---></div>
+} -->
+<img src="images/allpaths.svg" alt="allpaths.svg" style="margin-left=10;" />
 <p><code>allpaths(S1 + S2, E)</code>.</p>
 </td>
 </tr></table>
@@ -721,7 +798,7 @@ digraph allpaths {
     <li><code><var>ruletype</var> rule</code>
     <li><code><var>ruletype</var></code><br>
     Where <var>ruletype</var> is a build rule.  The difference between these
-    forms is that including "rule" causes the regular expression match for
+    forms is that including "rule" causes the <a href="#regex">regular expression</a> match for
     <var>ruletype</var> to be anchored.
   </ul>
 <li><b>package group</b> patterns should simply be:
@@ -765,7 +842,7 @@ genrule(
 
 <p>
   Quotation of the <var>pattern</var> argument is often required
-  because without it, many regular expressions, such as <code>source
+  because without it, many <a href="#regex">regular expressions</a>, such as <code>source
   file</code> and <code>.*_test</code>, are not considered words by
   the parser.
 </p>
@@ -787,7 +864,7 @@ genrule(
 
 <p>
   The first argument, <var>pattern</var> is a word containing a
-  regular expression over target names.  A <code>filter</code> expression
+  <a href="#regex">regular expression</a> over target names.  A <code>filter</code> expression
   evaluates to the set containing all targets <var>x</var> such that
   <var>x</var> is a member of the set <var>input</var> and the
   label (in absolute form, e.g. <code>//foo:bar</code>)
@@ -835,12 +912,12 @@ genrule(
   operator applies a filter to a set of targets, and discards targets that
   are not rules, rule targets that do not have attribute <var>name</var>
   defined or rule targets where the attribute value does not match the provided
-  regular expression <var>pattern</var>; it evaluates to a subset of its input.
+  <a href="#regex">regular expression</a> <var>pattern</var>; it evaluates to a subset of its input.
 </p>
 
 <p>
   The first argument, <var>name</var> is the name of the rule attribute that
-  should be matched against the provided regular expression pattern. The second
+  should be matched against the provided <a href="#regex">regular expression</a> pattern. The second
   argument, <var>pattern</var> is a regular expression over the attribute
   values. An <code>attr</code> expression evaluates to the set containing all
   targets <var>x</var> such that  <var>x</var> is a member of the set
@@ -953,10 +1030,8 @@ genrule(
   The <code>buildfiles(<var>x</var>)</code> operator returns the set
   of files that define the packages of each target in
   set <var>x</var>; in other words, for each package, its BUILD file,
-  plus any files it references
-
-  via <code>load</code>.  Note that this also returns the BUILD files of the
-  packages containing these <code>load</code>ed files.
+  plus any files it references via <code>load</code>.  Note that this also returns the BUILD files
+  of the packages containing these <code>load</code>ed files.
 </p>
 
 <p>
@@ -976,21 +1051,52 @@ genrule(
   the <code>buildfiles</code> operator and use only <code>deps</code>,
   but this yields an incorrect result: while the result contains the
   majority of needed packages, those packages that contain only files
-  that are <code>load()</code>'ed
+  that are <code>load()</code>'ed will be missing.
+</p>
 
-  will be missing.
+<h3 id="rbuildfiles">Package definition files: rbuildfiles</h3>
+<pre>expr ::= rbuildfiles(<var>word</var>, ...)</pre>
+<b>Only available with <a href='#sky-query'>Sky Query</a></b><br/>
+<p>
+  The <code>rbuildfiles</code> operator takes a comma-separated list of path fragments and returns
+  the set of BUILD files that transitively depend on these path fragments. For instance, if
+  <code>//foo</code> is a package, then <code>rbuildfiles(foo/BUILD)</code> will return the
+  <code>//foo:BUILD</code> target. If the <code>foo/BUILD</code> file has
+  <code>load('//bar:file.bzl'...</code> in it, then <code>rbuildfiles(bar/file.bzl)</code> will
+  return the <code>//foo:BUILD</code> target, as well as the targets for any other BUILD files that
+  load <code>//bar:file.bzl</code>
+</p>
+
+<p>
+  The scope of the <scope>rbuildfiles</scope> operator is the universe specified by the
+  <code>--universe_scope</code> flag. Files that do not correspond directly to BUILD files and .bzl
+  files do not affect the results. For instance, source files (like <code>foo.cc</code>) are ignored,
+  even if they are explicitly mentioned in the BUILD file. Symlinks, however, are respected, so that
+  if <code>foo/BUILD</code> is a symlink to <code>bar/BUILD</code>, then
+  <code>rbuildfiles(bar/BUILD)</code> will include <code>//foo:BUILD</code> in its results.
+</p>
+
+<p>
+  The <code>rbuildfiles</code> operator is almost morally the inverse of the
+  <a href='#buildfiles'><code>buildfiles</code></a> operator. However, this moral inversion
+  holds more strongly in one direction: the outputs of <code>rbuildfiles</code> are just like the
+  inputs of <code>buildfiles</code>; the former will only contain BUILD file targets in packages,
+  and the latter may contain such targets. In the other direction, the correspondence is weaker. The
+  outputs of the <code>buildfiles</code> operator are targets corresponding to all packages and .bzl
+  files needed by a given input. However, the inputs of the <code>rbuildfiles</code> operator are
+  not those targets, but rather the path fragments that correspond to those targets.
 </p>
 
 <h3 id="loadfiles">Package definition files: loadfiles</h3>
 <pre>expr ::= loadfiles(<var>expr</var>)</pre>
 <p>
   The <code>loadfiles(<var>x</var>)</code> operator returns the set of
-  Skylark files that are needed to load the packages of each target in
+  Starlark files that are needed to load the packages of each target in
   set <var>x</var>. In other words, for each package, it returns the
   .bzl files that are referenced from its BUILD files.
 </p>
 
-<h2>Output formats</h2>
+<h2 id='output-formats'>Output formats</h2>
 
 <p>
   <code>bazel query</code> generates a graph.
@@ -999,6 +1105,12 @@ genrule(
   by means of the <code>--output</code>
   command-line option.
  </p>
+
+<p>
+  When running with <a href='#sky-query'>Sky Query</a>, only output formats that are compatible with
+  unordered output are allowed. Specifically, <code>graph</code>, <code>minrank</code>, and
+  <code>maxrank</code> output formats are forbidden.
+</p>
 
 <p>
   Some of the output formats accept additional options.  The name of
@@ -1032,12 +1144,12 @@ genrule(
 <p>
   When this flag is <code>no</code> and <code>--output</code> is one of
   <code>build</code>, <code>label</code>, <code>label_kind</code>,
-  <code>location</code>, <code>package</code>, <code>proto</code>,
-  <code>record</code> or <code>xml</code>, the outputs will be printed in
-  arbitrary order. <b>This is generally the fastest option</b>. It is not
-  supported though when <code>--output</code> is one of <code>graph</code>,
-  <code>min_rank</code> or <code>max_rank</code>: with these formats, bazel will
-  always print results ordered by the dependency order or rank.
+  <code>location</code>, <code>package</code>, <code>proto</code>, or
+  <code>xml</code>, the outputs will be printed in arbitrary order. <b>This is
+  generally the fastest option</b>. It is not supported though when
+  <code>--output</code> is one of <code>graph</code>, <code>minrank</code> or
+  <code>maxrank</code>: with these formats, bazel will always print results
+  ordered by the dependency order or rank.
 </p>
 <p>
   When this flag is <code>deps</code>, bazel will print results ordered by the
@@ -1060,7 +1172,7 @@ genrule(
   With this option, the representation of each target is as if it were
   hand-written in the BUILD language. All variables and function calls
   (e.g. glob, macros) are expanded, which is useful for seeing the effect
-  of Skylark macros. Additionally, each effective rule is annotated with
+  of Starlark macros. Additionally, each effective rule is annotated with
   the name of the macro (if any, see <code>generator_name</code> and
   <code>generator_function</code>) that produced it.
 </p>
@@ -1165,16 +1277,15 @@ genrule(
 </p>
 
 <table style='margin: auto'><tr><td>
-<div class='graphviz dot'><!--
-digraph mygraph {
+<!-- digraph mygraph {
   node [shape=box];
 "//a:a" -> "//a:a.cc"
 "//b:b" -> "//a:a"
 "//b:b" -> "//b:b.cc"
 "//c:c" -> "//b:b"
 "//c:c" -> "//a:a"
-}
---></div>
+} -->
+<img src="images/out-ranked.svg" alt="out-ranked.svg" style="margin-left=10;" />
 </td><td>
 <pre>
 minrank
@@ -1255,7 +1366,7 @@ maxrank
 </p>
 
 <p>
-  This output format is particularly useful for <code>allpath</code>,
+  This output format is particularly useful for <code>allpaths</code>,
   <code>deps</code>, or <code>rdeps</code> queries, where the result
   includes a <em>set of paths</em> that cannot be easily visualized when
   rendered in a linear form, such as with <code>--output label</code>.
@@ -1394,6 +1505,12 @@ maxrank
   be included in the XML output.
 </p>
 
+
+<h3 id="regex">Regular expressions</h3>
+
+Regular expressions in the query language are implemented using the Java
+regex library, so they support the full syntax documented
+for <a href="https://docs.oracle.com/javase/8/docs/api/java/util/regex/Pattern.html"><code>java.util.regex.Pattern</code></a>.
 
 <h3 id="external-repos">Querying with external repositories</h3>
 

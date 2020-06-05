@@ -20,7 +20,6 @@ import com.google.common.collect.ImmutableRangeMap;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Range;
 import com.google.common.collect.RangeMap;
-import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.OptionsParsingException;
 import java.time.Duration;
@@ -29,6 +28,7 @@ import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -123,7 +123,7 @@ public enum TestTimeout {
       return null;
     }
     try {
-      return TestTimeout.valueOf(attr.toUpperCase());
+      return TestTimeout.valueOf(attr.toUpperCase(Locale.ENGLISH));
     } catch (IllegalArgumentException e) {
       return null;
     }
@@ -181,7 +181,7 @@ public enum TestTimeout {
       return null;  // attribute values must be lowercase
     }
     try {
-      return TestTimeout.valueOf(attr.toUpperCase());
+      return TestTimeout.valueOf(attr.toUpperCase(Locale.ENGLISH));
     } catch (IllegalArgumentException e) {
       return null;
     }

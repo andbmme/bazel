@@ -13,8 +13,11 @@
 // limitations under the License.
 package com.google.devtools.build.android.desugar;
 
+import static com.google.common.truth.Truth.assertThat;
+
+import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Files;
-import com.google.common.truth.Truth;
+import com.google.devtools.build.android.desugar.BytecodeTypeInference.InferredType;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -33,7 +36,7 @@ public class BytecodeTypeInferenceTest {
   private static final Path GOLDEN_PATH = Paths.get(System.getProperty("golden_file"));
 
   @Test
-  public void test() throws IOException {
+  public void testTypeInference() throws IOException {
     StringWriter stringWriter = new StringWriter();
     try (PrintWriter printWriter = new PrintWriter(stringWriter)) {
       ByteCodeTypePrinter.printClassesWithTypes(JAR_PATH, printWriter);
@@ -41,6 +44,28 @@ public class BytecodeTypeInferenceTest {
     }
     String inferenceResult = stringWriter.toString().trim();
     String golden = Files.asCharSource(GOLDEN_PATH.toFile(), StandardCharsets.UTF_8).read().trim();
-    Truth.assertThat(inferenceResult).isEqualTo(golden);
+    assertThat(inferenceResult).isEqualTo(golden);
+  }
+
+  @Test
+  public void testInferType() {
+    ImmutableMap<String, InferredType> map =
+        ImmutableMap.<String, InferredType>builder()
+            .put("Z", InferredType.BOOLEAN)
+            .put("B", InferredType.BYTE)
+            .put("I", InferredType.INT)
+            .put("F", InferredType.FLOAT)
+            .put("D", InferredType.DOUBLE)
+            .put("J", InferredType.LONG)
+            .put("TOP", InferredType.TOP)
+            .put("NULL", InferredType.NULL)
+            .put("UNINITIALIZED_THIS", InferredType.UNINITIALIZED_THIS)
+            .build();
+    map.forEach(
+        (descriptor, expected) -> {
+          InferredType type = InferredType.create(descriptor);
+          assertThat(type.descriptor()).isEqualTo(descriptor);
+          assertThat(type).isSameInstanceAs(expected);
+        });
   }
 }

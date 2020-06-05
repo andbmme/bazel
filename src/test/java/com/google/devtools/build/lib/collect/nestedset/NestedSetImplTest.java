@@ -14,10 +14,18 @@
 package com.google.devtools.build.lib.collect.nestedset;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.testing.EqualsTester;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
+import java.time.Duration;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeoutException;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -44,9 +52,9 @@ public class NestedSetImplTest {
 
   @Test
   public void flatToString() {
-    assertThat(nestedSetBuilder().build().toString()).isEqualTo("{}");
-    assertThat(nestedSetBuilder("a").build().toString()).isEqualTo("{a}");
-    assertThat(nestedSetBuilder("a", "b").build().toString()).isEqualTo("{a, b}");
+    assertThat(nestedSetBuilder().build().toString()).isEqualTo("[]");
+    assertThat(nestedSetBuilder("a").build().toString()).isEqualTo("[a]");
+    assertThat(nestedSetBuilder("a", "b").build().toString()).isEqualTo("[a, b]");
   }
 
   @Test
@@ -54,12 +62,36 @@ public class NestedSetImplTest {
     NestedSet<String> b = nestedSetBuilder("b1", "b2").build();
     NestedSet<String> c = nestedSetBuilder("c1", "c2").build();
 
-    assertThat(nestedSetBuilder("a").addTransitive(b).build().toString())
-        .isEqualTo("{{b1, b2}, a}");
+    assertThat(nestedSetBuilder("a").addTransitive(b).build().toString()).isEqualTo("[b1, b2, a]");
     assertThat(nestedSetBuilder("a").addTransitive(b).addTransitive(c).build().toString())
-        .isEqualTo("{{b1, b2}, {c1, c2}, a}");
+        .isEqualTo("[b1, b2, c1, c2, a]");
+    NestedSet<String> linkOrderSet =
+        NestedSetBuilder.<String>linkOrder().add("a").addTransitive(b).addTransitive(c).build();
+    assertThat(linkOrderSet.toString()).isEqualTo("[a, b2, b1, c2, c1]");
+    // Stable order when printing children directly.
+    assertThat(NestedSet.childrenToString(linkOrderSet.getChildren()))
+        .isEqualTo("[c1, c2, b1, b2, a]");
 
-    assertThat(nestedSetBuilder().addTransitive(b).build().toString()).isEqualTo("{b1, b2}");
+    assertThat(nestedSetBuilder().addTransitive(b).build().toString()).isEqualTo("[b1, b2]");
+  }
+
+  @Test
+  public void tooLongToString() {
+    NestedSetBuilder<Integer> builder = NestedSetBuilder.stableOrder();
+    for (int i = 0; i < NestedSet.MAX_ELEMENTS_TO_STRING + 3; i++) {
+      builder.add(i);
+    }
+    String stringRep = builder.build().toString();
+    assertThat(stringRep).contains("[0, 1, 2, 3");
+    assertThat(stringRep)
+        .containsMatch(
+            "\\[0, 1, 2, 3, .*"
+                + (NestedSet.MAX_ELEMENTS_TO_STRING - 2)
+                + ", "
+                + (NestedSet.MAX_ELEMENTS_TO_STRING - 1)
+                + "] \\(truncated, full size "
+                + (NestedSet.MAX_ELEMENTS_TO_STRING + 3)
+                + "\\)");
   }
 
   @Test
@@ -92,12 +124,13 @@ public class NestedSetImplTest {
             .addTransitive(NestedSetBuilder.stableOrder().build()).build())
         .addTransitive(NestedSetBuilder.naiveLinkOrder()
             .addTransitive(NestedSetBuilder.stableOrder().build()).build()).build();
-    try {
-      NestedSetBuilder.compileOrder().addTransitive(NestedSetBuilder.linkOrder().build()).build();
-      fail("Shouldn't be able to include a non-stable order inside a different non-stable order!");
-    } catch (IllegalArgumentException e) {
-      // Expected.
-    }
+    assertThrows(
+        "Shouldn't be able to include a non-stable order inside a different non-stable order!",
+        IllegalArgumentException.class,
+        () ->
+            NestedSetBuilder.compileOrder()
+                .addTransitive(NestedSetBuilder.linkOrder().build())
+                .build());
   }
 
   /**
@@ -164,38 +197,53 @@ public class NestedSetImplTest {
   public void shallowEquality() {
     // Used below to check that inner nested sets can be compared by reference equality.
     SetWrapper<Integer> myRef = nest(nest(flat(7, 8)), flat(9));
+    // Used to check equality for deserializing nested sets
+    ListenableFuture<Object[]> contents = Futures.immediateFuture(new Object[] {"a", "b"});
+    NestedSet<String> referenceNestedSet = NestedSet.withFuture(Order.STABLE_ORDER, contents);
+    NestedSet<String> otherReferenceNestedSet = NestedSet.withFuture(Order.STABLE_ORDER, contents);
 
     // Each "equality group" contains elements that are equal to one another
     // (according to equals() and hashCode()), yet distinct from all elements
     // of all other equality groups.
     new EqualsTester()
-      .addEqualityGroup(flat(),
-                        flat(),
-                        nest(flat()))  // Empty set elision.
-      .addEqualityGroup(NestedSetBuilder.<Integer>linkOrder().build())
-      .addEqualityGroup(flat(3),
-                        flat(3),
-                        flat(3, 3))  // Element de-duplication.
-      .addEqualityGroup(flat(4),
-                        nest(flat(4))) // Automatic elision of one-element nested sets.
-      .addEqualityGroup(NestedSetBuilder.<Integer>linkOrder().add(4).build())
-      .addEqualityGroup(nestedSetBuilder("4").build())  // Like flat("4").
-      .addEqualityGroup(flat(3, 4),
-                        flat(3, 4))
-      // Make a couple sets deep enough that shallowEquals() fails.
-      // If this test case fails because you improve the representation, just delete it.
-      .addEqualityGroup(nest(nest(flat(3, 4), flat(5)), nest(flat(6, 7), flat(8))))
-      .addEqualityGroup(nest(nest(flat(3, 4), flat(5)), nest(flat(6, 7), flat(8))))
-      .addEqualityGroup(nest(myRef),
-                        nest(myRef),
-                        nest(myRef, myRef))  // Set de-duplication.
-      .addEqualityGroup(nest(3, myRef))
-      .addEqualityGroup(nest(4, myRef))
-      .testEquals();
+        .addEqualityGroup(flat(), flat(), nest(flat())) // Empty set elision.
+        .addEqualityGroup(NestedSetBuilder.<Integer>linkOrder().build())
+        .addEqualityGroup(flat(3), flat(3), flat(3, 3)) // Element de-duplication.
+        .addEqualityGroup(flat(4), nest(flat(4))) // Automatic elision of one-element nested sets.
+        .addEqualityGroup(NestedSetBuilder.<Integer>linkOrder().add(4).build())
+        .addEqualityGroup(nestedSetBuilder("4").build()) // Like flat("4").
+        .addEqualityGroup(flat(3, 4), flat(3, 4))
+        // Make a couple sets deep enough that shallowEquals() fails.
+        // If this test case fails because you improve the representation, just delete it.
+        .addEqualityGroup(nest(nest(flat(3, 4), flat(5)), nest(flat(6, 7), flat(8))))
+        .addEqualityGroup(nest(nest(flat(3, 4), flat(5)), nest(flat(6, 7), flat(8))))
+        .addEqualityGroup(nest(myRef), nest(myRef), nest(myRef, myRef)) // Set de-duplication.
+        .addEqualityGroup(nest(3, myRef))
+        .addEqualityGroup(nest(4, myRef))
+        .addEqualityGroup(
+            new SetWrapper<>(referenceNestedSet), new SetWrapper<>(otherReferenceNestedSet))
+        .testEquals();
 
     // Some things that are not tested by the above:
     //  - ordering among direct members
     //  - ordering among transitive sets
+  }
+
+  @Test
+  public void shallowInequality() {
+    assertThat(nestedSetBuilder("a").build().shallowEquals(null)).isFalse();
+    Object[] contents = {"a", "b"};
+    assertThat(
+            NestedSet.withFuture(Order.STABLE_ORDER, Futures.immediateFuture(contents))
+                .shallowEquals(null))
+        .isFalse();
+
+    // shallowEquals() should require reference equality for underlying futures
+    assertThat(
+            NestedSet.withFuture(Order.STABLE_ORDER, Futures.immediateFuture(contents))
+                .shallowEquals(
+                    NestedSet.withFuture(Order.STABLE_ORDER, Futures.immediateFuture(contents))))
+        .isFalse();
   }
 
   /** Checks that the builder always return a nested set with the correct order. */
@@ -227,5 +275,92 @@ public class NestedSetImplTest {
       builder.addTransitive(new NestedSetBuilder<Integer>(transitiveOrder).add(transitive).build());
     }
     return builder.build();
+  }
+
+  @Test
+  public void hoistingKeepsSetSmall() {
+    NestedSet<String> first = NestedSetBuilder.<String>stableOrder().add("a").build();
+    NestedSet<String> second = NestedSetBuilder.<String>stableOrder().add("a").build();
+    NestedSet<String> singleton =
+        NestedSetBuilder.<String>stableOrder().addTransitive(first).addTransitive(second).build();
+    assertThat(singleton.toList()).containsExactly("a");
+    assertThat(singleton.isSingleton()).isTrue();
+  }
+
+  @Test
+  public void buildInterruptibly_propagatesInterrupt() {
+    NestedSet<String> deserialzingNestedSet =
+        NestedSet.withFuture(Order.STABLE_ORDER, SettableFuture.create());
+    NestedSetBuilder<String> builder =
+        NestedSetBuilder.<String>stableOrder().addTransitive(deserialzingNestedSet).add("a");
+    Thread.currentThread().interrupt();
+    assertThrows(InterruptedException.class, builder::buildInterruptibly);
+  }
+
+  @Test
+  public void getChildrenInterruptibly_propagatesInterrupt() {
+    NestedSet<String> deserialzingNestedSet =
+        NestedSet.withFuture(Order.STABLE_ORDER, SettableFuture.create());
+    Thread.currentThread().interrupt();
+    assertThrows(InterruptedException.class, deserialzingNestedSet::getChildrenInterruptibly);
+  }
+
+  @Test
+  public void toListWithTimeout_propagatesInterrupt() {
+    NestedSet<String> deserialzingNestedSet =
+        NestedSet.withFuture(Order.STABLE_ORDER, SettableFuture.create());
+    Thread.currentThread().interrupt();
+    assertThrows(
+        InterruptedException.class,
+        () -> deserialzingNestedSet.toListWithTimeout(Duration.ofDays(1)));
+  }
+
+  @Test
+  public void toListWithTimeout_timesOut() {
+    NestedSet<String> deserialzingNestedSet =
+        NestedSet.withFuture(Order.STABLE_ORDER, SettableFuture.create());
+    assertThrows(
+        TimeoutException.class, () -> deserialzingNestedSet.toListWithTimeout(Duration.ofNanos(1)));
+  }
+
+  @Test
+  public void toListWithTimeout_waits() throws Exception {
+    SettableFuture<Object[]> future = SettableFuture.create();
+    NestedSet<String> deserialzingNestedSet = NestedSet.withFuture(Order.STABLE_ORDER, future);
+    Future<ImmutableList<String>> result =
+        Executors.newSingleThreadExecutor()
+            .submit(() -> deserialzingNestedSet.toListWithTimeout(Duration.ofMinutes(1)));
+    Thread.sleep(100);
+    assertThat(result.isDone()).isFalse();
+    future.set(new Object[] {"a", "b"});
+    assertThat(result.get()).containsExactly("a", "b");
+  }
+
+  @Test
+  public void isFromStorage_true() {
+    NestedSet<?> deserializingNestedSet =
+        NestedSet.withFuture(Order.STABLE_ORDER, SettableFuture.create());
+    assertThat(deserializingNestedSet.isFromStorage()).isTrue();
+  }
+
+  @Test
+  public void isFromStorage_false() {
+    NestedSet<?> inMemoryNestedSet = NestedSetBuilder.create(Order.STABLE_ORDER, "a", "b");
+    assertThat(inMemoryNestedSet.isFromStorage()).isFalse();
+  }
+
+  @Test
+  public void isReady_inMemory() {
+    NestedSet<?> inMemoryNestedSet = NestedSetBuilder.create(Order.STABLE_ORDER, "a", "b");
+    assertThat(inMemoryNestedSet.isReady()).isTrue();
+  }
+
+  @Test
+  public void isReady_fromStorage() {
+    SettableFuture<Object[]> future = SettableFuture.create();
+    NestedSet<?> deserializingNestedSet = NestedSet.withFuture(Order.STABLE_ORDER, future);
+    assertThat(deserializingNestedSet.isReady()).isFalse();
+    future.set(new Object[] {"a", "b"});
+    assertThat(deserializingNestedSet.isReady()).isTrue();
   }
 }

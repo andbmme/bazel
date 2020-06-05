@@ -14,38 +14,39 @@
 package com.google.devtools.build.lib.actions;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
+import com.google.devtools.build.lib.util.Fingerprint;
 
 /**
- * An action that depends on a set of inputs and creates a single output file whenever it
- * runs. This is useful for bundling up a bunch of dependencies that are shared
- * between individual targets in the action graph; for example generated header files.
+ * An action that depends on a set of inputs and creates a single output file whenever it runs. This
+ * is useful for bundling up a bunch of dependencies that are shared between individual targets in
+ * the action graph; for example generated header files.
  */
 @Immutable
+@AutoCodec
 public final class MiddlemanAction extends AbstractAction {
-
   public static final String MIDDLEMAN_MNEMONIC = "Middleman";
   private final String description;
   private final MiddlemanType middlemanType;
 
-  /**
-   * Constructs a new {@link MiddlemanAction}.
-   *
-   * @param owner the owner of the action, usually a {@code ConfiguredTarget}
-   * @param inputs inputs of the middleman, i.e. the files it acts as a placeholder for
-   * @param stampFile the output of the middleman expansion; must be a middleman artifact (see
-   *        {@link Artifact#isMiddlemanArtifact()})
-   * @param description a short description for the action, for progress messages
-   * @param middlemanType the type of the middleman
-   * @throws IllegalArgumentException if {@code stampFile} is not a middleman artifact
-   */
-  public MiddlemanAction(ActionOwner owner, Iterable<Artifact> inputs, Artifact stampFile,
-      String description, MiddlemanType middlemanType) {
-    super(owner, inputs, ImmutableList.of(stampFile));
+  @VisibleForSerialization
+  @AutoCodec.Instantiator
+  MiddlemanAction(
+      ActionOwner owner,
+      NestedSet<Artifact> inputs,
+      ImmutableSet<Artifact> outputs,
+      String description,
+      MiddlemanType middlemanType) {
+    super(owner, inputs, outputs);
     Preconditions.checkNotNull(middlemanType);
-    Preconditions.checkArgument(stampFile.isMiddlemanArtifact(), stampFile);
+    Preconditions.checkArgument(Iterables.getOnlyElement(outputs).isMiddlemanArtifact(), outputs);
+    Preconditions.checkNotNull(description);
     this.description = description;
     this.middlemanType = middlemanType;
   }
@@ -56,11 +57,10 @@ public final class MiddlemanAction extends AbstractAction {
   }
 
   @Override
-  protected String computeKey(ActionKeyContext actionKeyContext) {
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
     // TODO(bazel-team): Need to take middlemanType into account here.
     // Only the set of inputs matters, and the dependency checker is
     // responsible for considering those.
-    return "";
   }
 
   /**
@@ -69,13 +69,6 @@ public final class MiddlemanAction extends AbstractAction {
   @Override
   public MiddlemanType getActionType() {
     return middlemanType;
-  }
-
-  @Override
-  public boolean canRemoveAfterExecution() {
-    // Aggregating middleman actions' inputs are needed by their output artifacts, and the type of
-    // the middleman isn't known without having the action, so we just make sure it stays.
-    return false;
   }
 
   @Override
@@ -93,12 +86,21 @@ public final class MiddlemanAction extends AbstractAction {
     return MIDDLEMAN_MNEMONIC;
   }
 
-  /**
-   * Creates a new middleman action.
-   */
-  public static Action create(ActionRegistry env, ActionOwner owner,
-      Iterable<Artifact> inputs, Artifact stampFile, String purpose, MiddlemanType middlemanType) {
-    MiddlemanAction action = new MiddlemanAction(owner, inputs, stampFile, purpose, middlemanType);
+  @Override
+  public boolean mayInsensitivelyPropagateInputs() {
+    return true;
+  }
+
+  /** Creates a new middleman action. */
+  public static Action create(
+      ActionRegistry env,
+      ActionOwner owner,
+      NestedSet<Artifact> inputs,
+      Artifact stampFile,
+      String purpose,
+      MiddlemanType middlemanType) {
+    MiddlemanAction action =
+        new MiddlemanAction(owner, inputs, ImmutableSet.of(stampFile), purpose, middlemanType);
     env.registerAction(action);
     return action;
   }

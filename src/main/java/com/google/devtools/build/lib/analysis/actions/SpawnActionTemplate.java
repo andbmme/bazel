@@ -13,28 +13,37 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.actions;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
-import com.google.devtools.build.lib.actions.ActionInputHelper;
+import com.google.devtools.build.lib.actions.ActionKeyCacher;
+import com.google.devtools.build.lib.actions.ActionKeyContext;
+import com.google.devtools.build.lib.actions.ActionLookupValue.ActionLookupKey;
 import com.google.devtools.build.lib.actions.ActionOwner;
+import com.google.devtools.build.lib.actions.ActionTemplate;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
-import com.google.devtools.build.lib.actions.ArtifactOwner;
+import com.google.devtools.build.lib.actions.CommandLine;
+import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.skyframe.ActionTemplateExpansionValue;
+import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Map;
 
-/**
- * An {@link ActionTemplate} that expands into {@link SpawnAction}s at execution time.
- */
-public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
-  private final Artifact inputTreeArtifact;
-  private final Artifact outputTreeArtifact;
+/** An {@link ActionTemplate} that expands into {@link SpawnAction}s at execution time. */
+public final class SpawnActionTemplate extends ActionKeyCacher
+    implements ActionTemplate<SpawnAction> {
+  private final SpecialArtifact inputTreeArtifact;
+  private final SpecialArtifact outputTreeArtifact;
   private final NestedSet<Artifact> commonInputs;
   private final NestedSet<Artifact> allInputs;
   private final NestedSet<Artifact> commonTools;
@@ -64,8 +73,8 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
 
   private SpawnActionTemplate(
       ActionOwner actionOwner,
-      Artifact inputTreeArtifact,
-      Artifact outputTreeArtifact,
+      SpecialArtifact inputTreeArtifact,
+      SpecialArtifact outputTreeArtifact,
       NestedSet<Artifact> commonInputs,
       NestedSet<Artifact> commonTools,
       OutputPathMapper outputPathMapper,
@@ -91,22 +100,37 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
   }
 
   @Override
-  public Iterable<SpawnAction> generateActionForInputArtifacts(
-      Iterable<TreeFileArtifact> inputTreeFileArtifacts, ArtifactOwner artifactOwner) {
-    ImmutableList.Builder<SpawnAction> expandedActions = new ImmutableList.Builder<>();
+  public ImmutableList<SpawnAction> generateActionsForInputArtifacts(
+      ImmutableSet<TreeFileArtifact> inputTreeFileArtifacts, ActionLookupKey artifactOwner) {
+    ImmutableList.Builder<SpawnAction> expandedActions =
+        ImmutableList.builderWithExpectedSize(inputTreeFileArtifacts.size());
     for (TreeFileArtifact inputTreeFileArtifact : inputTreeFileArtifacts) {
       PathFragment parentRelativeOutputPath =
           outputPathMapper.parentRelativeOutputPath(inputTreeFileArtifact);
 
-      TreeFileArtifact outputTreeFileArtifact = ActionInputHelper.treeFileArtifact(
-          outputTreeArtifact,
-          parentRelativeOutputPath,
-          artifactOwner);
+      TreeFileArtifact outputTreeFileArtifact =
+          TreeFileArtifact.createTemplateExpansionOutput(
+              outputTreeArtifact, parentRelativeOutputPath, artifactOwner);
 
       expandedActions.add(createAction(inputTreeFileArtifact, outputTreeFileArtifact));
     }
 
     return expandedActions.build();
+  }
+
+  @Override
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp)
+      throws CommandLineExpansionException {
+    TreeFileArtifact inputTreeFileArtifact =
+        TreeFileArtifact.createTreeOutput(inputTreeArtifact, "dummy_for_key");
+    TreeFileArtifact outputTreeFileArtifact =
+        TreeFileArtifact.createTemplateExpansionOutput(
+            outputTreeArtifact,
+            outputPathMapper.parentRelativeOutputPath(inputTreeFileArtifact),
+            ActionTemplateExpansionValue.key(
+                outputTreeArtifact.getArtifactOwner(), /*actionIndex=*/ 0));
+    SpawnAction dummyAction = createAction(inputTreeFileArtifact, outputTreeFileArtifact);
+    dummyAction.computeKey(actionKeyContext, fp);
   }
 
   /**
@@ -126,8 +150,7 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
     // Note that we pass in nulls below because SpawnActionTemplate does not support param file, and
     // it does not use any default value for executable or shell environment. They must be set
     // explicitly via builder method #setExecutable and #setEnvironment.
-    return actionBuilder.buildSpawnAction(
-        getOwner(), actionBuilder.buildCommandLineWithoutParamsFiles(), /*configEnv=*/ null);
+    return actionBuilder.buildForActionTemplate(getOwner());
   }
 
   /**
@@ -135,16 +158,15 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
    *
    * <p>This method is called by Skyframe to expand the input TreeArtifact into child
    * TreeFileArtifacts. Skyframe then expands this SpawnActionTemplate with the TreeFileArtifacts
-   * through {@link #generateActionForInputArtifacts}.
+   * through {@link #generateActionsForInputArtifacts}.
    */
   @Override
-  public Artifact getInputTreeArtifact() {
+  public SpecialArtifact getInputTreeArtifact() {
     return inputTreeArtifact;
   }
 
-  /** Returns the output TreeArtifact. */
   @Override
-  public Artifact getOutputTreeArtifact() {
+  public SpecialArtifact getOutputTreeArtifact() {
     return outputTreeArtifact;
   }
 
@@ -154,34 +176,34 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
   }
 
   @Override
+  public boolean isShareable() {
+    return true;
+  }
+
+  @Override
   public final String getMnemonic() {
     return mnemonic;
   }
 
   @Override
-  public Iterable<Artifact> getTools() {
+  public NestedSet<Artifact> getTools() {
     return commonTools;
   }
 
   @Override
-  public Iterable<Artifact> getInputs() {
+  public NestedSet<Artifact> getInputs() {
     return allInputs;
   }
 
   @Override
-  public ImmutableSet<Artifact> getOutputs() {
-    return ImmutableSet.of(outputTreeArtifact);
-  }
-
-  @Override
-  public Iterable<Artifact> getMandatoryInputs() {
+  public NestedSet<Artifact> getMandatoryInputs() {
     return getInputs();
   }
 
   @Override
-  public Iterable<Artifact> getInputFilesForExtraAction(
+  public NestedSet<Artifact> getInputFilesForExtraAction(
       ActionExecutionContext actionExecutionContext) {
-    return ImmutableList.of();
+    return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
   }
 
   @Override
@@ -190,20 +212,8 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
   }
 
   @Override
-  public Artifact getPrimaryInput() {
-    return inputTreeArtifact;
-  }
-
-  @Override
-  public Artifact getPrimaryOutput() {
-    return outputTreeArtifact;
-  }
-
-  @Override
   public Iterable<String> getClientEnvironmentVariables() {
-    return spawnActionBuilder
-        .buildSpawnAction(getOwner(), CommandLine.of(ImmutableList.of()), null)
-        .getClientEnvironmentVariables();
+    return spawnActionBuilder.buildForActionTemplate(getOwner()).getClientEnvironmentVariables();
   }
 
   @Override
@@ -218,8 +228,12 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
 
   @Override
   public String prettyPrint() {
-    return String.format("action template with output TreeArtifact %s",
-        outputTreeArtifact.prettyPrint());
+    return "SpawnActionTemplate with output TreeArtifact " + outputTreeArtifact.prettyPrint();
+  }
+
+  @Override
+  public String toString() {
+    return prettyPrint();
   }
 
   /** Builder class to construct {@link SpawnActionTemplate} instances. */
@@ -229,19 +243,19 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
     private CustomCommandLine commandLineTemplate;
     private PathFragment executable;
 
-    private final Artifact inputTreeArtifact;
-    private final Artifact outputTreeArtifact;
+    private final SpecialArtifact inputTreeArtifact;
+    private final SpecialArtifact outputTreeArtifact;
     private final NestedSetBuilder<Artifact> inputsBuilder = NestedSetBuilder.stableOrder();
     private final NestedSetBuilder<Artifact> toolsBuilder = NestedSetBuilder.stableOrder();
     private final SpawnAction.Builder spawnActionBuilder;
 
     /**
      * Creates a {@link SpawnActionTemplate} builder.
-     * 
+     *
      * @param inputTreeArtifact the required input TreeArtifact.
      * @param outputTreeArtifact the required output TreeArtifact.
      */
-    public Builder(Artifact inputTreeArtifact, Artifact outputTreeArtifact) {
+    public Builder(SpecialArtifact inputTreeArtifact, SpecialArtifact outputTreeArtifact) {
       Preconditions.checkState(
           inputTreeArtifact.isTreeArtifact() && outputTreeArtifact.isTreeArtifact(),
           "Either %s or %s is not a TreeArtifact",
@@ -384,16 +398,16 @@ public final class SpawnActionTemplate implements ActionTemplate<SpawnAction> {
      * @param actionOwner the action owner of the SpawnActionTemplate to be built.
      */
     public SpawnActionTemplate build(ActionOwner actionOwner) {
-      Preconditions.checkNotNull(executable);
+      checkNotNull(executable);
 
       return new SpawnActionTemplate(
-          actionOwner,
-          Preconditions.checkNotNull(inputTreeArtifact),
-          Preconditions.checkNotNull(outputTreeArtifact),
+          checkNotNull(actionOwner),
+          checkNotNull(inputTreeArtifact),
+          checkNotNull(outputTreeArtifact),
           inputsBuilder.build(),
           toolsBuilder.build(),
-          Preconditions.checkNotNull(outputPathMapper),
-          Preconditions.checkNotNull(commandLineTemplate),
+          checkNotNull(outputPathMapper),
+          checkNotNull(commandLineTemplate),
           actionTemplateMnemonic,
           spawnActionBuilder);
     }

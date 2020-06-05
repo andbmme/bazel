@@ -17,10 +17,6 @@ package com.google.devtools.build.lib.cmdline;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.devtools.build.lib.vfs.PathFragment;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -78,22 +74,11 @@ public class PackageIdentifierTest {
   }
 
   @Test
-  public void testSerialization() throws Exception {
-    PackageIdentifier inId = PackageIdentifier.create("@foo", PathFragment.create("bar/baz"));
-    ByteArrayOutputStream data = new ByteArrayOutputStream();
-    ObjectOutputStream out = new ObjectOutputStream(data);
-    out.writeObject(inId);
-    ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(data.toByteArray()));
-    PackageIdentifier outId = (PackageIdentifier) in.readObject();
-    assertThat(outId).isEqualTo(inId);
-  }
-
-  @Test
   public void testPackageFragmentEquality() throws Exception {
     // Make sure package fragments are canonicalized.
     PackageIdentifier p1 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
     PackageIdentifier p2 = PackageIdentifier.create("@whatever", PathFragment.create("foo/bar"));
-    assertThat(p1.getPackageFragment()).isSameAs(p2.getPackageFragment());
+    assertThat(p1.getPackageFragment()).isSameInstanceAs(p2.getPackageFragment());
   }
 
   @Test

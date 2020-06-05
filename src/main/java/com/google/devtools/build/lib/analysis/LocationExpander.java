@@ -20,17 +20,19 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableCollection;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.RuleErrorConsumer;
+import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -38,7 +40,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.function.Function;
 import javax.annotation.Nullable;
 
 /**
@@ -67,24 +68,26 @@ public final class LocationExpander {
   private static final boolean USE_EXEC_PATHS = true;
 
   private final RuleErrorConsumer ruleErrorConsumer;
-  private final ImmutableMap<String, Function<String, String>> functions;
+  private final ImmutableMap<String, LocationFunction> functions;
+  private final ImmutableMap<RepositoryName, RepositoryName> repositoryMapping;
 
   @VisibleForTesting
   LocationExpander(
       RuleErrorConsumer ruleErrorConsumer,
-      Map<String, Function<String, String>> functions) {
+      Map<String, LocationFunction> functions,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
     this.ruleErrorConsumer = ruleErrorConsumer;
     this.functions = ImmutableMap.copyOf(functions);
+    this.repositoryMapping = repositoryMapping;
   }
 
   private LocationExpander(
       RuleErrorConsumer ruleErrorConsumer,
       Label root,
       Supplier<Map<Label, Collection<Artifact>>> locationMap,
-      boolean execPaths) {
-    this(
-        ruleErrorConsumer,
-        allLocationFunctions(root, locationMap, execPaths));
+      boolean execPaths,
+      ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
+    this(ruleErrorConsumer, allLocationFunctions(root, locationMap, execPaths), repositoryMapping);
   }
 
   /**
@@ -108,7 +111,8 @@ public final class LocationExpander {
         // Use a memoizing supplier to avoid eagerly building the location map.
         Suppliers.memoize(
             () -> LocationExpander.buildLocationMap(ruleContext, labelMap, allowData)),
-        execPaths);
+        execPaths,
+        ruleContext.getRule().getPackage().getRepositoryMapping());
   }
 
   /**
@@ -118,7 +122,6 @@ public final class LocationExpander {
    * $(execpath)/$(execpaths) using Artifact.getExecPath().
    *
    * @param ruleContext BUILD rule
-   * @param labelMap A mapping of labels to build artifacts.
    */
   public static LocationExpander withRunfilesPaths(RuleContext ruleContext) {
     return new LocationExpander(ruleContext, null, false, false);
@@ -172,7 +175,6 @@ public final class LocationExpander {
   private String expand(String value, ErrorReporter reporter) {
     int restart = 0;
 
-    int attrLength = value.length();
     StringBuilder result = new StringBuilder(value.length());
 
     while (true) {
@@ -209,7 +211,7 @@ public final class LocationExpander {
       // (2) Call appropriate function to obtain string replacement.
       String functionValue = value.substring(nextWhitespace + 1, end).trim();
       try {
-        String replacement = functions.get(fname).apply(functionValue);
+        String replacement = functions.get(fname).apply(functionValue, repositoryMapping);
         result.append(replacement);
       } catch (IllegalStateException ise) {
         reporter.report(ise.getMessage());
@@ -223,7 +225,7 @@ public final class LocationExpander {
   }
 
   @VisibleForTesting
-  static final class LocationFunction implements Function<String, String> {
+  static final class LocationFunction {
     private static final int MAX_PATHS_SHOWN = 5;
 
     private final Label root;
@@ -242,11 +244,20 @@ public final class LocationExpander {
       this.multiple = multiple;
     }
 
-    @Override
-    public String apply(String arg) {
+    /**
+     * Looks up the label-like string in the locationMap and returns the resolved path string. If
+     * the label-like string begins with a repository name, the repository name may be remapped
+     * using the {@code repositoryMapping}.
+     *
+     * @param arg The label-like string to be expanded, e.g. ":foo" or "//foo:bar"
+     * @param repositoryMapping map of {@code RepositoryName}s defined in the main workspace
+     * @return The expanded value
+     */
+    public String apply(
+        String arg, ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
       Label label;
       try {
-        label = root.getRelative(arg);
+        label = root.getRelativeWithRemapping(arg, repositoryMapping);
       } catch (LabelSyntaxException e) {
         throw new IllegalStateException(
             String.format(
@@ -311,15 +322,7 @@ public final class LocationExpander {
     }
 
     private String joinPaths(Collection<String> paths) {
-      return paths.stream().map(LocationFunction::quotePath).collect(joining(" "));
-    }
-
-    private static String quotePath(String path) {
-      // TODO(ulfjack): Use existing ShellEscaper instead.
-      if (path.contains(" ")) {
-        path = "'" + path + "'";
-      }
-      return path;
+      return paths.stream().map(ShellEscaper::escapeString).collect(joining(" "));
     }
 
     private String functionName() {
@@ -327,9 +330,9 @@ public final class LocationExpander {
     }
   }
 
-  static ImmutableMap<String, Function<String, String>> allLocationFunctions(
+  static ImmutableMap<String, LocationFunction> allLocationFunctions(
       Label root, Supplier<Map<Label, Collection<Artifact>>> locationMap, boolean execPaths) {
-    return new ImmutableMap.Builder<String, Function<String, String>>()
+    return new ImmutableMap.Builder<String, LocationFunction>()
         .put("location", new LocationFunction(root, locationMap, execPaths, EXACTLY_ONE))
         .put("locations", new LocationFunction(root, locationMap, execPaths, ALLOW_MULTIPLE))
         .put("rootpath", new LocationFunction(root, locationMap, USE_ROOT_PATHS, EXACTLY_ONE))
@@ -357,45 +360,61 @@ public final class LocationExpander {
       }
     }
 
-    // Add all destination locations.
-    for (OutputFile out : ruleContext.getRule().getOutputFiles()) {
-      mapGet(locationMap, out.getLabel()).add(ruleContext.createOutputArtifact(out));
+    // We don't want to do this if we're processing aspect rules. It will
+    // create output artifacts and unbalance the input/output state, leading
+    // to an error (output artifact with no action to create its inputs).
+    if (ruleContext.getMainAspect() == null) {
+      // Add all destination locations.
+      for (OutputFile out : ruleContext.getRule().getOutputFiles()) {
+        // Not in aspect processing, so explicitly build an artifact & let it verify.
+        mapGet(locationMap, out.getLabel()).add(ruleContext.createOutputArtifact(out));
+      }
     }
 
     if (ruleContext.getRule().isAttrDefined("srcs", BuildType.LABEL_LIST)) {
-      for (TransitiveInfoCollection src : ruleContext
-          .getPrerequisitesIf("srcs", Mode.TARGET, FileProvider.class)) {
-        Iterables.addAll(mapGet(locationMap, AliasProvider.getDependencyLabel(src)),
-            src.getProvider(FileProvider.class).getFilesToBuild());
+      for (TransitiveInfoCollection src :
+          ruleContext.getPrerequisitesIf("srcs", TransitionMode.TARGET, FileProvider.class)) {
+        for (Label label : AliasProvider.getDependencyLabels(src)) {
+          mapGet(locationMap, label)
+              .addAll(src.getProvider(FileProvider.class).getFilesToBuild().toList());
+        }
       }
     }
 
     // Add all locations associated with dependencies and tools
     List<TransitiveInfoCollection> depsDataAndTools = new ArrayList<>();
     if (ruleContext.getRule().isAttrDefined("deps", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisitesIf("deps", Mode.DONT_CHECK, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf(
+              "deps", TransitionMode.DONT_CHECK, FilesToRunProvider.class));
     }
     if (allowDataAttributeEntriesInLabel
         && ruleContext.getRule().isAttrDefined("data", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisitesIf("data", Mode.DATA, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf(
+              "data", TransitionMode.DONT_CHECK, FilesToRunProvider.class));
     }
     if (ruleContext.getRule().isAttrDefined("tools", BuildType.LABEL_LIST)) {
-      Iterables.addAll(depsDataAndTools,
-          ruleContext.getPrerequisitesIf("tools", Mode.HOST, FilesToRunProvider.class));
+      Iterables.addAll(
+          depsDataAndTools,
+          ruleContext.getPrerequisitesIf("tools", TransitionMode.HOST, FilesToRunProvider.class));
     }
 
     for (TransitiveInfoCollection dep : depsDataAndTools) {
-      Label label = AliasProvider.getDependencyLabel(dep);
+      ImmutableList<Label> labels = AliasProvider.getDependencyLabels(dep);
       FilesToRunProvider filesToRun = dep.getProvider(FilesToRunProvider.class);
       Artifact executableArtifact = filesToRun.getExecutable();
 
       // If the label has an executable artifact add that to the multimaps.
-      if (executableArtifact != null) {
-        mapGet(locationMap, label).add(executableArtifact);
-      } else {
-        Iterables.addAll(mapGet(locationMap, label), filesToRun.getFilesToRun());
+      Collection<Artifact> values =
+          executableArtifact != null
+              ? ImmutableList.of(executableArtifact)
+              : filesToRun.getFilesToRun().toList();
+
+      for (Label label : labels) {
+        mapGet(locationMap, label).addAll(values);
       }
     }
     return locationMap;

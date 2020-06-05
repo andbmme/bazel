@@ -14,8 +14,8 @@
 package com.google.devtools.build.lib.bazel.rules.android;
 
 import static com.google.devtools.build.lib.packages.Attribute.attr;
-import static com.google.devtools.build.lib.syntax.Type.INTEGER;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.INTEGER;
+import static com.google.devtools.build.lib.packages.Type.STRING;
 
 import com.google.common.base.Function;
 import com.google.common.collect.ImmutableMap;
@@ -24,7 +24,6 @@ import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.rules.repository.WorkspaceBaseRule;
 import com.google.devtools.build.lib.rules.repository.WorkspaceConfiguredTargetFactory;
@@ -42,6 +41,8 @@ public class AndroidSdkRepositoryRule implements RuleDefinition {
         ImmutableMap.Builder<String, Label> builder = ImmutableMap.builder();
         builder.put("android/sdk", Label.parseAbsoluteUnchecked(prefix + "sdk"));
         builder.put(
+            "android/d8_jar_import", Label.parseAbsoluteUnchecked(prefix + "d8_jar_import"));
+        builder.put(
             "android/dx_jar_import", Label.parseAbsoluteUnchecked(prefix + "dx_jar_import"));
         builder.put("android_sdk_for_testing", Label.parseAbsoluteUnchecked(prefix + "files"));
         builder.put(
@@ -51,7 +52,7 @@ public class AndroidSdkRepositoryRule implements RuleDefinition {
       };
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment environment) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
         .setWorkspaceOnly()
         .setExternalBindingsFunction(BINDINGS_FUNCTION)

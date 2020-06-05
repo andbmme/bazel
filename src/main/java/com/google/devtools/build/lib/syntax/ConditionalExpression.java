@@ -13,56 +13,45 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import java.io.IOException;
-
-/**
- * Syntax node for an if/else expression.
- */
+/** Syntax node for an expression of the form {@code t if cond else f}. */
 public final class ConditionalExpression extends Expression {
 
-  // Python conditional expressions: $thenCase if $condition else $elseCase
-  // https://docs.python.org/3.5/reference/expressions.html#conditional-expressions
-  private final Expression thenCase;
-  private final Expression condition;
-  private final Expression elseCase;
+  private final Expression t;
+  private final Expression cond;
+  private final Expression f;
 
-  public Expression getThenCase() { return thenCase; }
-  public Expression getCondition() { return condition; }
-  public Expression getElseCase() { return elseCase; }
-
-  /**
-   * Constructor for a conditional expression
-   */
-  public ConditionalExpression(
-      Expression thenCase, Expression condition, Expression elseCase) {
-    this.thenCase = thenCase;
-    this.condition = condition;
-    this.elseCase = elseCase;
+  public Expression getThenCase() {
+    return t;
   }
 
-  /**
-   * Constructs a string representation of the if expression
-   */
-  @Override
-  public void prettyPrint(Appendable buffer) throws IOException {
-    thenCase.prettyPrint(buffer);
-    buffer.append(" if ");
-    condition.prettyPrint(buffer);
-    buffer.append(" else ");
-    elseCase.prettyPrint(buffer);
+  public Expression getCondition() {
+    return cond;
+  }
+
+  public Expression getElseCase() {
+    return f;
+  }
+
+  /** Constructor for a conditional expression */
+  ConditionalExpression(FileLocations locs, Expression t, Expression cond, Expression f) {
+    super(locs);
+    this.t = t;
+    this.cond = cond;
+    this.f = f;
   }
 
   @Override
-  Object doEval(Environment env) throws EvalException, InterruptedException {
-    if (EvalUtils.toBoolean(condition.eval(env))) {
-      return thenCase.eval(env);
-    } else {
-      return elseCase.eval(env);
-    }
+  public int getStartOffset() {
+    return t.getStartOffset();
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getEndOffset() {
+    return f.getEndOffset();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

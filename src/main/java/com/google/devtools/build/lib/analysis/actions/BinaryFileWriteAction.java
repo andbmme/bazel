@@ -22,6 +22,8 @@ import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.util.Fingerprint;
 import java.io.IOException;
@@ -48,7 +50,7 @@ public final class BinaryFileWriteAction extends AbstractFileWriteAction {
    */
   public BinaryFileWriteAction(
       ActionOwner owner, Artifact output, ByteSource source, boolean makeExecutable) {
-    super(owner, /*inputs=*/Artifact.NO_ARTIFACTS, output, makeExecutable);
+    super(owner, /*inputs=*/ NestedSetBuilder.emptySet(Order.STABLE_ORDER), output, makeExecutable);
     this.source = Preconditions.checkNotNull(source);
   }
 
@@ -71,21 +73,18 @@ public final class BinaryFileWriteAction extends AbstractFileWriteAction {
   }
 
   @Override
-  protected String computeKey(ActionKeyContext actionKeyContext) {
-    Fingerprint f = new Fingerprint();
-    f.addString(GUID);
-    f.addString(String.valueOf(makeExecutable));
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+    fp.addString(GUID);
+    fp.addString(String.valueOf(makeExecutable));
 
     try (InputStream in = source.openStream()) {
       byte[] buffer = new byte[512];
       int amountRead;
       while ((amountRead = in.read(buffer)) != -1) {
-        f.addBytes(buffer, 0, amountRead);
+        fp.addBytes(buffer, 0, amountRead);
       }
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
-
-    return f.hexDigestAndReset();
   }
 }

@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 package(default_visibility = ["//src:__subpackages__"])
 
 filegroup(
@@ -53,8 +55,13 @@ java_library(
     deps = [":jni-loader"],
 )
 
+# Java interfaces to various native Windows system services.
+#
+# All programs that depend on libraries in this package will have
+# JNI (native code) dependencies.
 java_library(
     name = "jni-loader",
     srcs = ["WindowsJniLoader.java"],
-    deps = ["//src/main/java/com/google/devtools/build/lib/windows/runfiles"],
+    data = ["//src/main/native/windows:target-os-native-lib"],
+    deps = ["@bazel_tools//tools/java/runfiles"],
 )

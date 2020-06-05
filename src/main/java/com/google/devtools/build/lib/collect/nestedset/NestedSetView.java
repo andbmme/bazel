@@ -13,8 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.collect.nestedset;
 
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import java.util.Arrays;
 import java.util.Set;
@@ -35,19 +35,48 @@ import java.util.Set;
 public class NestedSetView<E> {
   private final Object set;
 
-  private NestedSetView(Object set) {
+  public NestedSetView(Object set) {
     this.set = set;
   }
 
   /** Construct a view of a given NestedSet. */
   public NestedSetView(NestedSet<E> set) {
-    this(set.rawChildren());
+    this(set.getChildren());
+  }
+
+  public static <E> Object getRawChildren(NestedSet<E> set) {
+    return set.getChildren();
   }
 
   /**
-   * Return an object where the {@link equals()} method provides the correct notion of (intensional)
+   * Splits the current view into multiple views if the number of entries in the current set exceeds
+   * the given limit, which has to be at least 2. This method guarantees that the resulting view
+   * contains the same elements (direct and transitive) overall, and that each node's size is less
+   * than or equal to the given limit. It makes no guarantees about the resulting structure of the
+   * graph, and this may affect the traversal order if it is converted back to a nested set.
+   */
+  public NestedSetView<E> splitIfExceedsMaximumSize(int maximumSize) {
+    Preconditions.checkArgument(maximumSize >= 2, "maximumSize must be at least 2");
+    if (!(set instanceof Object[])) {
+      return this;
+    }
+    Object[] arr = (Object[]) set;
+    int size = arr.length;
+    if (size <= maximumSize) {
+      return this;
+    }
+    Object[][] pieces = new Object[((size + maximumSize - 1) / maximumSize)][];
+    for (int i = 0; i < pieces.length; i++) {
+      int max = Math.min((i + 1) * maximumSize, arr.length);
+      pieces[i] = Arrays.copyOfRange(arr, i * maximumSize, max);
+    }
+    return new NestedSetView<E>(pieces).splitIfExceedsMaximumSize(maximumSize);
+  }
+
+  /**
+   * Return an object where the {@link #equals} method provides the correct notion of (intensional)
    * equality of the set viewed. Consumers of this method should not assume any properties of the
-   * returned object apart from its {@link equals()} method.
+   * returned object apart from its {@link #equals} method.
    *
    * <p>The identifier is meant as an abstract, but memory efficient way of remembering nested sets
    * directly or indirectly seen. Storing the identifier of a nested-set view will not retain more
@@ -71,10 +100,13 @@ public class NestedSetView<E> {
     if (!(set instanceof Object[])) {
       return ImmutableSet.of();
     }
-    return Arrays.stream((Object[]) set)
-        .filter(c -> c instanceof Object[])
-        .map(c -> new NestedSetView<E>(c))
-        .collect(toImmutableSet());
+    ImmutableSet.Builder<NestedSetView<E>> nestedSetViewSetBuilder = new ImmutableSet.Builder<>();
+    for (Object c : (Object[]) set) {
+      if (c instanceof Object[]) {
+        nestedSetViewSetBuilder.add(new NestedSetView<>(c));
+      }
+    }
+    return nestedSetViewSetBuilder.build();
   }
 
   /**
@@ -88,9 +120,12 @@ public class NestedSetView<E> {
     if (!(set instanceof Object[])) {
       return ImmutableSet.of((E) set);
     }
-    return Arrays.stream((Object[]) set)
-        .filter(c -> !(c instanceof Object[]))
-        .map(c -> (E) c)
-        .collect(toImmutableSet());
+    ImmutableSet.Builder<E> setBuilder = new ImmutableSet.Builder<>();
+    for (Object c : (Object[]) set) {
+      if (!(c instanceof Object[])) {
+        setBuilder.add((E) c);
+      }
+    }
+    return setBuilder.build();
   }
 }

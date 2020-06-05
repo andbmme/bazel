@@ -16,10 +16,12 @@ package com.google.devtools.build.android.resources;
 import com.android.builder.core.VariantConfiguration;
 import com.android.builder.dependency.SymbolFileProvider;
 import com.android.resources.ResourceType;
-import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Multimap;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.devtools.build.android.DependencyInfo;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -27,11 +29,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.EnumMap;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.Callable;
@@ -56,8 +56,9 @@ public class ResourceSymbols {
     public ResourceSymbols call() throws Exception {
       List<String> lines = Files.readAllLines(rTxtSymbols, StandardCharsets.UTF_8);
 
-      Map<ResourceType, Map<String, FieldInitializer>> initializers =
-          new EnumMap<>(ResourceType.class);
+      // NB: the inner map is working around a bug in R.txt generation!
+      // TODO(b/140643407): read directly without having to dedup by field name
+      final Map<ResourceType, Map<String, FieldInitializer>> initializers = new TreeMap<>();
 
       for (int lineIndex = 1; lineIndex <= lines.size(); lineIndex++) {
         String line = null;
@@ -74,19 +75,19 @@ public class ResourceSymbols {
           String name = line.substring(pos2 + 1, pos3);
           String value = line.substring(pos3 + 1);
 
-          final ResourceType resourceType = ResourceType.getEnum(className);
-          final Map<String, FieldInitializer> fields;
-          if (initializers.containsKey(resourceType)) {
-            fields = initializers.get(resourceType);
-          } else {
-            fields = new TreeMap<>();
-            initializers.put(resourceType, fields);
-          }
+          FieldInitializer initializer;
           if ("int".equals(type)) {
-            fields.put(name, IntFieldInitializer.of(value));
+            initializer =
+                IntFieldInitializer.of(DependencyInfo.UNKNOWN, Visibility.UNKNOWN, name, value);
           } else {
-            fields.put(name, IntArrayFieldInitializer.of(value));
+            initializer =
+                IntArrayFieldInitializer.of(
+                    DependencyInfo.UNKNOWN, Visibility.UNKNOWN, name, value);
           }
+
+          initializers
+              .computeIfAbsent(ResourceType.getEnum(className), k -> new TreeMap<>())
+              .put(name, initializer);
         } catch (IndexOutOfBoundsException e) {
           String s =
               String.format(
@@ -96,7 +97,13 @@ public class ResourceSymbols {
           throw new IOException(s, e);
         }
       }
-      return ResourceSymbols.from(FieldInitializers.copyOf(initializers));
+
+      return ResourceSymbols.from(
+          FieldInitializers.copyOf(
+              initializers.entrySet().stream()
+                  .collect(
+                      ImmutableMap.toImmutableMap(
+                          Map.Entry::getKey, entry -> entry.getValue().values()))));
     }
   }
 
@@ -125,17 +132,19 @@ public class ResourceSymbols {
    * @throws InterruptedException when there is an error loading the symbols.
    */
   public static Multimap<String, ListenableFuture<ResourceSymbols>> loadFrom(
-      Iterable<SymbolFileProvider> dependencies,
+      Iterable<? extends SymbolFileProvider> dependencies,
       ListeningExecutorService executor,
       @Nullable String packageToExclude)
       throws InterruptedException, ExecutionException {
-    Map<SymbolFileProvider, ListenableFuture<String>> providerToPackage = new HashMap<>();
+    Map<SymbolFileProvider, ListenableFuture<String>> providerToPackage = new LinkedHashMap<>();
     for (SymbolFileProvider dependency : dependencies) {
       providerToPackage.put(
           dependency, executor.submit(new PackageParsingTask(dependency.getManifest())));
     }
-    Multimap<String, ListenableFuture<ResourceSymbols>> packageToTable = HashMultimap.create();
-    for (Entry<SymbolFileProvider, ListenableFuture<String>> entry : providerToPackage.entrySet()) {
+    Multimap<String, ListenableFuture<ResourceSymbols>> packageToTable =
+        LinkedHashMultimap.create();
+    for (Map.Entry<SymbolFileProvider, ListenableFuture<String>> entry :
+        providerToPackage.entrySet()) {
       File symbolFile = entry.getKey().getSymbolFile();
       if (!Objects.equals(entry.getValue().get(), packageToExclude)) {
         packageToTable.put(entry.getValue().get(), load(symbolFile.toPath(), executor));
@@ -197,7 +206,9 @@ public class ResourceSymbols {
       Path classesOut,
       boolean finalFields)
       throws IOException {
-    RClassGenerator classWriter = RClassGenerator.with(classesOut, values, finalFields);
+    RClassGenerator classWriter =
+        RClassGenerator.with(
+            /*label=*/ null, classesOut, values, finalFields, /*annotateTransitiveFields=*/ false);
     for (String packageName : libMap.keySet()) {
       classWriter.write(packageName, ResourceSymbols.merge(libMap.get(packageName)).values);
     }

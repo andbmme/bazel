@@ -14,7 +14,7 @@
 package com.google.devtools.build.android.desugar;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
+import static org.junit.Assert.assertThrows;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.android.desugar.testdata.java8.AnnotationsOfDefaultMethodsShouldBeKept.AnnotatedInterface;
@@ -32,6 +32,7 @@ import com.google.devtools.build.android.desugar.testdata.java8.GenericDefaultIn
 import com.google.devtools.build.android.desugar.testdata.java8.InterfaceMethod;
 import com.google.devtools.build.android.desugar.testdata.java8.InterfaceWithDefaultMethod;
 import com.google.devtools.build.android.desugar.testdata.java8.InterfaceWithDuplicateMethods.ClassWithDuplicateMethods;
+import com.google.devtools.build.android.desugar.testdata.java8.InterfaceWithInheritedMethods;
 import com.google.devtools.build.android.desugar.testdata.java8.Java7InterfaceWithBridges;
 import com.google.devtools.build.android.desugar.testdata.java8.Named;
 import com.google.devtools.build.android.desugar.testdata.java8.TwoInheritedDefaultMethods;
@@ -414,5 +415,12 @@ public class DesugarJava8FunctionalTest extends DesugarFunctionalTest {
     assertThat(new DefaultMethodFromSeparateJava8Target().dflt()).isEqualTo("dflt");
     assertThat(new DefaultMethodTransitivelyFromSeparateJava8Target().dflt()).isEqualTo("dflt");
     assertThat(new DefaultMethodFromSeparateJava8TargetOverridden().dflt()).isEqualTo("override");
+  }
+
+  /** Regression test for b/73355452 */
+  @Test
+  public void testSuperCallToInheritedDefaultMethod() {
+    assertThat(new InterfaceWithInheritedMethods.Impl().name()).isEqualTo("Base");
+    assertThat(new InterfaceWithInheritedMethods.Impl().suffix()).isEqualTo("!");
   }
 }

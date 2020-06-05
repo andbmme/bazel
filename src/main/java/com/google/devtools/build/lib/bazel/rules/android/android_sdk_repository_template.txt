@@ -19,18 +19,28 @@ alias(
 )
 
 alias(
+    name = "emulator",
+    actual = "emulator/emulator",
+)
+
+# emulator v29+ removed the arm and x86 specific binaries.
+# Keeping these aliases around for backwards compatibility.
+alias(
     name = "emulator_arm",
-    actual = "emulator/emulator64-arm",
+    actual = "emulator/emulator",
 )
 
 alias(
     name = "emulator_x86",
-    actual = "emulator/emulator64-x86",
+    actual = "emulator/emulator",
 )
 
 filegroup(
     name = "emulator_x86_bios",
-    srcs = glob(["emulator/lib/pc-bios/*"]),
+    srcs = glob(
+        ["emulator/lib/pc-bios/*"],
+        allow_empty = True,
+    ),
 )
 
 alias(
@@ -40,7 +50,10 @@ alias(
 
 filegroup(
     name = "emulator_shared_libs",
-    srcs = glob(["emulator/lib64/**"]),
+    srcs = glob(
+        ["emulator/lib64/**"],
+        allow_empty = True,
+    ),
 )
 
 filegroup(
@@ -50,10 +63,11 @@ filegroup(
 
 filegroup(
     name = "qemu2_x86",
-    srcs = [
-        "emulator/emulator",
-        "emulator/qemu/linux-x86_64/qemu-system-i386",
-    ],
+    srcs = ["emulator/emulator"] + select({
+        "@bazel_tools//src/conditions:darwin": ["emulator/qemu/darwin-x86_64/qemu-system-i386"],
+        "@bazel_tools//src/conditions:darwin_x86_64": ["emulator/qemu/darwin-x86_64/qemu-system-i386"],
+        "//conditions:default": ["emulator/qemu/linux-x86_64/qemu-system-i386"],
+    }),
 )
 
 create_system_images_filegroups(
@@ -62,4 +76,4 @@ create_system_images_filegroups(
 )
 
 exports_files([
-%exported_files%] + glob(["system-images/**"]))
+%exported_files%] + glob(["system-images/**"], allow_empty = True))

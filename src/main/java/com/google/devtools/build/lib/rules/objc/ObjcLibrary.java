@@ -14,17 +14,26 @@
 
 package com.google.devtools.build.lib.rules.objc;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.TransitionMode;
+import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParamsInfo;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.SymbolGenerator;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.cpp.CcCommon;
+import com.google.devtools.build.lib.rules.cpp.CcCompilationContext;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.CcLinkingContext;
+import com.google.devtools.build.lib.rules.cpp.CcLinkingContext.LinkOptions;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -36,20 +45,14 @@ public class ObjcLibrary implements RuleConfiguredTargetFactory {
   /**
    * Constructs an {@link ObjcCommon} instance based on the attributes of the given rule context.
    */
-  private ObjcCommon common(RuleContext ruleContext) {
-    return new ObjcCommon.Builder(ruleContext)
+  private ObjcCommon common(RuleContext ruleContext) throws InterruptedException {
+    return new ObjcCommon.Builder(ObjcCommon.Purpose.COMPILE_AND_LINK, ruleContext)
         .setCompilationAttributes(
             CompilationAttributes.Builder.fromRuleContext(ruleContext).build())
-        .setResourceAttributes(new ResourceAttributes(ruleContext))
-        .addDefines(ruleContext.getExpander().withDataLocations().tokenized("defines"))
         .setCompilationArtifacts(CompilationSupport.compilationArtifacts(ruleContext))
-        .addDeps(ruleContext.getPrerequisites("deps", Mode.TARGET))
-        .addRuntimeDeps(ruleContext.getPrerequisites("runtime_deps", Mode.TARGET))
-        .addDepObjcProviders(
-            ruleContext.getPrerequisites("bundles", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR))
-        .addNonPropagatedDepObjcProviders(
-            ruleContext.getPrerequisites(
-                "non_propagated_deps", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR))
+        .addDeps(
+            ruleContext.getPrerequisiteConfiguredTargetAndTargets("deps", TransitionMode.TARGET))
+        .addRuntimeDeps(ruleContext.getPrerequisites("runtime_deps", TransitionMode.TARGET))
         .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
         .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
         .setHasModuleMap()
@@ -58,7 +61,8 @@ public class ObjcLibrary implements RuleConfiguredTargetFactory {
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
-      throws InterruptedException, RuleErrorException {
+      throws InterruptedException, RuleErrorException, ActionConflictException {
+    CcCommon.checkRuleLoadedThroughMacro(ruleContext);
     validateAttributes(ruleContext);
 
     ObjcCommon common = common(ruleContext);
@@ -67,42 +71,111 @@ public class ObjcLibrary implements RuleConfiguredTargetFactory {
         .addAll(common.getCompiledArchive().asSet());
 
     Map<String, NestedSet<Artifact>> outputGroupCollector = new TreeMap<>();
+    ImmutableList.Builder<Artifact> objectFilesCollector = ImmutableList.builder();
     CompilationSupport compilationSupport =
         new CompilationSupport.Builder()
             .setRuleContext(ruleContext)
             .setOutputGroupCollector(outputGroupCollector)
+            .setObjectFilesCollector(objectFilesCollector)
             .build();
 
     compilationSupport
         .registerCompileAndArchiveActions(common)
         .registerFullyLinkAction(
-            common.getObjcProvider(),
+            compilationSupport.getObjcProvider(),
             ruleContext.getImplicitOutputArtifact(CompilationSupport.FULLY_LINKED_LIB))
         .validateAttributes();
 
-    new ResourceSupport(ruleContext).validateAttributes();
-
-    J2ObjcMappingFileProvider j2ObjcMappingFileProvider = J2ObjcMappingFileProvider.union(
-            ruleContext.getPrerequisites("deps", Mode.TARGET, J2ObjcMappingFileProvider.class));
-    J2ObjcEntryClassProvider j2ObjcEntryClassProvider = new J2ObjcEntryClassProvider.Builder()
-      .addTransitive(ruleContext.getPrerequisites("deps", Mode.TARGET,
-          J2ObjcEntryClassProvider.class)).build();
+    J2ObjcMappingFileProvider j2ObjcMappingFileProvider =
+        J2ObjcMappingFileProvider.union(
+            ruleContext.getPrerequisites(
+                "deps", TransitionMode.TARGET, J2ObjcMappingFileProvider.class));
+    J2ObjcEntryClassProvider j2ObjcEntryClassProvider =
+        new J2ObjcEntryClassProvider.Builder()
+            .addTransitive(
+                ruleContext.getPrerequisites(
+                    "deps", TransitionMode.TARGET, J2ObjcEntryClassProvider.class))
+            .build();
+    ObjcProvider objcProvider = compilationSupport.getObjcProvider();
+    CcCompilationContext ccCompilationContext = objcProvider.getCcCompilationContext();
+    CcLinkingContext ccLinkingContext =
+        buildCcLinkingContext(
+            ruleContext.getLabel(), objcProvider, ruleContext.getSymbolGenerator());
 
     return ObjcRuleClasses.ruleConfiguredTarget(ruleContext, filesToBuild.build())
-        .addNativeDeclaredProvider(common.getObjcProvider())
+        .addNativeDeclaredProvider(objcProvider)
+        .addStarlarkTransitiveInfo(ObjcProvider.STARLARK_NAME, objcProvider)
         .addProvider(J2ObjcEntryClassProvider.class, j2ObjcEntryClassProvider)
         .addProvider(J2ObjcMappingFileProvider.class, j2ObjcMappingFileProvider)
-        .addProvider(
-            InstrumentedFilesProvider.class,
-            compilationSupport.getInstrumentedFilesProvider(common))
         .addNativeDeclaredProvider(
-            new CcLinkParamsInfo(new ObjcLibraryCcLinkParamsStore(common)))
+            compilationSupport.getInstrumentedFilesProvider(objectFilesCollector.build()))
+        .addNativeDeclaredProvider(
+            CcInfo.builder()
+                .setCcCompilationContext(ccCompilationContext)
+                .setCcLinkingContext(ccLinkingContext)
+                .build())
         .addOutputGroups(outputGroupCollector)
         .build();
   }
 
+  private CcLinkingContext buildCcLinkingContext(
+      Label label, ObjcProvider objcProvider, SymbolGenerator<?> symbolGenerator) {
+    ImmutableSet.Builder<LibraryToLink> libraries = new ImmutableSet.Builder<>();
+    for (Artifact library : objcProvider.get(ObjcProvider.LIBRARY).toList()) {
+      libraries.add(
+          LibraryToLink.builder()
+              .setStaticLibrary(library)
+              .setLibraryIdentifier(
+                  FileSystemUtils.removeExtension(library.getRootRelativePathString()))
+              .build());
+    }
+
+    libraries.addAll(
+        convertLibrariesToStaticLibraries(objcProvider.get(ObjcProvider.CC_LIBRARY).toList()));
+
+    CcLinkingContext.Builder ccLinkingContext =
+        CcLinkingContext.builder()
+            .setOwner(label)
+            .addLibraries(ImmutableList.copyOf(libraries.build()));
+
+    ImmutableList.Builder<LinkOptions> userLinkFlags = ImmutableList.builder();
+    for (SdkFramework sdkFramework : objcProvider.get(ObjcProvider.SDK_FRAMEWORK).toList()) {
+      userLinkFlags.add(
+          LinkOptions.of(ImmutableList.of("-framework", sdkFramework.getName()), symbolGenerator));
+    }
+    ccLinkingContext.addUserLinkFlags(userLinkFlags.build());
+
+    return ccLinkingContext.build();
+  }
+
+  /**
+   * This method removes dynamic libraries from LibraryToLink objects coming from C++ dependencies.
+   * The reason for this is that objective-C rules do not support linking the dynamic version of the
+   * libraries.
+   */
+  private ImmutableList<LibraryToLink> convertLibrariesToStaticLibraries(
+      Iterable<LibraryToLink> librariesToLink) {
+    ImmutableList.Builder<LibraryToLink> libraries = ImmutableList.builder();
+    for (LibraryToLink libraryToLink : librariesToLink) {
+      LibraryToLink.Builder staticLibraryToLink = libraryToLink.toBuilder();
+      if (libraryToLink.getPicStaticLibrary() != null || libraryToLink.getStaticLibrary() != null) {
+        staticLibraryToLink.setDynamicLibrary(null);
+        staticLibraryToLink.setResolvedSymlinkDynamicLibrary(null);
+        staticLibraryToLink.setInterfaceLibrary(null);
+        staticLibraryToLink.setResolvedSymlinkInterfaceLibrary(null);
+      }
+      libraries.add(staticLibraryToLink.build());
+    }
+    return libraries.build();
+  }
+
   /** Throws errors or warnings for bad attribute state. */
-  private static void validateAttributes(RuleContext ruleContext) {
+  private static void validateAttributes(RuleContext ruleContext) throws RuleErrorException {
+    // TODO(b/129469095): objc_library cannot handle target names with slashes.  Rather than
+    // crashing bazel, we emit a useful error message.
+    if (ruleContext.getTarget().getName().indexOf('/') != -1) {
+      ruleContext.attributeError("name", "this attribute has unsupported character '/'");
+    }
     for (String copt : ObjcCommon.getNonCrosstoolCopts(ruleContext)) {
       if (copt.contains("-fmodules-cache-path")) {
         ruleContext.ruleWarning(CompilationSupport.MODULES_CACHE_PATH_WARNING);

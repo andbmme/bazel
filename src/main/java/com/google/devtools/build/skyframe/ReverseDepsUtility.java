@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -45,15 +46,15 @@ import java.util.Set;
  * may never have their data forcibly consolidated, since their reverse deps will only be retrieved
  * as a whole if they are marked dirty. Thus, we consolidate periodically.
  *
- * <p>{@link InMemoryNodeEntry} manages pending reverse dep operations on a marked-dirty or initally
- * evaluating node itself, using similar logic tuned to those cases, and calls into {@link
+ * <p>{@link InMemoryNodeEntry} manages pending reverse dep operations on a marked-dirty or
+ * initially evaluating node itself, using similar logic tuned to those cases, and calls into {@link
  * #consolidateDataAndReturnNewElements(InMemoryNodeEntry, OpToStoreBare)} when transitioning to
  * done.
  */
 abstract class ReverseDepsUtility {
   private ReverseDepsUtility() {}
 
-  static final int MAYBE_CHECK_THRESHOLD = 10;
+  @VisibleForTesting static final int MAYBE_CHECK_THRESHOLD = 10;
 
   /**
    * We can store one type of operation bare in order to save memory. For done nodes, most

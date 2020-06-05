@@ -18,8 +18,6 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.packages.NoSuchPackageException;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -44,14 +42,15 @@ public class CollectPackagesUnderDirectoryFunction implements SkyFunction {
 
   @Override
   public SkyValue compute(SkyKey skyKey, Environment env) throws InterruptedException {
-    return new MyTraversalFunction().visitDirectory((RecursivePkgKey) skyKey.argument(), env);
+    return new MyTraversalFunction(directories)
+        .visitDirectory((RecursivePkgKey) skyKey.argument(), env);
   }
 
-  private class MyTraversalFunction
+  /** The {@link RecursiveDirectoryTraversalFunction} used by our traversal. */
+  public static class MyTraversalFunction
       extends RecursiveDirectoryTraversalFunction<
           MyPackageDirectoryConsumer, CollectPackagesUnderDirectoryValue> {
-
-    private MyTraversalFunction() {
+    protected MyTraversalFunction(BlazeDirectories directories) {
       super(directories);
     }
 
@@ -114,8 +113,8 @@ public class CollectPackagesUnderDirectoryFunction implements SkyFunction {
     }
 
     @Override
-    public void notePackageError(NoSuchPackageException e) {
-      errorMessage = e.getMessage();
+    public void notePackageError(String noSuchPackageExceptionErrorMessage) {
+      this.errorMessage = noSuchPackageExceptionErrorMessage;
     }
 
     boolean isDirectoryPackage() {

@@ -13,32 +13,47 @@
 // limitations under the License.
 package com.google.devtools.build.lib.causes;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import com.google.common.base.MoreObjects;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId.ActionCompletedId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId.ConfigurationId;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.util.DetailedExitCode;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import javax.annotation.Nullable;
 
 /**
  * Class describing a {@link Cause} that is associated with an action. It is uniquely determined by
- * the path to the primary output. For reference, a Label is attached as well.
+ * the path to the primary output. For reference, a Label is attached as well if available.
  */
 public class ActionFailed implements Cause {
-  private final Path path;
+  private final PathFragment execPath;
   private final Label label;
   private final String configurationChecksum;
+  private final DetailedExitCode detailedExitCode;
 
-  public ActionFailed(Path path, Label label, @Nullable String configurationChecksum) {
-    this.path = path;
+  public ActionFailed(
+      PathFragment execPath,
+      Label label,
+      @Nullable String configurationChecksum,
+      DetailedExitCode detailedExitCode) {
+    this.execPath = execPath;
     this.label = label;
     this.configurationChecksum = configurationChecksum;
+    this.detailedExitCode = checkNotNull(detailedExitCode);
   }
 
   @Override
   public String toString() {
-    return path.toString();
+    return MoreObjects.toStringHelper(this)
+        .add("execPath", execPath)
+        .add("label", label)
+        .add("configurationChecksum", configurationChecksum)
+        .add("detailedExitCode", detailedExitCode)
+        .toString();
   }
 
   @Override
@@ -46,10 +61,16 @@ public class ActionFailed implements Cause {
     return label;
   }
 
+  @Nullable
+  @Override
+  public DetailedExitCode getDetailedExitCode() {
+    return detailedExitCode;
+  }
+
   @Override
   public BuildEventStreamProtos.BuildEventId getIdProto() {
     ActionCompletedId.Builder actionId =
-        ActionCompletedId.newBuilder().setPrimaryOutput(path.toString());
+        ActionCompletedId.newBuilder().setPrimaryOutput(execPath.toString());
     if (label != null) {
       actionId.setLabel(label.toString());
     }

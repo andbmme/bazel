@@ -1,13 +1,21 @@
-package(default_visibility = ["//src:__subpackages__"])
+load("@rules_java//java:defs.bzl", "java_binary", "java_library")
+
+package(default_visibility = ["//src/java_tools/buildjar:buildjar_package_group"])
 
 filegroup(
     name = "srcs",
     srcs = glob(["*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
 )
 
 java_binary(
     name = "GenClass",
     main_class = "com.google.devtools.build.buildjar.genclass.GenClass",
+    visibility = [
+        "//src:__pkg__",
+        "//src/java_tools/buildjar:buildjar_package_group",
+        "//src/test/shell/bazel:__pkg__",
+    ],
     runtime_deps = [":genclass_lib"],
 )
 
@@ -22,7 +30,7 @@ java_library(
 )
 
 #
-## Bootstrapping using Skylark rules
+## Bootstrapping using Starlark rules
 #
 
 load("//tools/build_rules:java_rules_skylark.bzl", "bootstrap_java_binary")

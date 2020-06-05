@@ -1,4 +1,4 @@
-#!/bin/bash --posix
+#!/usr/bin/env bash
 # Copyright 2014 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,6 +43,8 @@
 #                       line flag, otherwise it creates a classpath jar.
 #
 # The remainder of the command line is passed to the program.
+
+set -o posix
 
 # Make it easy to insert 'set -x' or similar commands when debugging problems with this script.
 eval "$JAVA_STUB_DEBUG"
@@ -99,10 +101,15 @@ for ARG in "$@"; do
   if [[ "$ARG" == --wrapper_script_flag=* ]]; then
     process_wrapper_argument "${ARG#--wrapper_script_flag=}" \
       || die "invalid wrapper argument '%s'" "$ARG"
-  elif [[ "${#ARGS}" > 0 ]] || ! process_wrapper_argument "$ARG"; then
+  elif [[ "${#ARGS}" -gt 0 ]] || ! process_wrapper_argument "$ARG"; then
     ARGS+=( "$ARG" )
   fi
 done
+
+# A file storing the test's runtime classpath, excluding the test support.
+# The file is read by the persistent test runner. The jars inside the file are
+# loaded dynamically for every test run into a custom classloader.
+%test_runtime_classpath_file%
 
 # Find our runfiles tree.  We need this to construct the classpath
 # (unless --singlejar was passed).
@@ -220,12 +227,6 @@ else
   }
 fi
 
-if is_macos || [[ ${OSTYPE} == "freebsd" ]]; then
-  function md5func() { md5 -q $@ ; }
-else
-  function md5func() { md5sum $@ | awk '{print $1}' ; }
-fi
-
 # Set JAVABIN to the path to the JVM launcher.
 %javabin%
 
@@ -255,6 +256,8 @@ export CLASSLOADER_PREFIX_PATH="${RUNPATH}"
 # We need to make the metadata jar with uninstrumented classes available for generating
 # the lcov-compatible coverage report, and we don't want it on the classpath.
 %set_jacoco_metadata%
+%set_jacoco_main_class%
+%set_jacoco_java_runfiles_root%
 
 if [[ -n "$JVM_DEBUG_PORT" ]]; then
   JVM_DEBUG_SUSPEND=${DEFAULT_JVM_DEBUG_SUSPEND:-"y"}
@@ -285,46 +288,58 @@ ARGS=(
 
 
 function create_and_run_classpath_jar() {
-  # Build class path as one single string separated by spaces
-  MANIFEST_CLASSPATH=""
+  # Build class path.
+  MANIFEST_CLASSPATH=()
   if is_windows; then
-    IFS=';'
-    URI_PREFIX="file:/"  # e.g. "file:/C:/temp/foo.jar"
+    CLASSPATH_SEPARATOR=";"
   else
-    IFS=':'
-    URI_PREFIX="file:$(pwd)/"  # e.g. "file:/usr/local/foo.jar"
+    CLASSPATH_SEPARATOR=":"
   fi
-  for x in $CLASSPATH; do
-    # Add file:/ prefix and escaped space characters, it should be a URI.
-    x="${URI_PREFIX}${x// /%20}"
-    MANIFEST_CLASSPATH="$MANIFEST_CLASSPATH $x"
-  done
-  unset IFS
 
-  RAND_ID=$(cat /dev/urandom | head -c 128 | md5func)
-  # Create manifest file
-  MANIFEST_FILE="${self}-${RAND_ID}.jar_manifest"
+  OLDIFS="$IFS"
+  IFS="${CLASSPATH_SEPARATOR}" # Use a custom separator for the loop.
+  for path in ${CLASSPATH}; do
+    # Convert spaces to %20
 
-  echo "Manifest-Version: 1.0" >$MANIFEST_FILE
-  CLASSPATH_LINE="Class-Path:$MANIFEST_CLASSPATH"
-  # No line in the MANIFEST.MF file may be longer than 72 bytes.
-  # A space prefix indicates the line is still the content of the last attribute.
-  for i in `seq 0 71 ${#CLASSPATH_LINE}`; do
-    PREFIX=" "
-    if (($i == 0)); then
-      PREFIX=""
+    if is_windows; then
+      path="file:/${path}" # e.g. "file:/C:/temp/foo.jar"
+    else
+      # If not absolute, qualify the path
+      case "${path}" in
+        /*) ;; # Already an absolute path
+        *) path="$(pwd)/${path}";; # Now qualified
+      esac
+      path="file:${path}" # e.g. "file:/usr/local/foo.jar"
     fi
-    echo "$PREFIX${CLASSPATH_LINE:$i:71}" >>$MANIFEST_FILE
+
+    path=$(sed "s/ /%20/g" <<< "${path}")
+    MANIFEST_CLASSPATH+=("${path}")
   done
-  echo "Created-By: Bazel" >>$MANIFEST_FILE
+  IFS="$OLDIFS"
+
+  # Create manifest file
+  MANIFEST_FILE="$(mktemp -t XXXXXXXX.jar_manifest)"
+  (
+    echo "Manifest-Version: 1.0"
+
+    CLASSPATH_LINE="Class-Path: ${MANIFEST_CLASSPATH[*]}"
+    CLASSPATH_MANIFEST_LINES=$(sed -E $'s/(.{71})/\\1\\\n /g' <<< "${CLASSPATH_LINE}")
+
+    echo "$CLASSPATH_MANIFEST_LINES"
+    echo "Created-By: Bazel"
+  ) >$MANIFEST_FILE
 
   # Create classpath JAR file
-  MANIFEST_JAR_FILE="${self}-${RAND_ID}-classpath.jar"
+  MANIFEST_JAR_FILE="$(mktemp -t XXXXXXXX-classpath.jar)"
   if is_windows; then
     MANIFEST_JAR_FILE="$(cygpath --windows "$MANIFEST_JAR_FILE")"
     MANIFEST_FILE="$(cygpath --windows "$MANIFEST_FILE")"
   fi
-  JARBIN="${JARBIN:-$(rlocation "$1")}"
+  if is_windows; then
+    JARBIN="${JARBIN:=${JAVABIN%/java.exe}/jar.exe}"
+  else
+    JARBIN="${JARBIN:=${JAVABIN%/java}/jar}"
+  fi
   $JARBIN cvfm "$MANIFEST_JAR_FILE" "$MANIFEST_FILE" >/dev/null || \
     die "ERROR: $self failed because $JARBIN failed"
 
@@ -343,10 +358,8 @@ if [ -z "$CLASSPATH_LIMIT" ]; then
   is_windows && CLASSPATH_LIMIT=7000 || CLASSPATH_LIMIT=120000
 fi
 
-if is_windows && (("${#CLASSPATH}" > ${CLASSPATH_LIMIT} )); then
-  create_and_run_classpath_jar "local_jdk/bin/jar.exe"
-elif (("${#CLASSPATH}" > ${CLASSPATH_LIMIT})); then
-  create_and_run_classpath_jar "local_jdk/bin/jar"
+if (("${#CLASSPATH}" > ${CLASSPATH_LIMIT})); then
+  create_and_run_classpath_jar
 else
   exec $JAVABIN -classpath $CLASSPATH "${ARGS[@]}"
 fi

@@ -24,6 +24,9 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.actions.AbstractFileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.ByteStringDeterministicWriter;
+import com.google.devtools.build.lib.analysis.actions.DeterministicWriter;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.android.deployinfo.AndroidDeployInfoOuterClass;
 import com.google.devtools.build.lib.rules.android.deployinfo.AndroidDeployInfoOuterClass.AndroidDeployInfo;
@@ -34,18 +37,17 @@ import java.io.IOException;
 import java.io.InputStream;
 
 /**
- * Writes AndroidDeployInfo proto message. This proto describes how
- * to deploy and launch an android_binary/android_test.
+ * Writes AndroidDeployInfo proto message. This proto describes how to deploy and launch an
+ * android_binary/android_test.
  */
 @Immutable
 public final class AndroidDeployInfoAction extends AbstractFileWriteAction {
 
-  private static Iterable<Artifact> makeInputs(
+  private static NestedSet<Artifact> makeInputs(
       Artifact mergedManifest,
       Iterable<Artifact> additionalMergedManifests,
       Iterable<Artifact> apksToDeploy) {
-
-    return ImmutableList.<Artifact>builder()
+    return NestedSetBuilder.<Artifact>stableOrder()
         .add(mergedManifest)
         .addAll(additionalMergedManifests)
         .addAll(apksToDeploy)
@@ -64,8 +66,11 @@ public final class AndroidDeployInfoAction extends AbstractFileWriteAction {
       Artifact mergedManifest,
       ImmutableList<Artifact> additionalMergedManifests,
       ImmutableList<Artifact> apksToDeploy) {
-    super(owner, makeInputs(mergedManifest, additionalMergedManifests, apksToDeploy),
-        outputFile, false);
+    super(
+        owner,
+        makeInputs(mergedManifest, additionalMergedManifests, apksToDeploy),
+        outputFile,
+        false);
     this.mergedManifest = mergedManifest;
     this.additionalMergedManifests = additionalMergedManifests;
     this.apksToDeploy = apksToDeploy;
@@ -90,8 +95,13 @@ public final class AndroidDeployInfoAction extends AbstractFileWriteAction {
       Artifact mergedManifest,
       ImmutableList<Artifact> additionalMergedManifests,
       ImmutableList<Artifact> apksToDeploy) {
-    Action action = new AndroidDeployInfoAction(ruleContext.getActionOwner(),
-        deployInfo, mergedManifest, additionalMergedManifests, apksToDeploy);
+    Action action =
+        new AndroidDeployInfoAction(
+            ruleContext.getActionOwner(),
+            deployInfo,
+            mergedManifest,
+            additionalMergedManifests,
+            apksToDeploy);
     ruleContext.registerAction(action);
   }
 
@@ -106,20 +116,18 @@ public final class AndroidDeployInfoAction extends AbstractFileWriteAction {
   }
 
   @Override
-  protected String computeKey(ActionKeyContext actionKeyContext) {
-    Fingerprint f = new Fingerprint()
-        .addString(GUID);
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+    fp.addString(GUID);
 
     try (InputStream in = getByteString().newInput()) {
       byte[] buffer = new byte[512];
       int amountRead;
       while ((amountRead = in.read(buffer)) != -1) {
-        f.addBytes(buffer, 0, amountRead);
+        fp.addBytes(buffer, 0, amountRead);
       }
     } catch (IOException e) {
       throw new RuntimeException(e);
     }
-    return f.hexDigestAndReset();
   }
 
   private static AndroidDeployInfoOuterClass.Artifact makeArtifactProto(Artifact artifact) {

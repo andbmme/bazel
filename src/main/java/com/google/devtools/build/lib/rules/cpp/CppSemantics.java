@@ -14,57 +14,51 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.devtools.build.lib.actions.Artifact;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.packages.AspectDescriptor;
+import com.google.devtools.build.lib.packages.StructImpl;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration.HeadersCheckingMode;
 
-/**
- * Pluggable C++ compilation semantics.
- */
+/** Pluggable C++ compilation semantics. */
 public interface CppSemantics {
-
   /**
    * Called before a C++ compile action is built.
    *
    * <p>Gives the semantics implementation the opportunity to change compile actions at the last
    * minute.
    */
-  void finalizeCompileActionBuilder(RuleContext ruleContext, CppCompileActionBuilder actionBuilder);
+  void finalizeCompileActionBuilder(
+      BuildConfiguration configuration,
+      FeatureConfiguration featureConfiguration,
+      CppCompileActionBuilder actionBuilder);
 
-  /**
-   * Called before {@link CppCompilationContext}s are finalized.
-   *
-   * <p>Gives the semantics implementation the opportunity to change what the C++ rule propagates
-   * to dependent rules.
-   */
-  void setupCompilationContext(
-      RuleContext ruleContext, CppCompilationContext.Builder contextBuilder);
-
-  /**
-   * Returns the set of includes which are not mandatory and may be pruned by include processing.
-   */
-  NestedSet<Artifact> getAdditionalPrunableIncludes();
-
-  /**
-   * Determines the applicable mode of headers checking for the passed in ruleContext.
-   */
+  /** Determines the applicable mode of headers checking for the passed in ruleContext. */
   HeadersCheckingMode determineHeadersCheckingMode(RuleContext ruleContext);
 
   /** Returns the include processing closure, which handles include processing for this build */
   IncludeProcessing getIncludeProcessing();
 
-  /**
-   * Returns true iff this build configuration requires inclusion extraction (for include scanning)
-   * in the action graph.
-   */
-  boolean needsIncludeScanning(RuleContext ruleContext);
-  
   /** Returns true iff this build should perform .d input pruning. */
   boolean needsDotdInputPruning();
 
   void validateAttributes(RuleContext ruleContext);
 
+  default void validateDeps(RuleContext ruleContext) {}
+
   /** Returns true iff this build requires include validation. */
   boolean needsIncludeValidation();
+
+  /** Provider for cc_shared_libraries * */
+  StructImpl getCcSharedLibraryInfo(TransitiveInfoCollection dep);
+
+  /** No-op in Bazel */
+  void validateLayeringCheckFeatures(
+      RuleContext ruleContext,
+      AspectDescriptor aspectDescriptor,
+      CcToolchainProvider ccToolchain,
+      ImmutableSet<String> unsupportedFeatures);
 }

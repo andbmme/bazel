@@ -15,89 +15,142 @@ package com.google.devtools.build.lib.remote;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
-import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.actions.ActionContext;
-import com.google.devtools.build.lib.actions.ResourceManager;
-import com.google.devtools.build.lib.exec.ActionContextProvider;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Supplier;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListeningScheduledExecutorService;
+import com.google.devtools.build.lib.actions.ActionGraph;
+import com.google.devtools.build.lib.actions.ActionInput;
+import com.google.devtools.build.lib.analysis.ArtifactsToOwnerLabels;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
-import com.google.devtools.build.lib.exec.SpawnRunner;
-import com.google.devtools.build.lib.exec.apple.XCodeLocalEnvProvider;
-import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
-import com.google.devtools.build.lib.exec.local.LocalExecutionOptions;
-import com.google.devtools.build.lib.exec.local.LocalSpawnRunner;
+import com.google.devtools.build.lib.exec.ExecutorLifecycleListener;
+import com.google.devtools.build.lib.exec.ModuleActionContextRegistry;
+import com.google.devtools.build.lib.exec.SpawnCache;
+import com.google.devtools.build.lib.exec.SpawnStrategyRegistry;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
+import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import com.google.devtools.build.lib.util.OS;
+import com.google.devtools.build.lib.vfs.Path;
 import javax.annotation.Nullable;
 
-/**
- * Provide a remote execution context.
- */
-final class RemoteActionContextProvider extends ActionContextProvider {
-  private final CommandEnvironment env;
-  private final RemoteActionCache cache;
-  private final GrpcRemoteExecutor executor;
+/** Provide a remote execution context. */
+final class RemoteActionContextProvider implements ExecutorLifecycleListener {
 
-  RemoteActionContextProvider(CommandEnvironment env, @Nullable RemoteActionCache cache,
-      @Nullable GrpcRemoteExecutor executor) {
-    this.env = env;
+  private final CommandEnvironment env;
+  private final RemoteCache cache;
+  @Nullable private final GrpcRemoteExecutor executor;
+  @Nullable private final ListeningScheduledExecutorService retryScheduler;
+  private final DigestUtil digestUtil;
+  @Nullable private final Path logDir;
+  private ImmutableSet<ActionInput> filesToDownload = ImmutableSet.of();
+
+  private RemoteActionContextProvider(
+      CommandEnvironment env,
+      RemoteCache cache,
+      @Nullable GrpcRemoteExecutor executor,
+      @Nullable ListeningScheduledExecutorService retryScheduler,
+      DigestUtil digestUtil,
+      @Nullable Path logDir) {
+    this.env = Preconditions.checkNotNull(env, "env");
+    this.cache = Preconditions.checkNotNull(cache, "cache");
     this.executor = executor;
-    this.cache = cache;
+    this.retryScheduler = retryScheduler;
+    this.digestUtil = digestUtil;
+    this.logDir = logDir;
+  }
+
+  public static RemoteActionContextProvider createForRemoteCaching(
+      CommandEnvironment env,
+      RemoteCache cache,
+      ListeningScheduledExecutorService retryScheduler,
+      DigestUtil digestUtil) {
+    return new RemoteActionContextProvider(
+        env, cache, /*executor=*/ null, retryScheduler, digestUtil, /*logDir=*/ null);
+  }
+
+  public static RemoteActionContextProvider createForRemoteExecution(
+      CommandEnvironment env,
+      RemoteExecutionCache cache,
+      GrpcRemoteExecutor executor,
+      ListeningScheduledExecutorService retryScheduler,
+      DigestUtil digestUtil,
+      Path logDir) {
+    return new RemoteActionContextProvider(
+        env, cache, executor, retryScheduler, digestUtil, logDir);
+  }
+
+  /**
+   * Registers a remote spawn strategy if this instance was created with an executor, otherwise does
+   * nothing.
+   *
+   * @param registryBuilder builder with which to register the strategy
+   */
+  public void registerRemoteSpawnStrategyIfApplicable(
+      SpawnStrategyRegistry.Builder registryBuilder) {
+    if (executor == null) {
+      return; // Can't use a spawn strategy without executor.
+    }
+
+    RemoteSpawnRunner spawnRunner =
+        new RemoteSpawnRunner(
+            env.getExecRoot(),
+            checkNotNull(env.getOptions().getOptions(RemoteOptions.class)),
+            env.getOptions().getOptions(ExecutionOptions.class),
+            checkNotNull(env.getOptions().getOptions(ExecutionOptions.class))
+                .getVerboseFailuresPredicate(),
+            env.getReporter(),
+            env.getBuildRequestId(),
+            env.getCommandId().toString(),
+            (RemoteExecutionCache) cache,
+            executor,
+            retryScheduler,
+            digestUtil,
+            logDir,
+            filesToDownload);
+    registryBuilder.registerStrategy(
+        new RemoteSpawnStrategy(env.getExecRoot(), spawnRunner), "remote");
+  }
+
+  /**
+   * Registers a spawn cache action context
+   *
+   * @param registryBuilder builder with which to register the cache
+   */
+  public void registerSpawnCache(ModuleActionContextRegistry.Builder registryBuilder) {
+    RemoteSpawnCache spawnCache =
+        new RemoteSpawnCache(
+            env.getExecRoot(),
+            checkNotNull(env.getOptions().getOptions(RemoteOptions.class)),
+            cache,
+            env.getBuildRequestId(),
+            env.getCommandId().toString(),
+            env.getReporter(),
+            digestUtil,
+            filesToDownload);
+    registryBuilder.register(SpawnCache.class, spawnCache, "remote-cache");
+  }
+
+  /** Returns the remote cache. */
+  RemoteCache getRemoteCache() {
+    return cache;
+  }
+
+  void setFilesToDownload(ImmutableSet<ActionInput> topLevelOutputs) {
+    this.filesToDownload = Preconditions.checkNotNull(topLevelOutputs, "filesToDownload");
   }
 
   @Override
-  public Iterable<? extends ActionContext> getActionContexts() {
-    ExecutionOptions executionOptions =
-        checkNotNull(env.getOptions().getOptions(ExecutionOptions.class));
-    RemoteOptions remoteOptions = checkNotNull(env.getOptions().getOptions(RemoteOptions.class));
-    String buildRequestId = env.getBuildRequestId().toString();
-    String commandId = env.getCommandId().toString();
+  public void executorCreated() {}
 
-    if (remoteOptions.experimentalRemoteSpawnCache || remoteOptions.experimentalLocalDiskCache) {
-      RemoteSpawnCache spawnCache =
-          new RemoteSpawnCache(
-              env.getExecRoot(),
-              remoteOptions,
-              cache,
-              buildRequestId,
-              commandId,
-              executionOptions.verboseFailures,
-              env.getReporter());
-      return ImmutableList.of(spawnCache);
-    } else {
-      RemoteSpawnRunner spawnRunner =
-          new RemoteSpawnRunner(
-              env.getExecRoot(),
-              remoteOptions,
-              createFallbackRunner(env),
-              executionOptions.verboseFailures,
-              env.getReporter(),
-              buildRequestId,
-              commandId,
-              cache,
-              executor);
-      return ImmutableList.of(new RemoteSpawnStrategy(spawnRunner));
-    }
-  }
-
-  private static SpawnRunner createFallbackRunner(CommandEnvironment env) {
-    LocalExecutionOptions localExecutionOptions =
-        env.getOptions().getOptions(LocalExecutionOptions.class);
-    LocalEnvProvider localEnvProvider = OS.getCurrent() == OS.DARWIN
-        ? new XCodeLocalEnvProvider()
-        : LocalEnvProvider.UNMODIFIED;
-    return
-        new LocalSpawnRunner(
-            env.getExecRoot(),
-            localExecutionOptions,
-            ResourceManager.instance(),
-            env.getRuntime().getProductName(),
-            localEnvProvider);
-  }
+  @Override
+  public void executionPhaseStarting(
+      ActionGraph actionGraph, Supplier<ArtifactsToOwnerLabels> topLevelArtifactsToOwnerLabels) {}
 
   @Override
   public void executionPhaseEnding() {
-    if (cache != null) {
-      cache.close();
+    cache.close();
+    if (executor != null) {
+      executor.close();
     }
   }
 }

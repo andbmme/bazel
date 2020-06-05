@@ -15,18 +15,15 @@
 package com.google.devtools.build.lib.analysis;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Ascii;
 import com.google.common.hash.HashCode;
-import com.google.devtools.build.lib.actions.Root;
+import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.skyframe.serialization.PathCodec;
-import com.google.devtools.build.lib.skyframe.serialization.SerializationException;
-import com.google.devtools.build.lib.skyframe.serialization.strings.StringCodecs;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.StringCanonicalizer;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.protobuf.CodedInputStream;
-import com.google.protobuf.CodedOutputStream;
-import java.io.IOException;
 import java.util.Objects;
+import javax.annotation.Nullable;
 
 /**
  * Encapsulates the directories related to a workspace.
@@ -47,46 +44,57 @@ import java.util.Objects;
  *
  * <p>Do not put shortcuts to specific files here!
  */
+@AutoCodec
 @Immutable
 public final class BlazeDirectories {
-
-  // Include directory name, relative to execRoot/blaze-out/configuration.
+  // Include directory name, relative to execRoot/blaze-out/configuration. Only one segment allowed.
   public static final String RELATIVE_INCLUDE_DIR = StringCanonicalizer.intern("include");
-  @VisibleForTesting
-  static final String DEFAULT_EXEC_ROOT = "default-exec-root";
+  @VisibleForTesting static final String DEFAULT_EXEC_ROOT = "default-exec-root";
 
   private final ServerDirectories serverDirectories;
   /** Workspace root and server CWD. */
   private final Path workspace;
+  /**
+   * The root of the user's local JDK install, to be used as the default target javabase and as a
+   * fall-back host_javabase. This is not the embedded JDK.
+   */
+  private final Path defaultSystemJavabase;
   /** The root of all build actions. */
-  private final Path execRoot;
+  private final Path blazeExecRoot;
 
   // These two are kept to avoid creating new objects every time they are accessed. This showed up
   // in a profiler.
-  private final Path outputPath;
+  private final Path blazeOutputPath;
   private final Path localOutputPath;
   private final String productName;
 
+  @AutoCodec.Instantiator
   public BlazeDirectories(
       ServerDirectories serverDirectories,
       Path workspace,
+      Path defaultSystemJavabase,
       String productName) {
     this.serverDirectories = serverDirectories;
     this.workspace = workspace;
+    this.defaultSystemJavabase = defaultSystemJavabase;
     this.productName = productName;
     Path outputBase = serverDirectories.getOutputBase();
-    Path execRootBase = outputBase.getChild("execroot");
-    boolean useDefaultExecRootName = this.workspace == null || this.workspace.isRootDirectory();
-    if (useDefaultExecRootName) {
-      // TODO(bazel-team): if workspace is null execRoot should be null, but at the moment there is
-      // a lot of code that depends on it being non-null.
-      this.execRoot = execRootBase.getChild(DEFAULT_EXEC_ROOT);
+    if (Ascii.equalsIgnoreCase(productName, "blaze")) {
+      boolean useDefaultExecRootName =
+          this.workspace == null || this.workspace.getParentDirectory() == null;
+      if (useDefaultExecRootName) {
+        // TODO(bazel-team): if workspace is null execRoot should be null, but at the moment there
+        // is a lot of code that depends on it being non-null.
+        this.blazeExecRoot = serverDirectories.getExecRootBase().getChild(DEFAULT_EXEC_ROOT);
+      } else {
+        this.blazeExecRoot = serverDirectories.getExecRootBase().getChild(workspace.getBaseName());
+      }
+      this.blazeOutputPath = blazeExecRoot.getRelative(getRelativeOutputPath());
     } else {
-      this.execRoot = execRootBase.getChild(workspace.getBaseName());
+      this.blazeExecRoot = null;
+      this.blazeOutputPath = null;
     }
-    String relativeOutputPath = getRelativeOutputPath(productName);
-    this.outputPath = execRoot.getRelative(getRelativeOutputPath());
-    this.localOutputPath = outputBase.getRelative(relativeOutputPath);
+    this.localOutputPath = outputBase.getRelative(getRelativeOutputPath());
   }
 
   public ServerDirectories getServerDirectories() {
@@ -94,42 +102,52 @@ public final class BlazeDirectories {
   }
 
   /**
-   * Returns the base of the output tree, which hosts all build and scratch
-   * output for a user and workspace.
+   * Returns the base of the output tree, which hosts all build and scratch output for a user and
+   * workspace.
    */
   public Path getInstallBase() {
     return serverDirectories.getInstallBase();
   }
 
-  /**
-   * Returns the workspace directory, which is also the working dir of the server.
-   */
+  /** Returns the workspace directory, which is also the working dir of the server. */
   public Path getWorkspace() {
     return workspace;
   }
 
-  /**
-   * Returns if the workspace directory is a valid workspace.
-   */
+  /** Returns the root of the user's local JDK install (not the embedded JDK). */
+  public Path getLocalJavabase() {
+    return defaultSystemJavabase;
+  }
+
+  /** Returns if the workspace directory is a valid workspace. */
   public boolean inWorkspace() {
     return this.workspace != null;
   }
 
   /**
-   * Returns the base of the output tree, which hosts all build and scratch
-   * output for a user and workspace.
+   * Returns the base of the output tree, which hosts all build and scratch output for a user and
+   * workspace.
    */
   public Path getOutputBase() {
     return serverDirectories.getOutputBase();
   }
 
+  public Path getExecRootBase() {
+    return serverDirectories.getExecRootBase();
+  }
+
   /**
-   * Returns the execution root for the main package. This is created before the workspace file
-   * has been read, so it has an incorrect path.  Use {@link #getExecRoot(String)} instead.
+   * Returns the execution root of Blaze.
+   *
+   * @deprecated Avoid using this method as it will only work if your workspace is named like
+   *     Google's internal workspace. This method will not work in Bazel. Use {@link
+   *     #getExecRoot(String)} instead.
+   *     <p><em>AVOID USING THIS METHOD</em>
    */
+  @Nullable
   @Deprecated
-  public Path getExecRoot() {
-    return execRoot;
+  public Path getBlazeExecRoot() {
+    return blazeExecRoot;
   }
 
   /**
@@ -138,44 +156,46 @@ public final class BlazeDirectories {
    * specified with --package_path.
    */
   public Path getExecRoot(String workspaceName) {
-    return execRoot.getParentDirectory().getRelative(workspaceName);
+    return serverDirectories.getExecRootBase().getRelative(workspaceName);
   }
 
   /**
-   * Returns the output path for the main repository using the workspace's directory name. Use
-   * {@link #getOutputPath(String)}, instead.
+   * Returns the output path of Blaze.
+   *
+   * @deprecated Avoid using this method as it will only work if your workspace is named like
+   *     Google's internal workspace. This method will not work in Bazel. Use {@link
+   *     #getOutputPath(String)} instead.
+   *     <p><em>AVOID USING THIS METHOD</em>
    */
+  @Nullable
   @Deprecated
-  public Path getOutputPath() {
-    return outputPath;
+  public Path getBlazeOutputPath() {
+    return blazeOutputPath;
   }
 
-  /**
-   * Returns the output path used by this Blaze instance.
-   */
+  /** Returns the output path used by this Blaze instance. */
   public Path getOutputPath(String workspaceName) {
     return getExecRoot(workspaceName).getRelative(getRelativeOutputPath());
   }
 
-  /**
-   * Returns the local output path used by this Blaze instance.
-   */
+  /** Returns the local output path used by this Blaze instance. */
   public Path getLocalOutputPath() {
     return localOutputPath;
   }
 
   /**
-   * Returns the directory where the stdout/stderr for actions can be stored temporarily for a
-   * build. If the directory already exists, the directory is cleaned.
+   * Returns the directory where actions can store temporary files (such as their stdout and stderr)
+   * during a build. If the directory already exists, the directory is cleaned.
    */
-  public Path getActionConsoleOutputDirectory(Path execRoot) {
-    return execRoot.getRelative(getRelativeOutputPath()).getRelative("_tmp/action_outs");
+  public Path getActionTempsDirectory(Path execRoot) {
+    return execRoot.getRelative(getRelativeOutputPath()).getRelative("_tmp/actions");
   }
 
-  /**
-   * Returns the installed embedded binaries directory, under the shared
-   * installBase location.
-   */
+  public Path getPersistentActionOutsDirectory(Path execRoot) {
+    return execRoot.getRelative(getRelativeOutputPath()).getRelative("_actions");
+  }
+
+  /** Returns the installed embedded binaries directory, under the shared installBase location. */
   public Path getEmbeddedBinariesRoot() {
     return serverDirectories.getEmbeddedBinariesRoot();
   }
@@ -184,15 +204,15 @@ public final class BlazeDirectories {
    * Returns the configuration-independent root where the build-data should be placed, given the
    * {@link BlazeDirectories} of this server instance. Nothing else should be placed here.
    */
-  public Root getBuildDataDirectory(String workspaceName) {
-    return Root
-        .asDerivedRoot(getExecRoot(workspaceName), getOutputPath(workspaceName), true);
+  public ArtifactRoot getBuildDataDirectory(String workspaceName) {
+    return ArtifactRoot.asDerivedRoot(
+        getExecRoot(workspaceName), getRelativeOutputPath(productName));
   }
 
- /**
-  * Returns the MD5 content hash of the blaze binary (includes deploy JAR, embedded binaries, and
-  * anything else that ends up in the install_base).
-  */
+  /**
+   * Returns the MD5 content hash of the blaze binary (includes deploy JAR, embedded binaries, and
+   * anything else that ends up in the install_base).
+   */
   public HashCode getInstallMD5() {
     return serverDirectories.getInstallMD5();
   }
@@ -206,8 +226,8 @@ public final class BlazeDirectories {
   }
 
   /**
-   * Returns the output directory name, relative to the execRoot.
-   * TODO(bazel-team): (2011) make this private?
+   * Returns the output directory name, relative to the execRoot. TODO(bazel-team): (2011) make this
+   * private?
    */
   public static String getRelativeOutputPath(String productName) {
     return StringCanonicalizer.intern(productName + "-out");
@@ -215,8 +235,8 @@ public final class BlazeDirectories {
 
   @Override
   public int hashCode() {
-    // execRoot is derivable from other fields, but better safe than sorry.
-    return Objects.hash(serverDirectories, workspace, productName, execRoot);
+    // blazeExecRoot is derivable from other fields, but better safe than sorry.
+    return Objects.hash(serverDirectories, workspace, productName);
   }
 
   @Override
@@ -230,23 +250,6 @@ public final class BlazeDirectories {
     BlazeDirectories that = (BlazeDirectories) obj;
     return this.serverDirectories.equals(that.serverDirectories)
         && this.workspace.equals(that.workspace)
-        && this.productName.equals(that.productName)
-        // execRoot is derivable from other fields, but better safe than sorry.
-        && this.execRoot.equals(that.execRoot);
-  }
-
-  void serialize(CodedOutputStream codedOut, PathCodec pathCodec)
-      throws IOException, SerializationException {
-    serverDirectories.serialize(codedOut, pathCodec);
-    pathCodec.serialize(workspace, codedOut);
-    StringCodecs.asciiOptimized().serialize(productName, codedOut);
-  }
-
-  static BlazeDirectories deserialize(CodedInputStream codedIn, PathCodec pathCodec)
-      throws IOException, SerializationException {
-    return new BlazeDirectories(
-        ServerDirectories.deserialize(codedIn, pathCodec),
-        pathCodec.deserialize(codedIn),
-        StringCodecs.asciiOptimized().deserialize(codedIn));
+        && this.productName.equals(that.productName);
   }
 }

@@ -24,11 +24,11 @@ import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.License;
 import com.google.devtools.build.lib.packages.Rule;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 
-/**
- * A {@link ConfiguredTarget} that has licensed targets in its transitive closure.
- */
+/** A {@link ConfiguredTarget} that has licensed targets in its transitive closure. */
 @Immutable
+@AutoCodec
 public final class LicensesProviderImpl implements LicensesProvider {
   public static final LicensesProvider EMPTY =
       new LicensesProviderImpl(NestedSetBuilder.<TargetLicense>emptySet(Order.LINK_ORDER), null);
@@ -58,7 +58,7 @@ public final class LicensesProviderImpl implements LicensesProvider {
     TargetLicense outputLicenses =
         toolOutputLicense == null ? null : new TargetLicense(rule.getLabel(), toolOutputLicense);
 
-    if (configuration.isHostConfiguration() && toolOutputLicense != null) {
+    if (configuration.isToolConfiguration() && toolOutputLicense != null) {
       if (toolOutputLicense != License.NO_LICENSE) {
         builder.add(outputLicenses);
       }
@@ -91,7 +91,7 @@ public final class LicensesProviderImpl implements LicensesProvider {
   }
 
   private static boolean useOutputLicenses(Attribute attribute, BuildConfiguration configuration) {
-    return configuration.isHostConfiguration() || attribute.useOutputLicenses();
+    return configuration.isToolConfiguration() || attribute.useOutputLicenses();
   }
 
   @Override

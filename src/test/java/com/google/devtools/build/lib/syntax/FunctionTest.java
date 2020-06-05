@@ -18,43 +18,50 @@ import static com.google.common.truth.Truth.assertThat;
 import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * A test class for functions and scoping.
- */
+/** A test class for functions and scoping. */
 @RunWith(JUnit4.class)
-public class FunctionTest extends EvaluationTestCase {
+public final class FunctionTest extends EvaluationTestCase {
 
   @Test
-  public void testFunctionDef() throws Exception {
-    eval("def func(a,b,c):",
-        "  a = 1",
-        "  b = a\n");
-    UserDefinedFunction stmt = (UserDefinedFunction) lookup("func");
-    assertThat(stmt).isNotNull();
-    assertThat(stmt.getName()).isEqualTo("func");
-    assertThat(stmt.getSignature().getSignature().getShape().getMandatoryPositionals())
-        .isEqualTo(3);
-    assertThat(stmt.getStatements()).hasSize(2);
+  public void testDef() throws Exception {
+    exec("def f(a, b=1, *args, c, d=2, **kwargs): pass");
+    StarlarkFunction f = (StarlarkFunction) lookup("f");
+    assertThat(f).isNotNull();
+    assertThat(f.getName()).isEqualTo("f");
+    assertThat(f.getParameterNames())
+        .containsExactly("a", "b", "c", "d", "args", "kwargs")
+        .inOrder();
+    assertThat(f.hasVarargs()).isTrue();
+    assertThat(f.hasKwargs()).isTrue();
+    assertThat(getDefaults(f)).containsExactly(null, 1, null, 2, null, null).inOrder();
+
+    // same, sans varargs
+    exec("def g(a, b=1, *, c, d=2, **kwargs): pass");
+    StarlarkFunction g = (StarlarkFunction) lookup("g");
+    assertThat(g.getParameterNames()).containsExactly("a", "b", "c", "d", "kwargs").inOrder();
+    assertThat(g.hasVarargs()).isFalse();
+    assertThat(g.hasKwargs()).isTrue();
+    assertThat(getDefaults(g)).containsExactly(null, 1, null, 2, null).inOrder();
   }
 
-  @Test
-  public void testFunctionDefDuplicateArguments() throws Exception {
-    setFailFast(false);
-    parseFile("def func(a,b,a):",
-        "  a = 1\n");
-    assertContainsError("duplicate parameter name in function definition");
+  private static List<Object> getDefaults(StarlarkFunction fn) {
+    List<Object> defaults = new ArrayList<>();
+    for (int i = 0; i < fn.getParameterNames().size(); i++) {
+      defaults.add(fn.getDefaultValue(i));
+    }
+    return defaults;
   }
 
   @Test
   public void testFunctionDefCallOuterFunc() throws Exception {
     List<Object> params = new ArrayList<>();
     createOuterFunction(params);
-    eval("def func(a):",
+    exec(
+        "def func(a):", //
         "  outer_func(a)",
         "func(1)",
         "func(2)");
@@ -62,21 +69,29 @@ public class FunctionTest extends EvaluationTestCase {
   }
 
   private void createOuterFunction(final List<Object> params) throws Exception {
-    BaseFunction outerFunc = new BaseFunction("outer_func") {
-      @Override
-      public Object call(List<Object> args, Map<String, Object> kwargs, FuncallExpression ast,
-          Environment env) throws EvalException, InterruptedException {
-        params.addAll(args);
-        return Runtime.NONE;
-      }
-    };
+    StarlarkCallable outerFunc =
+        new StarlarkCallable() {
+          @Override
+          public String getName() {
+            return "outer_func";
+          }
+
+          @Override
+          public NoneType call(
+              StarlarkThread thread, Tuple<Object> args, Dict<String, Object> kwargs)
+              throws EvalException {
+            params.addAll(args);
+            return Starlark.NONE;
+          }
+        };
     update("outer_func", outerFunc);
   }
 
   @Test
   public void testFunctionDefNoEffectOutsideScope() throws Exception {
     update("a", 1);
-    eval("def func():",
+    exec(
+        "def func():", //
         "  a = 2",
         "func()\n");
     assertThat(lookup("a")).isEqualTo(1);
@@ -84,7 +99,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionDefGlobalVaribleReadInFunction() throws Exception {
-    eval("a = 1",
+    exec(
+        "a = 1", //
         "def func():",
         "  b = a",
         "  return b",
@@ -94,7 +110,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionDefLocalGlobalScope() throws Exception {
-    eval("a = 1",
+    exec(
+        "a = 1", //
         "def func():",
         "  a = 2",
         "  b = a",
@@ -105,7 +122,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionDefLocalVariableReferencedBeforeAssignment() throws Exception {
-    checkEvalErrorContains("Variable 'a' is referenced before assignment.",
+    checkEvalErrorContains(
+        "local variable 'a' is referenced before assignment.",
         "a = 1",
         "def func():",
         "  b = a",
@@ -116,7 +134,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionDefLocalVariableReferencedInCallBeforeAssignment() throws Exception {
-    checkEvalErrorContains("Variable 'a' is referenced before assignment.",
+    checkEvalErrorContains(
+        "local variable 'a' is referenced before assignment.",
         "def dummy(x):",
         "  pass",
         "a = 1",
@@ -128,7 +147,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionDefLocalVariableReferencedAfterAssignment() throws Exception {
-    eval("a = 1",
+    exec(
+        "a = 1", //
         "def func():",
         "  a = 2",
         "  b = a",
@@ -140,14 +160,15 @@ public class FunctionTest extends EvaluationTestCase {
 
   @SuppressWarnings("unchecked")
   @Test
-  public void testSkylarkGlobalComprehensionIsAllowed() throws Exception {
-    eval("a = [i for i in [1, 2, 3]]\n");
+  public void testStarlarkGlobalComprehensionIsAllowed() throws Exception {
+    exec("a = [i for i in [1, 2, 3]]\n");
     assertThat((Iterable<Object>) lookup("a")).containsExactly(1, 2, 3).inOrder();
   }
 
   @Test
   public void testFunctionReturn() throws Exception {
-    eval("def func():",
+    exec(
+        "def func():", //
         "  return 2",
         "b = func()\n");
     assertThat(lookup("b")).isEqualTo(2);
@@ -155,7 +176,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionReturnFromALoop() throws Exception {
-    eval("def func():",
+    exec(
+        "def func():", //
         "  for i in [1, 2, 3, 4, 5]:",
         "    return i",
         "b = func()\n");
@@ -164,7 +186,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionExecutesProperly() throws Exception {
-    eval("def func(a):",
+    exec(
+        "def func(a):",
         "  b = 1",
         "  if a:",
         "    b = 2",
@@ -179,7 +202,8 @@ public class FunctionTest extends EvaluationTestCase {
   public void testFunctionCallFromFunction() throws Exception {
     final List<Object> params = new ArrayList<>();
     createOuterFunction(params);
-    eval("def func2(a):",
+    exec(
+        "def func2(a):",
         "  outer_func(a)",
         "def func1(b):",
         "  func2(b)",
@@ -190,7 +214,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionCallFromFunctionReadGlobalVar() throws Exception {
-    eval("a = 1",
+    exec(
+        "a = 1", //
         "def func2():",
         "  return a",
         "def func1():",
@@ -200,15 +225,30 @@ public class FunctionTest extends EvaluationTestCase {
   }
 
   @Test
+  public void testFunctionParamCanShadowGlobalVarAfterGlobalVarIsRead() throws Exception {
+    exec(
+        "a = 1",
+        "def func2(a):",
+        "  return 0",
+        "def func1():",
+        "  dummy = a",
+        "  return func2(2)",
+        "b = func1()\n");
+    assertThat(lookup("b")).isEqualTo(0);
+  }
+
+  @Test
   public void testSingleLineFunction() throws Exception {
-    eval("def func(): return 'a'",
+    exec(
+        "def func(): return 'a'", //
         "s = func()\n");
     assertThat(lookup("s")).isEqualTo("a");
   }
 
   @Test
   public void testFunctionReturnsDictionary() throws Exception {
-    eval("def func(): return {'a' : 1}",
+    exec(
+        "def func(): return {'a' : 1}", //
         "d = func()",
         "a = d['a']\n");
     assertThat(lookup("a")).isEqualTo(1);
@@ -216,7 +256,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionReturnsList() throws Exception {
-    eval("def func(): return [1, 2, 3]",
+    exec(
+        "def func(): return [1, 2, 3]", //
         "d = func()",
         "a = d[1]\n");
     assertThat(lookup("a")).isEqualTo(2);
@@ -224,7 +265,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testFunctionNameAliasing() throws Exception {
-    eval("def func(a):",
+    exec(
+        "def func(a):", //
         "  return a + 1",
         "alias = func",
         "r = alias(1)");
@@ -233,7 +275,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testCallingFunctionsWithMixedModeArgs() throws Exception {
-    eval("def func(a, b, c):",
+    exec(
+        "def func(a, b, c):", //
         "  return a + b + c",
         "v = func(1, c = 2, b = 3)");
     assertThat(lookup("v")).isEqualTo(6);
@@ -251,7 +294,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testWhichOptionalArgsAreDefinedForFunctions() throws Exception {
-    eval(functionWithOptionalArgs(),
+    exec(
+        functionWithOptionalArgs(),
         "v1 = func('1', 1, 1)",
         "v2 = func(b = 2, a = '2', c = 2)",
         "v3 = func('3')",
@@ -264,7 +308,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testDefaultArguments() throws Exception {
-    eval("def func(a, b = 'b', c = 'c'):",
+    exec(
+        "def func(a, b = 'b', c = 'c'):",
         "  return a + b + c",
         "v1 = func('a', 'x', 'y')",
         "v2 = func(b = 'x', a = 'a', c = 'y')",
@@ -278,8 +323,8 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testDefaultArgumentsInsufficientArgNum() throws Exception {
-    checkEvalError("insufficient arguments received by func(a, b = \"b\", c = \"c\") "
-        + "(got 0, expected at least 1)",
+    checkEvalError(
+        "func() missing 1 required positional argument: a",
         "def func(a, b = 'b', c = 'c'):",
         "  return a + b + c",
         "func()");
@@ -299,21 +344,71 @@ public class FunctionTest extends EvaluationTestCase {
   }
 
   @Test
-  public void testKeywordOnlyIsForbidden() throws Exception {
-    env = newEnvironmentWithSkylarkOptions("--incompatible_disallow_keyword_only_args=true");
-    checkEvalErrorContains("forbidden", "def foo(a, b, *, c): return a + b + c");
+  public void testKeywordOnly() throws Exception {
+    checkEvalError(
+        "func() missing 1 required keyword-only argument: b", //
+        "def func(a, *, b): pass",
+        "func(5)");
+
+    checkEvalError(
+        "func() accepts no more than 1 positional argument but got 2",
+        "def func(a, *, b): pass",
+        "func(5, 6)");
+
+    exec("def func(a, *, b, c = 'c'): return a + b + c");
+    assertThat(eval("func('a', b = 'b')")).isEqualTo("abc");
+    assertThat(eval("func('a', b = 'b', c = 'd')")).isEqualTo("abd");
   }
 
   @Test
-  public void testParamAfterStarArgs() throws Exception {
-    env = newEnvironmentWithSkylarkOptions("--incompatible_disallow_keyword_only_args=true");
-    checkEvalErrorContains("forbidden", "def foo(a, *b, c): return a");
+  public void testStarArgsAndKeywordOnly() throws Exception {
+    checkEvalError(
+        "func() missing 1 required keyword-only argument: b",
+        "def func(a, *args, b): pass",
+        "func(5)");
+
+    checkEvalError(
+        "func() missing 1 required keyword-only argument: b",
+        "def func(a, *args, b): pass",
+        "func(5, 6)");
+
+    exec("def func(a, *args, b, c = 'c'): return a + str(args) + b + c");
+    assertThat(eval("func('a', b = 'b')")).isEqualTo("a()bc");
+    assertThat(eval("func('a', b = 'b', c = 'd')")).isEqualTo("a()bd");
+    assertThat(eval("func('a', 1, 2, b = 'b')")).isEqualTo("a(1, 2)bc");
+    assertThat(eval("func('a', 1, 2, b = 'b', c = 'd')")).isEqualTo("a(1, 2)bd");
+  }
+
+  @Test
+  public void testCannotPassResidualsByName() throws Exception {
+    checkEvalError("f() got unexpected keyword argument: args", "def f(*args): pass", "f(args=[])");
+
+    exec("def f(**kwargs): return kwargs");
+    assertThat(Starlark.repr(eval("f(kwargs=1)"))).isEqualTo("{\"kwargs\": 1}");
+  }
+
+  @Test
+  public void testKeywordOnlyAfterStarArg() throws Exception {
+    checkEvalError(
+        "func() missing 1 required keyword-only argument: c",
+        "def func(a, *b, c): pass",
+        "func(5)");
+
+    checkEvalError(
+        "func() missing 1 required keyword-only argument: c",
+        "def func(a, *b, c): pass",
+        "func(5, 6, 7)");
+
+    exec("def func(a, *b, c): return a + str(b) + c");
+    assertThat(eval("func('a', c = 'c')")).isEqualTo("a()c");
+    assertThat(eval("func('a', 1, c = 'c')")).isEqualTo("a(1,)c");
+    assertThat(eval("func('a', 1, 2, c = 'c')")).isEqualTo("a(1, 2)c");
   }
 
   @Test
   public void testKwargsBadKey() throws Exception {
     checkEvalError(
-        "keywords must be strings, not 'int'",
+        "keywords must be strings, not int", //
         "def func(a, b): return a + b",
         "func('a', **{3: 1})");
   }
@@ -321,28 +416,31 @@ public class FunctionTest extends EvaluationTestCase {
   @Test
   public void testKwargsIsNotDict() throws Exception {
     checkEvalError(
-        "argument after ** must be a dictionary, not 'int'",
+        "argument after ** must be a dict, not int",
         "def func(a, b): return a + b",
         "func('a', **42)");
   }
 
   @Test
   public void testKwargsCollision() throws Exception {
-    checkEvalError("argument 'b' passed both by position and by name in call to func(a, b)",
+    checkEvalError(
+        "func() got multiple values for parameter 'b'",
         "def func(a, b): return a + b",
         "func('a', 'b', **{'b': 'foo'})");
   }
 
   @Test
   public void testKwargsCollisionWithNamed() throws Exception {
-    checkEvalError("duplicate keyword 'b' in call to func",
+    checkEvalError(
+        "func() got multiple values for parameter 'b'",
         "def func(a, b): return a + b",
         "func('a', b = 'b', **{'b': 'foo'})");
   }
 
   @Test
   public void testDefaultArguments2() throws Exception {
-    eval("a = 2",
+    exec(
+        "a = 2",
         "def foo(x=a): return x",
         "def bar():",
         "  a = 3",
@@ -353,18 +451,21 @@ public class FunctionTest extends EvaluationTestCase {
 
   @Test
   public void testMixingPositionalOptional() throws Exception {
-    eval("def f(name, value = '', optional = ''): return value",
-        "v = f('name', 'value')\n");
+    exec(
+        "def f(name, value = '', optional = ''):", //
+        "  return value",
+        "v = f('name', 'value')");
     assertThat(lookup("v")).isEqualTo("value");
   }
 
   @Test
   public void testStarArg() throws Exception {
-    eval("def f(name, value = '1', optional = '2'): return name + value + optional",
+    exec(
+        "def f(name, value = '1', optional = '2'): return name + value + optional",
         "v1 = f(*['name', 'value'])",
         "v2 = f('0', *['name', 'value'])",
-        "v3 = f('0', *['b'], optional = '3')",
-        "v4 = f(*[],name='a')\n");
+        "v3 = f('0', optional = '3', *['b'])",
+        "v4 = f(name='a', *[])\n");
     assertThat(lookup("v1")).isEqualTo("namevalue2");
     assertThat(lookup("v2")).isEqualTo("0namevalue");
     assertThat(lookup("v3")).isEqualTo("0b3");
@@ -372,9 +473,9 @@ public class FunctionTest extends EvaluationTestCase {
   }
 
   @Test
-  public void testIncompatibleStarParam() throws Exception {
-    env = newEnvironmentWithSkylarkOptions("--incompatible_disallow_keyword_only_args=true");
-    eval("def f(name, value = '1', optional = '2', *rest):",
+  public void testStarParam() throws Exception {
+    exec(
+        "def f(name, value = '1', optional = '2', *rest):",
         "  r = name + value + optional + '|'",
         "  for x in rest: r += x",
         "  return r",
@@ -384,5 +485,85 @@ public class FunctionTest extends EvaluationTestCase {
     assertThat(lookup("v1")).isEqualTo("abc|de");
     assertThat(lookup("v2")).isEqualTo("acb|");
     assertThat(lookup("v3")).isEqualTo("a12|");
+  }
+
+  @Test
+  public void testKwParam() throws Exception {
+    exec(
+        "def foo(a, b, c=3, d=4, g=7, h=8, *args, **kwargs):\n"
+            + "  return (a, b, c, d, g, h, args, kwargs)\n"
+            + "v1 = foo(1, 2)\n"
+            + "v2 = foo(1, h=9, i=0, *['x', 'y', 'z', 't'])\n"
+            + "v3 = foo(1, i=0, *[2, 3, 4, 5, 6, 7, 8])\n"
+            + "def bar(**kwargs):\n"
+            + "  return kwargs\n"
+            + "b1 = bar(name='foo', type='jpg', version=42).items()\n"
+            + "b2 = bar()\n");
+
+    assertThat(Starlark.repr(lookup("v1"))).isEqualTo("(1, 2, 3, 4, 7, 8, (), {})");
+    assertThat(Starlark.repr(lookup("v2")))
+        .isEqualTo("(1, \"x\", \"y\", \"z\", \"t\", 9, (), {\"i\": 0})");
+    assertThat(Starlark.repr(lookup("v3"))).isEqualTo("(1, 2, 3, 4, 5, 6, (7, 8), {\"i\": 0})");
+    assertThat(Starlark.repr(lookup("b1")))
+        .isEqualTo("[(\"name\", \"foo\"), (\"type\", \"jpg\"), (\"version\", 42)]");
+    assertThat(Starlark.repr(lookup("b2"))).isEqualTo("{}");
+  }
+
+  @Test
+  public void testTrailingCommas() throws Exception {
+    // Test that trailing commas are allowed in function definitions and calls
+    // even after last *args or **kwargs expressions, like python3
+    exec(
+        "def f(*args, **kwargs): pass\n"
+            + "v1 = f(1,)\n"
+            + "v2 = f(*(1,2),)\n"
+            + "v3 = f(a=1,)\n"
+            + "v4 = f(**{\"a\": 1},)\n");
+
+    assertThat(Starlark.repr(lookup("v1"))).isEqualTo("None");
+    assertThat(Starlark.repr(lookup("v2"))).isEqualTo("None");
+    assertThat(Starlark.repr(lookup("v3"))).isEqualTo("None");
+    assertThat(Starlark.repr(lookup("v4"))).isEqualTo("None");
+  }
+
+  @Test
+  public void testCalls() throws Exception {
+    exec("def f(a, b = None): return a, b");
+
+    assertThat(Starlark.repr(eval("f(1)"))).isEqualTo("(1, None)");
+    assertThat(Starlark.repr(eval("f(1, 2)"))).isEqualTo("(1, 2)");
+    assertThat(Starlark.repr(eval("f(a=1)"))).isEqualTo("(1, None)");
+    assertThat(Starlark.repr(eval("f(a=1, b=2)"))).isEqualTo("(1, 2)");
+    assertThat(Starlark.repr(eval("f(b=2, a=1)"))).isEqualTo("(1, 2)");
+
+    checkEvalError(
+        "f() missing 1 required positional argument: a", //
+        "f()");
+    checkEvalError(
+        "f() accepts no more than 2 positional arguments but got 3", //
+        "f(1, 2, 3)");
+    checkEvalError(
+        "f() got unexpected keyword arguments: c, d", //
+        "f(1, 2, c=3, d=4)");
+    checkEvalError(
+        "f() missing 1 required positional argument: a", //
+        "f(b=2)");
+    checkEvalError(
+        "f() missing 1 required positional argument: a", //
+        "f(b=2)");
+    checkEvalError(
+        "f() got multiple values for parameter 'a'", //
+        "f(2, a=1)");
+    checkEvalError(
+        "f() got unexpected keyword argument: c", //
+        "f(b=2, a=1, c=3)");
+
+    exec("def g(*, one, two, three): pass");
+    checkEvalError(
+        "g() got unexpected keyword argument: tree (did you mean 'three'?)", //
+        "g(tree=3)");
+    checkEvalError(
+        "g() does not accept positional arguments, but got 3", //
+        "g(1, 2 ,3)");
   }
 }

@@ -20,9 +20,9 @@
 
 #include <string>
 
-#if defined(COMPILER_MSVC) && !defined(__alignof__)
+#if defined(_MSC_VER) && !defined(__alignof__)
 #define __alignof__ __alignof
-#endif  // COMPILER_MSVC && !__alignof__
+#endif  // _MSC_VER && !__alignof__
 
 namespace blaze_util {
 
@@ -36,7 +36,7 @@ class Md5Digest {
   Md5Digest(const Md5Digest& original);
 
   // the MD5 digest is always 128 bits = 16 bytes
-  static const int kDigestLength = 16;
+  static constexpr int kDigestLength = 16;
 
   // Resets the context so that it can be used to calculate another
   // MD5 digest. The context is in the same state as if it had just

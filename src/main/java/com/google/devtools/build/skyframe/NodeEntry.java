@@ -13,10 +13,12 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
 import java.util.Collection;
+import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -71,8 +73,19 @@ public interface NodeEntry extends ThinNodeEntry {
      * did.
      */
     NEEDS_REBUILDING,
+    /**
+     * A forced rebuilding is required, likely because of a recoverable inconsistency in the current
+     * build.
+     */
+    NEEDS_FORCED_REBUILDING,
     /** A rebuilding is in progress. */
-    REBUILDING
+    REBUILDING,
+    /**
+     * A forced rebuilding is in progress, likely because of a transient error on the previous build
+     * or a recoverable inconsistency in the current one. The distinction between this and {@link
+     * #REBUILDING} is only needed for internal sanity checks.
+     */
+    FORCED_REBUILDING
   }
 
   /**
@@ -93,6 +106,16 @@ public interface NodeEntry extends ThinNodeEntry {
    */
   @ThreadSafe
   Iterable<SkyKey> getDirectDeps() throws InterruptedException;
+
+  /**
+   * Returns {@code true} if this node has at least one direct dep.
+   *
+   * <p>Prefer calling this over {@link #getDirectDeps} if possible.
+   *
+   * <p>This method may only be called after the evaluation of this node is complete.
+   */
+  @ThreadSafe
+  boolean hasAtLeastOneDep() throws InterruptedException;
 
   /** Removes a reverse dependency. */
   @ThreadSafe
@@ -119,12 +142,17 @@ public interface NodeEntry extends ThinNodeEntry {
 
   /**
    * Returns raw {@link SkyValue} stored in this entry, which may include metadata associated with
-   * it (like events and errors). This method may only be called after the evaluation of this node
-   * is complete, i.e., after {@link #setValue} has been called.
+   * it (like events and errors).
+   *
+   * <p>This method returns {@code null} if the evaluation of this node is not complete, i.e.,
+   * after node creation or dirtying and before {@link #setValue} has been called. Callers should
+   * assert that the returned value is not {@code null} whenever they expect the node should be
+   * done.
    *
    * <p>Use the static methods of {@link ValueWithMetadata} to extract metadata if necessary.
    */
   @ThreadSafe
+  @Nullable
   SkyValue getValueMaybeWithMetadata() throws InterruptedException;
 
   /** Returns the value, even if dirty or changed. Returns null otherwise. */
@@ -203,16 +231,6 @@ public interface NodeEntry extends ThinNodeEntry {
   Iterable<SkyKey> getAllReverseDepsForNodeBeingDeleted();
 
   /**
-   * Tell this node that one of its dependencies is now done. Callers must check the return value,
-   * and if true, they must re-schedule this node for evaluation. Equivalent to
-   * {@code #signalDep(Long.MAX_VALUE)}. Since this entry was last evaluated at a version less than
-   * {@link Long#MAX_VALUE}, informing this entry that a child of it has version
-   * {@link Long#MAX_VALUE} will force it to re-evaluate.
-   */
-  @ThreadSafe
-  boolean signalDep();
-
-  /**
    * Tell this entry that one of its dependencies is now done. Callers must check the return value,
    * and if true, they must re-schedule this node for evaluation.
    *
@@ -224,23 +242,47 @@ public interface NodeEntry extends ThinNodeEntry {
    * dirtied and checks its dep on child. child signals parent with version v2. That should not in
    * and of itself trigger a rebuild, since parent has already rebuilt with child at v2.
    *
-   *
    * @param childVersion If this entry {@link #isDirty()} and the last version at which this entry
-   * was evaluated did not include the changes at version {@code childVersion} (for instance, if
-   * {@code childVersion} is after the last version at which this entry was evaluated), then this
-   * entry records that one of its children has changed since it was last evaluated. Thus, the next
-   * call to {@link #getDirtyState()} will return {@link DirtyState#NEEDS_REBUILDING}.
+   *     was evaluated did not include the changes at version {@code childVersion} (for instance, if
+   *     {@code childVersion} is after the last version at which this entry was evaluated), then
+   *     this entry records that one of its children has changed since it was last evaluated. Thus,
+   *     the next call to {@link #getDirtyState()} will return {@link DirtyState#NEEDS_REBUILDING}.
+   * @param childForDebugging for use in debugging (can be used to identify specific children that
+   *     invalidate this node)
    */
   @ThreadSafe
-  boolean signalDep(Version childVersion);
+  boolean signalDep(Version childVersion, @Nullable SkyKey childForDebugging);
 
   /**
    * Marks this entry as up-to-date at this version.
    *
-   * @return {@link Set} of reverse dependencies to signal that this node is done.
+   * @return {@link NodeValueAndRdepsToSignal} containing the SkyValue and reverse deps to signal.
    */
   @ThreadSafe
-  Set<SkyKey> markClean() throws InterruptedException;
+  NodeValueAndRdepsToSignal markClean() throws InterruptedException;
+
+  /**
+   * Returned by {@link #markClean} after making a node as clean. This is an aggregate object that
+   * contains the NodeEntry's SkyValue and its reverse dependencies that signal this node is done (a
+   * subset of all of the node's reverse dependencies).
+   */
+  final class NodeValueAndRdepsToSignal {
+    private final SkyValue value;
+    private final Set<SkyKey> rDepsToSignal;
+
+    public NodeValueAndRdepsToSignal(SkyValue value, Set<SkyKey> rDepsToSignal) {
+      this.value = value;
+      this.rDepsToSignal = rDepsToSignal;
+    }
+
+    SkyValue getValue() {
+      return this.value;
+    }
+
+    Set<SkyKey> getRdepsToSignal() {
+      return this.rDepsToSignal;
+    }
+  }
 
   /**
    * Forces this node to be re-evaluated, even if none of its dependencies are known to have
@@ -287,7 +329,7 @@ public interface NodeEntry extends ThinNodeEntry {
    * @see DirtyBuildingState#getNextDirtyDirectDeps()
    */
   @ThreadSafe
-  Collection<SkyKey> getNextDirtyDirectDeps() throws InterruptedException;
+  List<SkyKey> getNextDirtyDirectDeps() throws InterruptedException;
 
   /**
    * Returns all deps of a node that has not yet finished evaluating. In other words, if a node has
@@ -325,7 +367,7 @@ public interface NodeEntry extends ThinNodeEntry {
    * always produce the same result until the entry finishes evaluation. Contrast with {@link
    * #getAllDirectDepsForIncompleteNode}.
    */
-  Set<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
+  ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
 
   /**
    * Notifies a node that it is about to be rebuilt. This method can only be called if the node
@@ -355,8 +397,18 @@ public interface NodeEntry extends ThinNodeEntry {
   void removeUnfinishedDeps(Set<SkyKey> unfinishedDeps);
 
   /**
+   * Erases all stored work during this evaluation from this entry, namely all temporary direct
+   * deps. The entry will be as if it had never evaluated at this version. Called after the {@link
+   * SkyFunction} for this entry returns {@link SkyFunction.Restart}, indicating that something went
+   * wrong in external state and the evaluation has to be restarted.
+   */
+  @ThreadSafe
+  void resetForRestartFromScratch();
+
+  /**
    * Adds the temporary direct deps given in {@code helper} and returns the set of unique deps
-   * added.
+   * added. It is the users responsibility to ensure that there are no elements in common between
+   * helper and the already existing temporary direct deps.
    */
   @ThreadSafe
   Set<SkyKey> addTemporaryDirectDeps(GroupedListHelper<SkyKey> helper);
@@ -367,7 +419,9 @@ public interface NodeEntry extends ThinNodeEntry {
    * checking.
    */
   @ThreadSafe
-  void addTemporaryDirectDepsGroupToDirtyEntry(Collection<SkyKey> group);
+  void addTemporaryDirectDepsGroupToDirtyEntry(List<SkyKey> group);
+
+  void addExternalDep();
 
   /**
    * Returns true if the node is ready to be evaluated, i.e., it has been signaled exactly as many

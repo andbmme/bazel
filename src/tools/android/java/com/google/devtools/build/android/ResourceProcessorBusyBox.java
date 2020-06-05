@@ -14,14 +14,28 @@
 
 package com.google.devtools.build.android;
 
+import com.google.devtools.build.android.aapt2.Aapt2Exception;
+import com.google.devtools.build.android.resources.JavaIdentifierValidator.InvalidJavaIdentifier;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkRequest;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkResponse;
 import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
+import com.google.devtools.common.options.OptionsParsingException;
 import com.google.devtools.common.options.ShellQuotedParamsFilePreProcessor;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PrintStream;
 import java.nio.file.FileSystems;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Properties;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Provides an entry point for the resource processing stages.
@@ -33,10 +47,9 @@ import java.nio.file.FileSystems;
  * <pre>
  * Example Usage:
  *   java/com/google/devtools/build/android/ResourceProcessorBusyBox\
- *      --tool PACKAGE\
+ *      --tool AAPT2_PACKAGE\
  *      --sdkRoot path/to/sdk\
  *      --aapt path/to/sdk/aapt\
- *      --annotationJar path/to/sdk/annotationJar\
  *      --adb path/to/sdk/adb\
  *      --zipAlign path/to/sdk/zipAlign\
  *      --androidJar path/to/sdk/androidJar\
@@ -50,46 +63,16 @@ import java.nio.file.FileSystems;
  */
 public class ResourceProcessorBusyBox {
   static enum Tool {
-    PACKAGE() {
-      @Override
-      void call(String[] args) throws Exception {
-        AndroidResourceProcessingAction.main(args);
-      }
-    },
-    VALIDATE() {
-      @Override
-      void call(String[] args) throws Exception {
-        AndroidResourceValidatorAction.main(args);
-      }
-    },
     GENERATE_BINARY_R() {
       @Override
       void call(String[] args) throws Exception {
         RClassGeneratorAction.main(args);
       }
     },
-    GENERATE_LIBRARY_R() {
-      @Override
-      void call(String[] args) throws Exception {
-        LibraryRClassGeneratorAction.main(args);
-      }
-    },
-    GENERATE_ROBOLECTRIC_R() {
-      @Override
-      void call(String[] args) throws Exception {
-        GenerateRobolectricResourceSymbolsAction.main(args);
-      }
-    },
     PARSE() {
       @Override
       void call(String[] args) throws Exception {
         AndroidResourceParsingAction.main(args);
-      }
-    },
-    MERGE() {
-      @Override
-      void call(String[] args) throws Exception {
-        AndroidResourceMergingAction.main(args);
       }
     },
     MERGE_COMPILED() {
@@ -102,12 +85,6 @@ public class ResourceProcessorBusyBox {
       @Override
       void call(String[] args) throws Exception {
         AarGeneratorAction.main(args);
-      }
-    },
-    SHRINK() {
-      @Override
-      void call(String[] args) throws Exception {
-        ResourceShrinkerAction.main(args);
       }
     },
     MERGE_MANIFEST() {
@@ -139,10 +116,31 @@ public class ResourceProcessorBusyBox {
       void call(String[] args) throws Exception {
         Aapt2ResourceShrinkingAction.main(args);
       }
+    },
+    AAPT2_OPTIMIZE() {
+      @Override
+      void call(String[] args) throws Exception {
+        Aapt2OptimizeAction.main(args);
+      }
+    },
+    MERGE_ASSETS() {
+      @Override
+      void call(String[] args) throws Exception {
+        AndroidAssetMergingAction.main(args);
+      }
+    },
+    PROCESS_DATABINDING {
+      @Override
+      void call(String[] args) throws Exception {
+        AndroidDataBindingProcessingAction.main(args);
+      }
     };
 
     abstract void call(String[] args) throws Exception;
   }
+
+  private static final Logger logger = Logger.getLogger(ResourceProcessorBusyBox.class.getName());
+  private static final Properties properties = loadSiteCustomizations();
 
   /** Converter for the Tool enum. */
   public static final class ToolConverter extends EnumConverter<Tool> {
@@ -155,28 +153,119 @@ public class ResourceProcessorBusyBox {
   /** Flag specifications for this action. */
   public static final class Options extends OptionsBase {
     @Option(
-      name = "tool",
-      defaultValue = "null",
-      converter = ToolConverter.class,
-      category = "input",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "The processing tool to execute. "
-              + "Valid tools: PACKAGE, VALIDATE, GENERATE_BINARY_R, GENERATE_LIBRARY_R, PARSE, "
-              + "MERGE, GENERATE_AAR, SHRINK, MERGE_MANIFEST, COMPILE_LIBRARY_RESOURCES, "
-              + "LINK_STATIC_LIBRARY, AAPT2_PACKAGE, SHRINK_AAPT2, MERGE_COMPILED."
-    )
+        name = "tool",
+        defaultValue = "null",
+        converter = ToolConverter.class,
+        category = "input",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "The processing tool to execute. "
+                + "Valid tools: GENERATE_BINARY_R, PARSE, "
+                + "GENERATE_AAR, MERGE_MANIFEST, COMPILE_LIBRARY_RESOURCES, "
+                + "LINK_STATIC_LIBRARY, AAPT2_PACKAGE, SHRINK_AAPT2, MERGE_COMPILED.")
     public Tool tool;
   }
 
   public static void main(String[] args) throws Exception {
-    OptionsParser optionsParser = OptionsParser.newOptionsParser(Options.class);
-    optionsParser.setAllowResidue(true);
-    optionsParser.enableParamsFileSupport(
-        new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()));
-    optionsParser.parse(args);
-    Options options = optionsParser.getOptions(Options.class);
-    options.tool.call(optionsParser.getResidue().toArray(new String[0]));
+    // It's cheaper and cleaner to detect for a single flag to start worker mode without having to
+    // initialize Options/OptionsParser here. This keeps the processRequest interface minimal and
+    // minimizes moving option state between these methods.
+    if (args.length == 1 && args[0].equals("--persistent_worker")) {
+      System.exit(runPersistentWorker());
+    } else {
+      System.exit(processRequest(Arrays.asList(args)));
+    }
+  }
+
+  private static int runPersistentWorker() throws Exception {
+    ByteArrayOutputStream buf = new ByteArrayOutputStream();
+    PrintStream ps = new PrintStream(buf, true);
+    PrintStream realStdOut = System.out;
+    PrintStream realStdErr = System.err;
+    try {
+      // Redirect all stdout and stderr output for logging.
+      System.setOut(ps);
+      System.setErr(ps);
+
+      while (true) {
+        try {
+          WorkRequest request = WorkRequest.parseDelimitedFrom(System.in);
+          if (request == null) {
+            break;
+          }
+
+          int exitCode = processRequest(request.getArgumentsList());
+          ps.flush();
+
+          WorkResponse.newBuilder()
+              .setExitCode(exitCode)
+              .setOutput(buf.toString())
+              .build()
+              .writeDelimitedTo(realStdOut);
+
+          realStdOut.flush();
+          buf.reset();
+        } catch (IOException e) {
+          logger.severe(e.getMessage());
+          e.printStackTrace(realStdErr);
+          return 1;
+        }
+      }
+    } finally {
+      System.setOut(realStdOut);
+      System.setErr(realStdErr);
+    }
+    return 0;
+  }
+
+  private static int processRequest(List<String> args) throws Exception {
+    OptionsParser optionsParser =
+        OptionsParser.builder()
+            .optionsClasses(Options.class)
+            .allowResidue(true)
+            .argsPreProcessor(new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()))
+            .build();
+    Options options;
+    try {
+      optionsParser.parse(args);
+      options = optionsParser.getOptions(Options.class);
+      options.tool.call(optionsParser.getResidue().toArray(new String[0]));
+    } catch (UserException e) {
+      // UserException is for exceptions that shouldn't have stack traces recorded, including
+      // AndroidDataMerger.MergeConflictException.
+      logger.log(Level.SEVERE, e.getMessage());
+      return 1;
+    } catch (OptionsParsingException | IOException | Aapt2Exception | InvalidJavaIdentifier e) {
+      logSuppressed(e);
+      throw e;
+    } catch (Exception e) {
+      // TODO(jingwen): consider just removing this block.
+      logger.log(Level.SEVERE, "Error during processing", e);
+      throw e;
+    }
+    return 0;
+  }
+
+  private static void logSuppressed(Throwable e) {
+    Arrays.stream(e.getSuppressed()).map(Throwable::getMessage).forEach(logger::severe);
+  }
+
+  /** Returns a flag from {@code rpbb.properties}. */
+  public static boolean getProperty(String name) {
+    return Boolean.parseBoolean(properties.getProperty(name, "false"));
+  }
+
+  private static Properties loadSiteCustomizations() {
+    Properties properties = new Properties();
+    try (InputStream propertiesInput =
+        ResourceProcessorBusyBox.class.getResourceAsStream("rpbb.properties")) {
+      if (propertiesInput != null) {
+        properties.load(propertiesInput);
+      }
+    } catch (IOException e) {
+      logger.log(Level.SEVERE, "Error loading site customizations", e);
+    }
+    return properties;
   }
 }

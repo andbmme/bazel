@@ -14,150 +14,136 @@
 
 package com.google.devtools.build.lib.analysis.platform;
 
-import static com.google.common.collect.ImmutableListMultimap.flatteningToImmutableListMultimap;
-import static com.google.common.collect.ImmutableListMultimap.toImmutableListMultimap;
-import static java.util.stream.Collectors.joining;
-
-import com.google.common.base.Functions;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableListMultimap;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ListMultimap;
-import com.google.common.collect.Streams;
+import com.google.devtools.build.lib.analysis.platform.ConstraintCollection.DuplicateConstraintException;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.NativeInfo;
-import com.google.devtools.build.lib.packages.NativeProvider;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
+import com.google.devtools.build.lib.skylarkbuildapi.platform.PlatformInfoApi;
+import com.google.devtools.build.lib.syntax.Dict;
 import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.FunctionSignature;
-import com.google.devtools.build.lib.syntax.SkylarkList;
-import com.google.devtools.build.lib.syntax.SkylarkType;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.lib.syntax.Printer;
+import com.google.devtools.build.lib.syntax.Sequence;
+import com.google.devtools.build.lib.syntax.Starlark;
+import com.google.devtools.build.lib.syntax.StarlarkThread;
+import com.google.devtools.build.lib.util.Fingerprint;
+import com.google.devtools.build.lib.util.StringUtilities;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import javax.annotation.Nullable;
 
 /** Provider for a platform, which is a group of constraints and values. */
-@SkylarkModule(
-  name = "PlatformInfo",
-  doc = "Provides access to data about a specific platform.",
-  category = SkylarkModuleCategory.PROVIDER
-)
 @Immutable
-public class PlatformInfo extends NativeInfo {
+@AutoCodec
+public class PlatformInfo extends NativeInfo
+    implements PlatformInfoApi<ConstraintSettingInfo, ConstraintValueInfo> {
 
-  /** Name used in Skylark for accessing this provider. */
-  public static final String SKYLARK_NAME = "PlatformInfo";
+  /**
+   * The literal key that will be used to copy the {@link #remoteExecutionProperties} from the
+   * parent {@link PlatformInfo} into a new {@link PlatformInfo}'s {@link
+   * #remoteExecutionProperties}.
+   */
+  public static final String PARENT_REMOTE_EXECUTION_KEY = "{PARENT_REMOTE_EXECUTION_PROPERTIES}";
 
-  private static final FunctionSignature.WithValues<Object, SkylarkType> SIGNATURE =
-      FunctionSignature.WithValues.create(
-          FunctionSignature.of(
-              /*numMandatoryPositionals=*/ 2,
-              /*numOptionalPositionals=*/ 0,
-              /*numMandatoryNamedOnly*/ 0,
-              /*starArg=*/ false,
-              /*kwArg=*/ false,
-              /*names=*/ "label",
-              "constraint_values"),
-          /*defaultValues=*/ null,
-          /*types=*/ ImmutableList.<SkylarkType>of(
-              SkylarkType.of(Label.class),
-              SkylarkType.Combination.of(
-                  SkylarkType.LIST, SkylarkType.of(ConstraintValueInfo.class))));
+  /** Name used in Starlark for accessing this provider. */
+  public static final String STARLARK_NAME = "PlatformInfo";
 
-  /** Skylark constructor and identifier for this provider. */
-  public static final NativeProvider<PlatformInfo> SKYLARK_CONSTRUCTOR =
-      new NativeProvider<PlatformInfo>(PlatformInfo.class, SKYLARK_NAME, SIGNATURE) {
-        @Override
-        protected PlatformInfo createInstanceFromSkylark(Object[] args, Location loc)
-            throws EvalException {
-          // Based on SIGNATURE above, the args are label, constraint_values.
+  /** Provider singleton constant. */
+  public static final BuiltinProvider<PlatformInfo> PROVIDER = new Provider();
 
-          Label label = (Label) args[0];
-          List<ConstraintValueInfo> constraintValues =
-              SkylarkList.castSkylarkListOrNoneToList(
-                  args[1], ConstraintValueInfo.class, "constraint_values");
-          try {
-            return builder()
-                .setLabel(label)
-                .addConstraints(constraintValues)
-                .setLocation(loc)
-                .build();
-          } catch (DuplicateConstraintException dce) {
-            throw new EvalException(
-                loc, String.format("Cannot create PlatformInfo: %s", dce.getMessage()));
-          }
-        }
-      };
-
-  private final Label label;
-  private final ImmutableMap<ConstraintSettingInfo, ConstraintValueInfo> constraints;
-  private final String remoteExecutionProperties;
-
-  private PlatformInfo(
-      Label label,
-      ImmutableList<ConstraintValueInfo> constraints,
-      String remoteExecutionProperties,
-      Location location) {
-    super(
-        SKYLARK_CONSTRUCTOR,
-        ImmutableMap.<String, Object>of(
-            "label", label,
-            "constraints", constraints),
-        location);
-
-    this.label = label;
-    this.remoteExecutionProperties = remoteExecutionProperties;
-
-    ImmutableMap.Builder<ConstraintSettingInfo, ConstraintValueInfo> constraintsBuilder =
-        new ImmutableMap.Builder<>();
-    for (ConstraintValueInfo constraint : constraints) {
-      constraintsBuilder.put(constraint.constraint(), constraint);
+  /** Provider for {@link ToolchainInfo} objects. */
+  private static class Provider extends BuiltinProvider<PlatformInfo>
+      implements PlatformInfoApi.Provider<
+          ConstraintSettingInfo, ConstraintValueInfo, PlatformInfo> {
+    private Provider() {
+      super(STARLARK_NAME, PlatformInfo.class);
     }
-    this.constraints = constraintsBuilder.build();
+
+    @Override
+    public PlatformInfo platformInfo(
+        Label label,
+        Object parentUnchecked,
+        Sequence<?> constraintValuesUnchecked,
+        Object execPropertiesUnchecked,
+        StarlarkThread thread)
+        throws EvalException {
+      PlatformInfo.Builder builder = PlatformInfo.builder();
+      builder.setLabel(label);
+      if (parentUnchecked != Starlark.NONE) {
+        builder.setParent((PlatformInfo) parentUnchecked);
+      }
+      if (!constraintValuesUnchecked.isEmpty()) {
+        builder.addConstraints(
+            Sequence.cast(
+                constraintValuesUnchecked, ConstraintValueInfo.class, "constraint_values"));
+      }
+      if (execPropertiesUnchecked != null) {
+        Dict<String, String> execProperties =
+            Dict.noneableCast(
+                execPropertiesUnchecked, String.class, String.class, "exec_properties");
+        builder.setExecProperties(ImmutableMap.copyOf(execProperties));
+      }
+      builder.setLocation(thread.getCallerLocation());
+
+      try {
+        return builder.build();
+      } catch (DuplicateConstraintException | ExecPropertiesException e) {
+        throw new EvalException(null, e);
+      }
+    }
   }
 
-  @SkylarkCallable(
-    name = "label",
-    doc = "The label of the target that created this platform.",
-    structField = true
-  )
+  private final Label label;
+  private final ConstraintCollection constraints;
+  private final String remoteExecutionProperties;
+  /** execProperties will deprecate and replace remoteExecutionProperties */
+  private final ImmutableMap<String, String> execProperties;
+
+  @AutoCodec.Instantiator
+  @VisibleForSerialization
+  PlatformInfo(
+      Label label,
+      ConstraintCollection constraints,
+      String remoteExecutionProperties,
+      ImmutableMap<String, String> execProperties,
+      Location location) {
+    super(PROVIDER, location);
+
+    this.label = label;
+    this.constraints = constraints;
+    this.remoteExecutionProperties = Strings.nullToEmpty(remoteExecutionProperties);
+    this.execProperties = execProperties;
+  }
+
+  @Override
   public Label label() {
     return label;
   }
 
-  @SkylarkCallable(
-    name = "constraints",
-    doc =
-        "The <a href=\"ConstraintValueInfo.html\">ConstraintValueInfo</a> instances that define "
-            + "this platform.",
-    structField = true
-  )
-  public Iterable<ConstraintValueInfo> constraints() {
-    return constraints.values();
+  @Override
+  public ConstraintCollection constraints() {
+    return constraints;
   }
 
-  /**
-   * Returns the {@link ConstraintValueInfo} for the given {@link ConstraintSettingInfo}, or {@code
-   * null} if none exists.
-   */
-  @Nullable
-  public ConstraintValueInfo getConstraint(ConstraintSettingInfo constraint) {
-    return constraints.get(constraint);
-  }
-
-  @SkylarkCallable(
-    name = "remoteExecutionProperties",
-    doc = "Properties that are available for the use of remote execution.",
-    structField = true
-  )
+  @Override
   public String remoteExecutionProperties() {
     return remoteExecutionProperties;
+  }
+
+  @Override
+  public ImmutableMap<String, String> execProperties() {
+    return execProperties;
+  }
+
+  @Override
+  public void repr(Printer printer) {
+    printer.format("PlatformInfo(%s, constraints=%s)", label.toString(), constraints.toString());
   }
 
   /** Returns a new {@link Builder} for creating a fresh {@link PlatformInfo} instance. */
@@ -165,12 +151,41 @@ public class PlatformInfo extends NativeInfo {
     return new Builder();
   }
 
+  /** Add this platform to the given fingerprint. */
+  public void addTo(Fingerprint fp) {
+    fp.addString(label.toString());
+    fp.addNullableString(remoteExecutionProperties);
+    fp.addStringMap(execProperties);
+    constraints.addToFingerprint(fp);
+  }
+
   /** Builder class to facilitate creating valid {@link PlatformInfo} instances. */
   public static class Builder {
+
+    @Nullable private PlatformInfo parent = null;
     private Label label;
-    private final List<ConstraintValueInfo> constraints = new ArrayList<>();
-    private String remoteExecutionProperties;
+    private final ConstraintCollection.Builder constraints = ConstraintCollection.builder();
+    private String remoteExecutionProperties = null;
+    @Nullable private ImmutableMap<String, String> execProperties;
     private Location location = Location.BUILTIN;
+
+    /**
+     * Sets the parent {@link PlatformInfo} that this platform inherits from. Constraint values set
+     * directly on this instance will be kept, but any other constraint settings will be found from
+     * the parent, if set.
+     *
+     * @param parent the platform that is the parent of this platform
+     * @return the {@link Builder} instance for method chaining
+     */
+    public Builder setParent(@Nullable PlatformInfo parent) {
+      this.parent = parent;
+      if (parent == null) {
+        this.constraints.parent(null);
+      } else {
+        this.constraints.parent(parent.constraints);
+      }
+      return this;
+    }
 
     /**
      * Sets the {@link Label} for this {@link PlatformInfo}.
@@ -190,7 +205,7 @@ public class PlatformInfo extends NativeInfo {
      * @return the {@link Builder} instance for method chaining
      */
     public Builder addConstraint(ConstraintValueInfo constraint) {
-      this.constraints.add(constraint);
+      this.constraints.addConstraints(constraint);
       return this;
     }
 
@@ -201,21 +216,59 @@ public class PlatformInfo extends NativeInfo {
      * @return the {@link Builder} instance for method chaining
      */
     public Builder addConstraints(Iterable<ConstraintValueInfo> constraints) {
-      for (ConstraintValueInfo constraint : constraints) {
-        this.addConstraint(constraint);
-      }
-
+      this.constraints.addConstraints(constraints);
       return this;
     }
 
+    /** Returns the remote execution properties. */
+    @Nullable
+    public String getRemoteExecutionProperties() {
+      return remoteExecutionProperties;
+    }
+
+    /** Returns the exec properties. */
+    @Nullable
+    public ImmutableMap<String, String> getExecProperties() {
+      return execProperties;
+    }
+
     /**
-     * Sets the data being sent to a potential remote executor.
+     * Sets the data being sent to a potential remote executor. If there is a parent {@link
+     * PlatformInfo} set, the literal string "{PARENT_REMOTE_EXECUTION_PROPERTIES}" will be replaced
+     * by the {@link #remoteExecutionProperties} from that parent. Also if the parent is set, and
+     * this instance's {@link #remoteExecutionProperties} is blank or unset, the parent's will be
+     * used directly.
+     *
+     * <p>Specific examples:
+     *
+     * <ul>
+     *   <li>parent.remoteExecutionProperties is unset: use the child's value
+     *   <li>parent.remoteExecutionProperties is set, child.remoteExecutionProperties is unset: use
+     *       the parent's value
+     *   <li>parent.remoteExecutionProperties is set, child.remoteExecutionProperties is set, and
+     *       does not contain {PARENT_REMOTE_EXECUTION_PROPERTIES}: use the child's value
+     *   <li>parent.remoteExecutionProperties is set, child.remoteExecutionProperties is set, and
+     *       does contain {PARENT_REMOTE_EXECUTION_PROPERTIES}: use the child's value, but
+     *       substitute the parent's value for {PARENT_REMOTE_EXECUTION_PROPERTIES}
+     * </ul>
      *
      * @param properties the properties to be added
      * @return the {@link Builder} instance for method chaining
      */
     public Builder setRemoteExecutionProperties(String properties) {
       this.remoteExecutionProperties = properties;
+      return this;
+    }
+
+    /**
+     * Sets the execution properties.
+     *
+     * <p>If there is a parent {@link PlatformInfo} set, then all parent's properties will be
+     * inherited. Any properties included in both will use the child's value. Use the value of empty
+     * string to unset a property.
+     */
+    public Builder setExecProperties(@Nullable ImmutableMap<String, String> properties) {
+      this.execProperties = properties;
       return this;
     }
 
@@ -230,85 +283,116 @@ public class PlatformInfo extends NativeInfo {
       return this;
     }
 
+    private void checkRemoteExecutionProperties() throws ExecPropertiesException {
+      if (execProperties != null && !Strings.isNullOrEmpty(remoteExecutionProperties)) {
+        throw new ExecPropertiesException(
+            "Platform contains both remote_execution_properties and exec_properties. Prefer"
+                + " exec_properties over the deprecated remote_execution_properties.");
+      }
+      if (execProperties != null
+          && parent != null
+          && !Strings.isNullOrEmpty(parent.remoteExecutionProperties())) {
+        throw new ExecPropertiesException(
+            "Platform specifies exec_properties but its parent "
+                + parent.label()
+                + " specifies remote_execution_properties. Prefer exec_properties over the"
+                + " deprecated remote_execution_properties.");
+      }
+      if (!Strings.isNullOrEmpty(remoteExecutionProperties)
+          && parent != null
+          && !parent.execProperties().isEmpty()) {
+        throw new ExecPropertiesException(
+            "Platform specifies remote_execution_properties but its parent specifies"
+                + " exec_properties. Prefer exec_properties over the deprecated"
+                + " remote_execution_properties.");
+      }
+    }
+
     /**
      * Returns the new {@link PlatformInfo} instance.
      *
      * @throws DuplicateConstraintException if more than one constraint value exists for the same
      *     constraint setting
      */
-    public PlatformInfo build() throws DuplicateConstraintException {
-      ImmutableList<ConstraintValueInfo> validatedConstraints = validateConstraints(constraints);
-      return new PlatformInfo(label, validatedConstraints, remoteExecutionProperties, location);
+    public PlatformInfo build() throws DuplicateConstraintException, ExecPropertiesException {
+      checkRemoteExecutionProperties();
+
+      // Merge the remote execution properties.
+      String remoteExecutionProperties =
+          mergeRemoteExecutionProperties(parent, this.remoteExecutionProperties);
+
+      ImmutableMap<String, String> execProperties =
+          mergeExecProperties(parent, this.execProperties);
+      if (execProperties == null) {
+        execProperties = ImmutableMap.of();
+      }
+
+      return new PlatformInfo(
+          label, constraints.build(), remoteExecutionProperties, execProperties, location);
     }
 
-    public static ImmutableList<ConstraintValueInfo> validateConstraints(
-        Iterable<ConstraintValueInfo> constraintValues) throws DuplicateConstraintException {
-
-      // Collect the constraints by the settings.
-      ImmutableListMultimap<ConstraintSettingInfo, ConstraintValueInfo> constraints =
-          Streams.stream(constraintValues)
-              .collect(
-                  toImmutableListMultimap(ConstraintValueInfo::constraint, Functions.identity()));
-
-      // Find settings with duplicate values.
-      ImmutableListMultimap<ConstraintSettingInfo, ConstraintValueInfo> duplicates =
-          constraints
-              .asMap()
-              .entrySet()
-              .stream()
-              .filter(e -> e.getValue().size() > 1)
-              .collect(
-                  flatteningToImmutableListMultimap(Map.Entry::getKey, e -> e.getValue().stream()));
-
-      if (!duplicates.isEmpty()) {
-        throw new DuplicateConstraintException(duplicates);
+    private static String mergeRemoteExecutionProperties(
+        PlatformInfo parent, String remoteExecutionProperties) {
+      String parentRemoteExecutionProperties = "";
+      if (parent != null) {
+        parentRemoteExecutionProperties = parent.remoteExecutionProperties();
       }
-      return ImmutableList.copyOf(constraints.values());
+
+      if (remoteExecutionProperties == null) {
+        return parentRemoteExecutionProperties;
+      }
+
+      return StringUtilities.replaceAllLiteral(
+          remoteExecutionProperties, PARENT_REMOTE_EXECUTION_KEY, parentRemoteExecutionProperties);
+    }
+
+    @Nullable
+    private static ImmutableMap<String, String> mergeExecProperties(
+        PlatformInfo parent, Map<String, String> execProperties) {
+      if ((parent == null || parent.execProperties() == null) && execProperties == null) {
+        return null;
+      }
+
+      HashMap<String, String> result = new HashMap<>();
+      if (parent != null && parent.execProperties() != null) {
+        result.putAll(parent.execProperties());
+      }
+
+      if (execProperties != null) {
+        for (Map.Entry<String, String> entry : execProperties.entrySet()) {
+          if (Strings.isNullOrEmpty(entry.getValue())) {
+            result.remove(entry.getKey());
+          } else {
+            result.put(entry.getKey(), entry.getValue());
+          }
+        }
+      }
+
+      return ImmutableMap.copyOf(result);
     }
   }
 
-  /**
-   * Exception class used when more than one {@link ConstraintValueInfo} for the same {@link
-   * ConstraintSettingInfo} is added to a {@link Builder}.
-   */
-  public static class DuplicateConstraintException extends Exception {
-    private final ImmutableListMultimap<ConstraintSettingInfo, ConstraintValueInfo>
-        duplicateConstraints;
-
-    public DuplicateConstraintException(
-        ListMultimap<ConstraintSettingInfo, ConstraintValueInfo> duplicateConstraints) {
-      super(formatError(duplicateConstraints));
-      this.duplicateConstraints = ImmutableListMultimap.copyOf(duplicateConstraints);
+  @Override
+  public boolean equals(Object o) {
+    if (!(o instanceof PlatformInfo)) {
+      return false;
     }
+    PlatformInfo that = (PlatformInfo) o;
+    return Objects.equals(label, that.label)
+        && Objects.equals(constraints, that.constraints)
+        && Objects.equals(remoteExecutionProperties, that.remoteExecutionProperties)
+        && Objects.equals(execProperties, that.execProperties);
+  }
 
-    public ImmutableListMultimap<ConstraintSettingInfo, ConstraintValueInfo>
-        duplicateConstraints() {
-      return duplicateConstraints;
-    }
+  @Override
+  public int hashCode() {
+    return Objects.hash(label, constraints, remoteExecutionProperties);
+  }
 
-    public static String formatError(
-        ListMultimap<ConstraintSettingInfo, ConstraintValueInfo> duplicateConstraints) {
-      return String.format(
-          "Duplicate constraint_values detected: %s",
-          duplicateConstraints
-              .asMap()
-              .entrySet()
-              .stream()
-              .map(e -> describeSingleDuplicateConstraintSetting(e))
-              .collect(joining(", ")));
-    }
-
-    private static String describeSingleDuplicateConstraintSetting(
-        Map.Entry<ConstraintSettingInfo, Collection<ConstraintValueInfo>> duplicate) {
-      return String.format(
-          "constraint_setting %s has [%s]",
-          duplicate.getKey().label(),
-          duplicate
-              .getValue()
-              .stream()
-              .map(ConstraintValueInfo::label)
-              .map(Label::toString)
-              .collect(joining(", ")));
+  /** Exception that indicates something is wrong in exec_properties configuration. */
+  public static class ExecPropertiesException extends Exception {
+    ExecPropertiesException(String message) {
+      super(message);
     }
   }
 }

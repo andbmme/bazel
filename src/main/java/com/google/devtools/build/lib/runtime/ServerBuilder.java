@@ -14,21 +14,16 @@
 package com.google.devtools.build.lib.runtime;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.buildeventstream.PathConverter;
-import com.google.devtools.build.lib.packages.AttributeContainer;
+import com.google.devtools.build.lib.bazel.repository.downloader.Downloader;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.query2.AbstractBlazeQueryEnvironment;
 import com.google.devtools.build.lib.query2.QueryEnvironmentFactory;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.QueryFunction;
-import com.google.devtools.build.lib.query2.output.OutputFormatter;
-import com.google.devtools.build.lib.runtime.commands.InfoItem;
+import com.google.devtools.build.lib.query2.query.output.OutputFormatter;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
-import com.google.devtools.build.lib.vfs.Path;
+import java.util.function.Supplier;
 
 /**
  * Builder class to create a {@link BlazeRuntime} instance. This class is part of the module API,
@@ -37,7 +32,6 @@ import com.google.devtools.build.lib.vfs.Path;
 public final class ServerBuilder {
   private QueryEnvironmentFactory queryEnvironmentFactory;
   private final InvocationPolicy.Builder invocationPolicyBuilder = InvocationPolicy.newBuilder();
-  private Function<RuleClass, AttributeContainer> attributeContainerFactory;
   private final ImmutableList.Builder<BlazeCommand> commands = ImmutableList.builder();
   private final ImmutableMap.Builder<String, InfoItem> infoItems = ImmutableMap.builder();
   private final ImmutableList.Builder<QueryFunction> queryFunctions = ImmutableList.builder();
@@ -45,8 +39,12 @@ public final class ServerBuilder {
       ImmutableList.builder();
   private final ImmutableList.Builder<PackageFactory.EnvironmentExtension> environmentExtensions =
       ImmutableList.builder();
-  private final ImmutableList.Builder<PathConverter> pathToUriConverters
-      = ImmutableList.builder();
+  private final BuildEventArtifactUploaderFactoryMap.Builder buildEventArtifactUploaderFactories =
+      new BuildEventArtifactUploaderFactoryMap.Builder();
+  private final ImmutableMap.Builder<String, AuthHeadersProvider> authHeadersProvidersMap =
+      ImmutableMap.builder();
+  private RepositoryRemoteExecutorFactory repositoryRemoteExecutorFactory;
+  private Supplier<Downloader> downloaderSupplier = () -> null;
 
   @VisibleForTesting
   public ServerBuilder() {}
@@ -59,10 +57,6 @@ public final class ServerBuilder {
 
   InvocationPolicy getInvocationPolicy() {
     return invocationPolicyBuilder.build();
-  }
-
-  Function<RuleClass, AttributeContainer> getAttributeContainerFactory() {
-    return attributeContainerFactory == null ? AttributeContainer::new : attributeContainerFactory;
   }
 
   ImmutableMap<String, InfoItem> getInfoItems() {
@@ -87,25 +81,16 @@ public final class ServerBuilder {
     return commands.build();
   }
 
-  /**
-   * Return the derived total converter from Paths to URIs. It returns the answer of the first
-   * registered converter that can convert the given path, if any. If no registered converter can
-   * convert the given path, the "file" URI scheme is used.
-   */
-  public PathConverter getPathToUriConverter() {
-    final ImmutableList<PathConverter> converters = this.pathToUriConverters.build();
-    return new PathConverter(){
-      @Override
-      public String apply(Path path) {
-        for (PathConverter converter : converters) {
-          String value = converter.apply(path);
-          if (value != null) {
-            return value;
-          }
-        }
-        return "file://" + path.getPathString();
-      }
-    };
+  public BuildEventArtifactUploaderFactoryMap getBuildEventArtifactUploaderMap() {
+    return buildEventArtifactUploaderFactories.build();
+  }
+
+  public RepositoryRemoteExecutorFactory getRepositoryRemoteExecutorFactory() {
+    return repositoryRemoteExecutorFactory;
+  }
+
+  public Supplier<Downloader> getDownloaderSupplier() {
+    return downloaderSupplier;
   }
 
   /**
@@ -120,8 +105,10 @@ public final class ServerBuilder {
   }
 
   /**
-   * Sets a factory for creating {@link AbstractBlazeQueryEnvironment} instances. Note that only one
-   * factory per server is allowed. If none is set, the server uses the default implementation.
+   * Sets a factory for creating {@link
+   * com.google.devtools.build.lib.query2.common.AbstractBlazeQueryEnvironment} instances. Note that
+   * only one factory per server is allowed. If none is set, the server uses the default
+   * implementation.
    */
   public ServerBuilder setQueryEnvironmentFactory(QueryEnvironmentFactory queryEnvironmentFactory) {
     Preconditions.checkState(
@@ -130,21 +117,6 @@ public final class ServerBuilder {
         this.queryEnvironmentFactory,
         queryEnvironmentFactory);
     this.queryEnvironmentFactory = Preconditions.checkNotNull(queryEnvironmentFactory);
-    return this;
-  }
-
-  /**
-   * Sets a factory for creating {@link AttributeContainer} instances. Only one factory per server
-   * is allowed. If none is set, the server uses the default implementation.
-   */
-  public ServerBuilder setAttributeContainerFactory(
-      Function<RuleClass, AttributeContainer> attributeContainerFactory) {
-    Preconditions.checkState(
-        this.attributeContainerFactory == null,
-        "At most one attribute container factory supported. But found two: %s and %s",
-        this.attributeContainerFactory,
-        attributeContainerFactory);
-    this.attributeContainerFactory = Preconditions.checkNotNull(attributeContainerFactory);
     return this;
   }
 
@@ -195,11 +167,35 @@ public final class ServerBuilder {
     return this;
   }
 
-  /**
-   * Register a new {@link PathConverter}. Contervers are tried in the order they are registered.
-   */
-  public ServerBuilder addPathToUriConverter(PathConverter converter) {
-    this.pathToUriConverters.add(converter);
+  public ServerBuilder addBuildEventArtifactUploaderFactory(
+      BuildEventArtifactUploaderFactory uploaderFactory, String name) {
+    buildEventArtifactUploaderFactories.add(name, uploaderFactory);
     return this;
+  }
+
+  public ServerBuilder setRepositoryRemoteExecutorFactory(
+      RepositoryRemoteExecutorFactory repositoryRemoteExecutorFactory) {
+    this.repositoryRemoteExecutorFactory = repositoryRemoteExecutorFactory;
+    return this;
+  }
+
+  public ServerBuilder setDownloaderSupplier(Supplier<Downloader> downloaderSupplier) {
+    this.downloaderSupplier = downloaderSupplier;
+    return this;
+  }
+
+  /**
+   * Register a provider of authentication headers that blaze modules can use. See {@link
+   * AuthHeadersProvider} for more details.
+   */
+  public ServerBuilder addAuthHeadersProvider(
+      String name, AuthHeadersProvider authHeadersProvider) {
+    authHeadersProvidersMap.put(name, authHeadersProvider);
+    return this;
+  }
+
+  /** Returns a map of all registered {@link AuthHeadersProvider}s. */
+  public ImmutableMap<String, AuthHeadersProvider> getAuthHeadersProvidersMap() {
+    return authHeadersProvidersMap.build();
   }
 }

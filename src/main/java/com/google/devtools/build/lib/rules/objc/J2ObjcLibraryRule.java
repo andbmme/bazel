@@ -20,9 +20,9 @@ import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 
 /** <code>j2objc_library</code> rule declaration. */
 public class J2ObjcLibraryRule implements RuleDefinition {
@@ -33,7 +33,7 @@ public class J2ObjcLibraryRule implements RuleDefinition {
   }
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
         .requiresConfigurationFragments(
             J2ObjcConfiguration.class,
@@ -41,8 +41,8 @@ public class J2ObjcLibraryRule implements RuleDefinition {
             AppleConfiguration.class,
             CppConfiguration.class)
         /* <!-- #BLAZE_RULE(j2objc_library).ATTRIBUTE(deps) -->
-        A list of <code>j2objc_library</code>, <code>java_library</code>
-        and <code>java_import</code> targets that contain
+        A list of <code>j2objc_library</code>, <code>java_library</code>,
+        <code>java_import</code> and <code>java_proto_library</code> targets that contain
         Java files to be transpiled to Objective-C.
         <p>All <code>java_library</code> and <code>java_import</code> targets that can be reached
         transitively through <code>exports</code>, <code>deps</code> and <code>runtime_deps</code>
@@ -73,7 +73,8 @@ public class J2ObjcLibraryRule implements RuleDefinition {
             attr("deps", LABEL_LIST)
                 .aspect(j2ObjcAspect)
                 .direct_compile_time_input()
-                .allowedRuleClasses("j2objc_library", "java_library", "java_import")
+                .allowedRuleClasses(
+                    "j2objc_library", "java_library", "java_import", "java_proto_library")
                 .allowedFileTypes())
         /*<!-- #BLAZE_RULE(j2objc_library).IMPLICIT_OUTPUTS -->
         <ul>
@@ -83,6 +84,7 @@ public class J2ObjcLibraryRule implements RuleDefinition {
         <!-- #END_BLAZE_RULE.IMPLICIT_OUTPUTS -->*/
         .setImplicitOutputsFunction(CompilationSupport.FULLY_LINKED_LIB)
         .cfg(AppleCrosstoolTransition.APPLE_CROSSTOOL_TRANSITION)
+        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(env))
         .build();
   }
 

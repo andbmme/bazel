@@ -14,8 +14,8 @@
 package com.google.devtools.build.lib.analysis;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.testing.EqualsTester;
-import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
 import com.google.devtools.build.lib.analysis.util.TestAspects;
@@ -25,16 +25,14 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
 import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
-import com.google.devtools.build.lib.skyframe.AspectValue;
-import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
+import com.google.devtools.build.lib.skyframe.AspectValueKey;
+import com.google.devtools.build.lib.skyframe.AspectValueKey.AspectKey;
 import com.google.devtools.build.skyframe.SkyKey;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * Tests for {@link com.google.devtools.build.lib.skyframe.AspectValue}.
- */
+/** Tests for {@link AspectValue}. */
 @RunWith(JUnit4.class)
 public class AspectValueTest extends AnalysisTestCase {
 
@@ -43,9 +41,9 @@ public class AspectValueTest extends AnalysisTestCase {
     update();
     BuildConfiguration c1 = getTargetConfiguration();
     BuildConfiguration c2 = getHostConfiguration();
-    Label l1 = Label.parseAbsolute("//a:l1");
-    Label l1b = Label.parseAbsolute("//a:l1");
-    Label l2 = Label.parseAbsolute("//a:l2");
+    Label l1 = Label.parseAbsolute("//a:l1", ImmutableMap.of());
+    Label l1b = Label.parseAbsolute("//a:l1", ImmutableMap.of());
+    Label l2 = Label.parseAbsolute("//a:l2", ImmutableMap.of());
     AspectParameters i1 = new AspectParameters.Builder()
         .addAttribute("foo", "bar")
         .build();
@@ -220,10 +218,11 @@ public class AspectValueTest extends AnalysisTestCase {
   private static SkyKey createKey(
       Label label, BuildConfiguration baseConfiguration, NativeAspectClass aspectClass,
       AspectParameters parameters, BuildConfiguration aspectConfiguration) {
-    return ActionLookupValue.key(AspectValue.createAspectKey(
-                label, baseConfiguration, new AspectDescriptor(aspectClass, parameters),
-        aspectConfiguration
-    ));
+    return AspectValueKey.createAspectKey(
+        label,
+        baseConfiguration,
+        new AspectDescriptor(aspectClass, parameters),
+        aspectConfiguration);
   }
 
   private static SkyKey createDerivedKey(
@@ -232,13 +231,18 @@ public class AspectValueTest extends AnalysisTestCase {
       BuildConfiguration aspectConfiguration1,
       NativeAspectClass aspectClass2, AspectParameters parameters2,
       BuildConfiguration aspectConfiguration2) {
-    AspectKey baseKey = AspectValue.createAspectKey(label, baseConfiguration,
-        new AspectDescriptor(aspectClass1, parameters1), aspectConfiguration1);
-    return ActionLookupValue.key(AspectValue.createAspectKey(
-        label, baseConfiguration,
-        ImmutableList.of(baseKey), new AspectDescriptor(aspectClass2, parameters2),
-        aspectConfiguration2
-    ));
+    AspectKey baseKey =
+        AspectValueKey.createAspectKey(
+            label,
+            baseConfiguration,
+            new AspectDescriptor(aspectClass1, parameters1),
+            aspectConfiguration1);
+    return AspectValueKey.createAspectKey(
+        label,
+        baseConfiguration,
+        ImmutableList.of(baseKey),
+        new AspectDescriptor(aspectClass2, parameters2),
+        aspectConfiguration2);
   }
 
 }

@@ -15,29 +15,32 @@ package com.google.devtools.build.lib.syntax;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import java.io.IOException;
 import java.util.List;
 
-/**
- * Syntax node for a for loop statement.
- */
+/** Syntax node for a for loop statement. */
 public final class ForStatement extends Statement {
 
-  private final LValue variable;
+  private final int forOffset;
+  private final Expression vars;
   private final Expression collection;
-  private final ImmutableList<Statement> block;
+  private final ImmutableList<Statement> body; // non-empty if well formed
 
-  /**
-   * Constructs a for loop statement.
-   */
-  public ForStatement(LValue variable, Expression collection, List<Statement> block) {
-    this.variable = Preconditions.checkNotNull(variable);
+  /** Constructs a for loop statement. */
+  ForStatement(
+      FileLocations locs,
+      int forOffset,
+      Expression vars,
+      Expression collection,
+      List<Statement> body) {
+    super(locs);
+    this.forOffset = forOffset;
+    this.vars = Preconditions.checkNotNull(vars);
     this.collection = Preconditions.checkNotNull(collection);
-    this.block = ImmutableList.copyOf(block);
+    this.body = ImmutableList.copyOf(body);
   }
 
-  public LValue getVariable() {
-    return variable;
+  public Expression getVars() {
+    return vars;
   }
 
   /**
@@ -47,28 +50,29 @@ public final class ForStatement extends Statement {
     return collection;
   }
 
-  public ImmutableList<Statement> getBlock() {
-    return block;
+  public ImmutableList<Statement> getBody() {
+    return body;
   }
 
   @Override
-  public void prettyPrint(Appendable buffer, int indentLevel) throws IOException {
-    printIndent(buffer, indentLevel);
-    buffer.append("for ");
-    variable.prettyPrint(buffer);
-    buffer.append(" in ");
-    collection.prettyPrint(buffer);
-    buffer.append(":\n");
-    printSuite(buffer, block, indentLevel);
+  public int getStartOffset() {
+    return forOffset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return body.isEmpty()
+        ? collection.getEndOffset() // wrong, but tree is ill formed
+        : body.get(body.size() - 1).getEndOffset();
   }
 
   @Override
   public String toString() {
-    return "for " + variable + " in " + collection + ": ...\n";
+    return "for " + vars + " in " + collection + ": ...\n";
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

@@ -28,13 +28,13 @@ import com.google.devtools.build.lib.pkgcache.FilteringPolicies;
 import com.google.devtools.build.lib.pkgcache.FilteringPolicy;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
-import com.google.devtools.build.skyframe.BuildDriver;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
 import java.io.IOException;
-import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -45,46 +45,43 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class PrepareDepsOfTargetsUnderDirectoryFunctionTest extends BuildViewTestCase {
 
-  private SkyframeExecutor skyframeExecutor;
-
-  @Before
-  public final void setSkyframeExecutor() throws Exception {
-    skyframeExecutor = getSkyframeExecutor();
-  }
-
-  private SkyKey createCollectPackagesKey(
+  private static SkyKey createCollectPackagesKey(
       Path root, PathFragment rootRelativePath, ImmutableSet<PathFragment> excludedPaths) {
-    RootedPath rootedPath = RootedPath.toRootedPath(root, rootRelativePath);
+    RootedPath rootedPath = RootedPath.toRootedPath(Root.fromPath(root), rootRelativePath);
     return CollectPackagesUnderDirectoryValue.key(
         RepositoryName.MAIN, rootedPath, excludedPaths);
   }
 
-  private SkyKey createPrepDepsKey(Path root, PathFragment rootRelativePath) {
+  private static SkyKey createPrepDepsKey(Path root, PathFragment rootRelativePath) {
     return createPrepDepsKey(root, rootRelativePath, ImmutableSet.<PathFragment>of());
   }
 
-  private SkyKey createPrepDepsKey(Path root, PathFragment rootRelativePath,
-      ImmutableSet<PathFragment> excludedPaths) {
-    RootedPath rootedPath = RootedPath.toRootedPath(root, rootRelativePath);
+  private static SkyKey createPrepDepsKey(
+      Path root, PathFragment rootRelativePath, ImmutableSet<PathFragment> excludedPaths) {
+    RootedPath rootedPath = RootedPath.toRootedPath(Root.fromPath(root), rootRelativePath);
     return PrepareDepsOfTargetsUnderDirectoryValue.key(
         RepositoryName.MAIN, rootedPath, excludedPaths);
   }
 
-  private SkyKey createPrepDepsKey(Path root, PathFragment rootRelativePath,
-      ImmutableSet<PathFragment> excludedPaths, FilteringPolicy filteringPolicy) {
-    RootedPath rootedPath = RootedPath.toRootedPath(root, rootRelativePath);
+  private static SkyKey createPrepDepsKey(
+      Path root,
+      PathFragment rootRelativePath,
+      ImmutableSet<PathFragment> excludedPaths,
+      FilteringPolicy filteringPolicy) {
+    RootedPath rootedPath = RootedPath.toRootedPath(Root.fromPath(root), rootRelativePath);
     return PrepareDepsOfTargetsUnderDirectoryValue.key(
         RepositoryName.MAIN, rootedPath, excludedPaths, filteringPolicy);
   }
 
   private EvaluationResult<?> getEvaluationResult(SkyKey... keys) throws InterruptedException {
-    BuildDriver driver = skyframeExecutor.getDriverForTesting();
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(SequencedSkyframeExecutor.DEFAULT_THREAD_COUNT)
+            .setEventHander(reporter)
+            .build();
     EvaluationResult<PrepareDepsOfTargetsUnderDirectoryValue> evaluationResult =
-        driver.evaluate(
-            ImmutableList.copyOf(keys),
-            /*keepGoing=*/ false,
-            SequencedSkyframeExecutor.DEFAULT_THREAD_COUNT,
-            reporter);
+        skyframeExecutor.getDriver().evaluate(ImmutableList.copyOf(keys), evaluationContext);
     Preconditions.checkState(!evaluationResult.hasError());
     return evaluationResult;
   }
@@ -179,7 +176,7 @@ public class PrepareDepsOfTargetsUnderDirectoryFunctionTest extends BuildViewTes
     RootedPath onlySubdir =
         Iterables.getOnlyElement(
             value.getSubdirectoryTransitivelyContainsPackagesOrErrors().keySet());
-    assertThat(onlySubdir.getRelativePath()).isEqualTo(PathFragment.create("a/c"));
+    assertThat(onlySubdir.getRootRelativePath()).isEqualTo(PathFragment.create("a/c"));
 
     // And the "a/c" subdirectory reports a package under it.
     assertThat(value.getSubdirectoryTransitivelyContainsPackagesOrErrors().get(onlySubdir))
@@ -233,7 +230,7 @@ public class PrepareDepsOfTargetsUnderDirectoryFunctionTest extends BuildViewTes
     RootedPath onlySubdir =
         Iterables.getOnlyElement(
             value.getSubdirectoryTransitivelyContainsPackagesOrErrors().keySet());
-    assertThat(onlySubdir.getRelativePath()).isEqualTo(PathFragment.create("a/b"));
+    assertThat(onlySubdir.getRootRelativePath()).isEqualTo(PathFragment.create("a/b"));
 
     // And the "a/b" subdirectory does not report a package under it (because it got excluded).
     assertThat(value.getSubdirectoryTransitivelyContainsPackagesOrErrors().get(onlySubdir))
@@ -255,7 +252,7 @@ public class PrepareDepsOfTargetsUnderDirectoryFunctionTest extends BuildViewTes
     RootedPath abd =
         Iterables.getOnlyElement(
             abValue.getSubdirectoryTransitivelyContainsPackagesOrErrors().keySet());
-    assertThat(abd.getRelativePath()).isEqualTo(PathFragment.create("a/b/d"));
+    assertThat(abd.getRootRelativePath()).isEqualTo(PathFragment.create("a/b/d"));
 
     // And no package is under "a/b/d".
     assertThat(abValue.getSubdirectoryTransitivelyContainsPackagesOrErrors().get(abd)).isFalse();

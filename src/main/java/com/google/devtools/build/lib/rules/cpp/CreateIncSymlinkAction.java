@@ -16,7 +16,7 @@
 package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
@@ -25,19 +25,19 @@ import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import java.io.IOException;
 import java.util.Map;
 import java.util.SortedMap;
 
-/**
- * This action creates a set of symbolic links.
- */
+/** This action creates a set of symbolic links. */
+@AutoCodec
 @Immutable
 public final class CreateIncSymlinkAction extends AbstractAction {
   private final ImmutableSortedMap<Artifact, Artifact> symlinks;
@@ -50,17 +50,20 @@ public final class CreateIncSymlinkAction extends AbstractAction {
    */
   public CreateIncSymlinkAction(
       ActionOwner owner, Map<Artifact, Artifact> symlinks, Path includePath) {
-    super(owner, ImmutableList.copyOf(symlinks.values()), ImmutableList.copyOf(symlinks.keySet()));
+    super(
+        owner,
+        NestedSetBuilder.wrap(Order.STABLE_ORDER, symlinks.values()),
+        ImmutableSet.copyOf(symlinks.keySet()));
     this.symlinks = ImmutableSortedMap.copyOf(symlinks, Artifact.EXEC_PATH_COMPARATOR);
     this.includePath = includePath;
   }
 
   @Override
-  public void prepare(FileSystem fileSystem, Path execRoot) throws IOException {
+  public void prepare(Path execRoot) throws IOException {
     if (includePath.isDirectory(Symlinks.NOFOLLOW)) {
-      FileSystemUtils.deleteTree(includePath);
+      includePath.deleteTree();
     }
-    super.prepare(fileSystem, execRoot);
+    super.prepare(execRoot);
   }
 
   @Override
@@ -68,11 +71,11 @@ public final class CreateIncSymlinkAction extends AbstractAction {
       throws ActionExecutionException {
     try {
       for (Map.Entry<Artifact, Artifact> entry : symlinks.entrySet()) {
-        Path symlink = entry.getKey().getPath();
-        symlink.createSymbolicLink(entry.getValue().getPath());
+        Path symlink = actionExecutionContext.getInputPath(entry.getKey());
+        symlink.createSymbolicLink(actionExecutionContext.getInputPath(entry.getValue()));
       }
     } catch (IOException e) {
-      String message = "IO Error while creating symlink";
+      String message = "IO Error while creating symlink: " + e.getMessage();
       throw new ActionExecutionException(message, e, this, false);
     }
     return ActionResult.EMPTY;
@@ -84,13 +87,11 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   }
 
   @Override
-  public String computeKey(ActionKeyContext actionKeyContext) {
-    Fingerprint key = new Fingerprint();
+  public void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
     for (Map.Entry<Artifact, Artifact> entry : symlinks.entrySet()) {
-      key.addPath(entry.getKey().getPath());
-      key.addPath(entry.getValue().getPath());
+      fp.addPath(entry.getKey().getExecPath());
+      fp.addPath(entry.getValue().getExecPath());
     }
-    return key.hexDigestAndReset();
   }
 
   @Override
@@ -101,6 +102,11 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   @Override
   public String getMnemonic() {
     return "Symlink";
+  }
+
+  @Override
+  public boolean mayInsensitivelyPropagateInputs() {
+    return true;
   }
 }
 

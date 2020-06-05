@@ -162,7 +162,7 @@ int extract(char *zipfile, char *exdir, char **files, bool verbose,
   UnzipProcessor processor(output_root, files, verbose, extract, flatten);
   std::unique_ptr<ZipExtractor> extractor(ZipExtractor::Create(zipfile,
                                                                &processor));
-  if (extractor.get() == NULL) {
+  if (extractor == NULL) {
     fprintf(stderr, "Unable to open zip file %s: %s.\n", zipfile,
             strerror(errno));
     return -1;
@@ -251,11 +251,12 @@ char **read_filelist(char *filename) {
   }
 
   size_t sizeof_array = sizeof(char *) * (nb_entries + 1);
-  void *result = malloc(sizeof_array + file_stat.total_size);
+  void *result = malloc(sizeof_array + file_stat.total_size + 1);
   // copy the content
   char **filelist = static_cast<char **>(result);
   char *content = static_cast<char *>(result) + sizeof_array;
   memcpy(content, data, file_stat.total_size);
+  content[file_stat.total_size] = '\0';
   free(data);
   // Create the corresponding array
   int j = 1;
@@ -326,7 +327,7 @@ int create(char *zipfile, char **file_entries, bool flatten, bool verbose,
     return -1;
   }
   std::unique_ptr<ZipBuilder> builder(ZipBuilder::Create(zipfile, size));
-  if (builder.get() == NULL) {
+  if (builder == NULL) {
     fprintf(stderr, "Unable to create zip file %s: %s.\n",
             zipfile, strerror(errno));
     return -1;

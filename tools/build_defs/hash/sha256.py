@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +15,10 @@
 """A wrapper to have a portable SHA-256 tool."""
 
 # TODO(dmarting): instead of this tool we should make SHA-256 of artifacts
-# available in Skylark.
+# available in Starlark.
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
 import hashlib
 import sys
 
@@ -25,4 +29,10 @@ if __name__ == "__main__":
     sys.exit(-1)
   with open(sys.argv[2], "w") as outputfile:
     with open(sys.argv[1], "rb") as inputfile:
-      outputfile.write(hashlib.sha256(inputfile.read()).hexdigest())
+      sha256 = hashlib.sha256()
+      while True:
+        data = inputfile.read(65536)
+        if not data:
+          break
+        sha256.update(data)
+      outputfile.write(sha256.hexdigest())

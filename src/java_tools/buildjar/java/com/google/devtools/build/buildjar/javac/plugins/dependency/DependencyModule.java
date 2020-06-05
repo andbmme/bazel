@@ -15,16 +15,17 @@
 package com.google.devtools.build.buildjar.javac.plugins.dependency;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
-import com.google.common.collect.FluentIterable;
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Ordering;
+import com.google.common.collect.Streams;
 import com.google.devtools.build.buildjar.JarOwner;
 import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
-import com.google.devtools.build.lib.view.proto.Deps;
+import com.google.devtools.build.lib.view.proto.Deps.Dependencies;
+import com.google.devtools.build.lib.view.proto.Deps.Dependency;
 import com.google.devtools.build.lib.view.proto.Deps.Dependency.Kind;
 import com.sun.tools.javac.code.Symbol.PackageSymbol;
 import java.io.BufferedInputStream;
@@ -36,8 +37,13 @@ import java.nio.file.Paths;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
+import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
 
 /**
  * Wrapper class for managing dependencies on top of {@link
@@ -52,35 +58,28 @@ public final class DependencyModule {
 
   public static enum StrictJavaDeps {
     /** Legacy behavior: Silently allow referencing transitive dependencies. */
-    OFF(false),
+    OFF,
     /** Warn about transitive dependencies being used directly. */
-    WARN(true),
+    WARN,
     /** Fail the build when transitive dependencies are used directly. */
-    ERROR(true);
-
-    private final boolean enabled;
-
-    StrictJavaDeps(boolean enabled) {
-      this.enabled = enabled;
-    }
-
-    /** Convenience method for just checking if it's not OFF */
-    public boolean isEnabled() {
-      return enabled;
-    }
+    ERROR
   }
 
+  private static final ImmutableSet<String> SJD_EXEMPT_PROCESSORS =
+      ImmutableSet.of(
+          // Relax strict deps for dagger-generated code (b/17979436).
+          "dagger.internal.codegen.ComponentProcessor");
+
   private final StrictJavaDeps strictJavaDeps;
-  private final Map<Path, JarOwner> directJarsToTargets;
-  private final Map<Path, JarOwner> indirectJarsToTargets;
+  private final FixTool fixDepsTool;
+  private final ImmutableSet<Path> directJars;
   private final boolean strictClasspathMode;
   private final Set<Path> depsArtifacts;
-  private final String ruleKind;
   private final String targetLabel;
   private final Path outputDepsProtoFile;
-  private final Set<Path> usedClasspath;
-  private final Map<Path, Deps.Dependency> explicitDependenciesMap;
-  private final Map<Path, Deps.Dependency> implicitDependenciesMap;
+  private boolean hasMissingTargets;
+  private final Map<Path, Dependency> explicitDependenciesMap;
+  private final Map<Path, Dependency> implicitDependenciesMap;
   private final ImmutableSet<Path> platformJars;
   Set<Path> requiredClasspath;
   private final FixMessage fixMessage;
@@ -89,28 +88,25 @@ public final class DependencyModule {
 
   DependencyModule(
       StrictJavaDeps strictJavaDeps,
-      Map<Path, JarOwner> directJarsToTargets,
-      Map<Path, JarOwner> indirectJarsToTargets,
+      FixTool fixDepsTool,
+      ImmutableSet<Path> directJars,
       boolean strictClasspathMode,
       Set<Path> depsArtifacts,
       ImmutableSet<Path> platformJars,
-      String ruleKind,
       String targetLabel,
       Path outputDepsProtoFile,
       FixMessage fixMessage,
       Set<String> exemptGenerators) {
     this.strictJavaDeps = strictJavaDeps;
-    this.directJarsToTargets = directJarsToTargets;
-    this.indirectJarsToTargets = indirectJarsToTargets;
+    this.fixDepsTool = fixDepsTool;
+    this.directJars = directJars;
     this.strictClasspathMode = strictClasspathMode;
     this.depsArtifacts = depsArtifacts;
-    this.ruleKind = ruleKind;
     this.targetLabel = targetLabel;
     this.outputDepsProtoFile = outputDepsProtoFile;
     this.explicitDependenciesMap = new HashMap<>();
     this.implicitDependenciesMap = new HashMap<>();
     this.platformJars = platformJars;
-    this.usedClasspath = new HashSet<>();
     this.fixMessage = fixMessage;
     this.exemptGenerators = exemptGenerators;
     this.packages = new HashSet<>();
@@ -127,7 +123,8 @@ public final class DependencyModule {
    * <p>We collect precise dependency information to allow Blaze to analyze both strict and unused
    * dependencies, as well as packages contained by the output jar.
    */
-  public void emitDependencyInformation(ImmutableList<Path> classpath, boolean successful)
+  public void emitDependencyInformation(
+      ImmutableList<Path> classpath, boolean successful, boolean requiresFallback)
       throws IOException {
     if (outputDepsProtoFile == null) {
       return;
@@ -135,30 +132,30 @@ public final class DependencyModule {
 
     try (BufferedOutputStream out =
         new BufferedOutputStream(Files.newOutputStream(outputDepsProtoFile))) {
-      buildDependenciesProto(classpath, successful).writeTo(out);
+      buildDependenciesProto(classpath, successful, requiresFallback).writeTo(out);
     } catch (IOException ex) {
       throw new IOException("Cannot write dependencies to " + outputDepsProtoFile, ex);
     }
   }
 
   @VisibleForTesting
-  Deps.Dependencies buildDependenciesProto(ImmutableList<Path> classpath, boolean successful) {
-    Deps.Dependencies.Builder deps = Deps.Dependencies.newBuilder();
+  Dependencies buildDependenciesProto(
+      ImmutableList<Path> classpath, boolean successful, boolean requiresFallback) {
+    Dependencies.Builder deps = Dependencies.newBuilder();
     if (targetLabel != null) {
       deps.setRuleLabel(targetLabel);
     }
     deps.setSuccess(successful);
+    if (requiresFallback) {
+      deps.setRequiresReducedClasspathFallback(true);
+    }
 
     deps.addAllContainedPackage(
-        FluentIterable.from(packages)
-            .transform(
-                new Function<PackageSymbol, String>() {
-                  @Override
-                  public String apply(PackageSymbol pkg) {
-                    return pkg.isUnnamed() ? "" : pkg.getQualifiedName().toString();
-                  }
-                })
-            .toSortedList(Ordering.natural()));
+        packages
+            .stream()
+            .map(pkg -> pkg.isUnnamed() ? "" : pkg.getQualifiedName().toString())
+            .sorted()
+            .collect(toImmutableList()));
 
     // Filter using the original classpath, to preserve ordering.
     for (Path entry : classpath) {
@@ -171,25 +168,9 @@ public final class DependencyModule {
     return deps.build();
   }
 
-  /** Returns whether strict dependency checks (strictJavaDeps) are enabled. */
-  public boolean isStrictDepsEnabled() {
-    return strictJavaDeps.isEnabled();
-  }
-
-  /**
-   * Returns the mapping for jars of direct dependencies. The keys are full paths (as seen on the
-   * classpath), and the values are build target names.
-   */
-  public Map<Path, JarOwner> getDirectMapping() {
-    return directJarsToTargets;
-  }
-
-  /**
-   * Returns the mapping for jars of indirect dependencies. The keys are full paths (as seen on the
-   * classpath), and the values are build target names.
-   */
-  public Map<Path, JarOwner> getIndirectMapping() {
-    return indirectJarsToTargets;
+  /** Returns the paths of direct dependencies. */
+  public ImmutableSet<Path> directJars() {
+    return directJars;
   }
 
   /** Returns the strict dependency checking (strictJavaDeps) setting. */
@@ -197,13 +178,18 @@ public final class DependencyModule {
     return strictJavaDeps;
   }
 
+  /** Returns which tool to use for adding missing dependencies. */
+  public FixTool getFixDepsTool() {
+    return fixDepsTool;
+  }
+
   /** Returns the map collecting precise explicit dependency information. */
-  public Map<Path, Deps.Dependency> getExplicitDependenciesMap() {
+  public Map<Path, Dependency> getExplicitDependenciesMap() {
     return explicitDependenciesMap;
   }
 
   /** Returns the map collecting precise implicit dependency information. */
-  public Map<Path, Deps.Dependency> getImplicitDependenciesMap() {
+  public Map<Path, Dependency> getImplicitDependenciesMap() {
     return implicitDependenciesMap;
   }
 
@@ -217,11 +203,6 @@ public final class DependencyModule {
     return packages.add(packge);
   }
 
-  /** Returns the type (rule kind) of the originating target. */
-  public String getRuleKind() {
-    return ruleKind;
-  }
-
   /** Returns the name (label) of the originating target. */
   public String getTargetLabel() {
     return targetLabel;
@@ -230,11 +211,6 @@ public final class DependencyModule {
   /** Returns the file name collecting dependency information. */
   public Path getOutputDepsProtoFile() {
     return outputDepsProtoFile;
-  }
-
-  @VisibleForTesting
-  Set<Path> getUsedClasspath() {
-    return usedClasspath;
   }
 
   /** Returns a message to suggest fix when a missing indirect dependency is found. */
@@ -252,6 +228,15 @@ public final class DependencyModule {
     return strictClasspathMode;
   }
 
+  void setHasMissingTargets() {
+    hasMissingTargets = true;
+  }
+
+  /** Returns true if any missing transitive dependencies were reported. */
+  public boolean hasMissingTargets() {
+    return hasMissingTargets;
+  }
+
   /**
    * Computes a reduced compile-time classpath from the union of direct dependencies and their
    * dependencies, as listed in the associated .deps artifacts.
@@ -263,11 +248,14 @@ public final class DependencyModule {
     }
 
     // Classpath = direct deps + runtime direct deps + their .deps
-    requiredClasspath = new HashSet<>(directJarsToTargets.keySet());
+    requiredClasspath = new HashSet<>(directJars);
 
     for (Path depsArtifact : depsArtifacts) {
       collectDependenciesFromArtifact(depsArtifact);
     }
+
+    // TODO(b/71936047): it should be an error for requiredClasspath to contain paths that are not
+    // in originalClasspath
 
     // Filter the initial classpath and keep the original order
     return originalClasspath
@@ -284,12 +272,12 @@ public final class DependencyModule {
   /** Updates {@link #requiredClasspath} to include dependencies from the given output artifact. */
   private void collectDependenciesFromArtifact(Path path) throws IOException {
     try (BufferedInputStream bis = new BufferedInputStream(Files.newInputStream(path))) {
-      Deps.Dependencies deps = Deps.Dependencies.parseFrom(bis);
+      Dependencies deps = Dependencies.parseFrom(bis);
       // Sanity check to make sure we have a valid proto.
       if (!deps.hasRuleLabel()) {
         throw new IOException("Could not parse Deps.Dependencies message from proto.");
       }
-      for (Deps.Dependency dep : deps.getDependencyList()) {
+      for (Dependency dep : deps.getDependencyList()) {
         if (dep.getKind() == Kind.EXPLICIT
             || dep.getKind() == Kind.IMPLICIT
             || dep.getKind() == Kind.INCOMPLETE) {
@@ -301,46 +289,70 @@ public final class DependencyModule {
     }
   }
 
-  /**
-   * A functional that formats a message for the user about a missing dependency that they should
-   * add to unbreak their build.
-   */
+  /** Emits a message to the user about missing dependencies to add to unbreak their build. */
   public interface FixMessage {
-    String get(Iterable<JarOwner> missing, String recipient, boolean useColor);
+
+    /**
+     * Gets a message describing what dependencies are missing and how to fix them.
+     *
+     * @param missing the missing dependencies to be added.
+     * @param recipient the target from which the dependencies are missing.
+     * @return the string message describing the dependency build issues, including fix.
+     */
+    String get(Iterable<JarOwner> missing, String recipient);
+  }
+
+  /** Tool with which to fix dependency issues. */
+  public interface FixTool {
+
+    /**
+     * Applies this tool to find the missing import/dependency.
+     *
+     * @param diagnostic a full javac diagnostic, possibly containing an import for a class which
+     *     cannot be found on the classpath.
+     * @param javacopts list of all javac options/flags.
+     * @return the missing import or dependency as a String, or empty Optional if the diagnostic did
+     *     not contain exactly one unresolved import that we know how to fix.
+     */
+    Optional<String> resolveMissingImport(
+        Diagnostic<JavaFileObject> diagnostic, ImmutableList<String> javacopts);
+
+    /**
+     * Returns a command for this tool to fix {@code recipient} by adding all {@code missing}
+     * dependencies for this target.
+     */
+    String getFixCommand(Iterable<String> missing, String recipient);
   }
 
   /** Builder for {@link DependencyModule}. */
   public static class Builder {
 
     private StrictJavaDeps strictJavaDeps = StrictJavaDeps.OFF;
-    private final Map<Path, JarOwner> directJarsToTargets = new HashMap<>();
-    private final Map<Path, JarOwner> indirectJarsToTargets = new HashMap<>();
+    private FixTool fixDepsTool = null;
+    private ImmutableSet<Path> directJars = ImmutableSet.of();
     private final Set<Path> depsArtifacts = new HashSet<>();
     private ImmutableSet<Path> platformJars = ImmutableSet.of();
-    private String ruleKind;
     private String targetLabel;
     private Path outputDepsProtoFile;
     private boolean strictClasspathMode = false;
     private FixMessage fixMessage = new DefaultFixMessage();
-    private final Set<String> exemptGenerators = new HashSet<>();
+    private final Set<String> exemptGenerators = new LinkedHashSet<>(SJD_EXEMPT_PROCESSORS);
 
-    private static class DefaultFixMessage implements DependencyModule.FixMessage {
+    private static class DefaultFixMessage implements FixMessage {
       @Override
-      public String get(Iterable<JarOwner> missing, String recipient, boolean useColor) {
-        StringBuilder missingTargetsStr = new StringBuilder();
-        for (JarOwner owner : missing) {
-          missingTargetsStr.append(owner.label());
-          missingTargetsStr.append(" ");
+      public String get(Iterable<JarOwner> missing, String recipient) {
+        ImmutableSet<String> missingTargets =
+            Streams.stream(missing)
+                .flatMap(owner -> owner.label().map(Stream::of).orElse(Stream.empty()))
+                .collect(toImmutableSet());
+        if (missingTargets.isEmpty()) {
+          return "";
         }
-
         return String.format(
             "%1$s ** Please add the following dependencies:%2$s \n  %3$s to %4$s \n"
                 + "%1$s ** You can use the following buildozer command:%2$s "
                 + "\nbuildozer 'add deps %3$s' %4$s \n\n",
-            useColor ? "\033[35m\033[1m" : "",
-            useColor ? "\033[0m" : "",
-            missingTargetsStr.toString(),
-            recipient);
+            "\033[35m\033[1m", "\033[0m", Joiner.on(" ").join(missingTargets), recipient);
       }
     }
 
@@ -353,12 +365,11 @@ public final class DependencyModule {
     public DependencyModule build() {
       return new DependencyModule(
           strictJavaDeps,
-          directJarsToTargets,
-          indirectJarsToTargets,
+          fixDepsTool,
+          directJars,
           strictClasspathMode,
           depsArtifacts,
           platformJars,
-          ruleKind,
           targetLabel,
           outputDepsProtoFile,
           fixMessage,
@@ -377,13 +388,13 @@ public final class DependencyModule {
     }
 
     /**
-     * Sets the type (rule kind) of the originating target.
+     * Sets which tool to use for fixing missing dependencies.
      *
-     * @param ruleKind kind, such as the rule kind of a RuleConfiguredTarget
+     * @param fixDepsTool tool name
      * @return this Builder instance
      */
-    public Builder setRuleKind(String ruleKind) {
-      this.ruleKind = ruleKind;
+    public Builder setFixDepsTool(FixTool fixDepsTool) {
+      this.fixDepsTool = fixDepsTool;
       return this;
     }
 
@@ -398,39 +409,9 @@ public final class DependencyModule {
       return this;
     }
 
-    /**
-     * Adds direct mappings to the existing map for direct dependencies.
-     *
-     * @param directMappings a map of paths of jar artifacts, as seen on classpath, to full names of
-     *     build targets providing the jar.
-     * @return this Builder instance
-     */
-    public Builder addDirectMappings(Map<Path, JarOwner> directMappings) {
-      directJarsToTargets.putAll(directMappings);
-      return this;
-    }
-
-    /**
-     * Adds an indirect mapping to the existing map for indirect dependencies.
-     *
-     * @param jar path of jar artifact, as seen on classpath.
-     * @param target full name of build target providing the jar.
-     * @return this Builder instance
-     */
-    public Builder addIndirectMapping(Path jar, JarOwner target) {
-      indirectJarsToTargets.put(jar, target);
-      return this;
-    }
-
-    /**
-     * Adds indirect mappings to the existing map for indirect dependencies.
-     *
-     * @param indirectMappings a map of paths of jar artifacts, as seen on classpath, to full names
-     *     of build targets providing the jar.
-     * @return this Builder instance
-     */
-    public Builder addIndirectMappings(Map<Path, JarOwner> indirectMappings) {
-      indirectJarsToTargets.putAll(indirectMappings);
+    /** Sets the paths to jars that are direct dependencies. */
+    public Builder setDirectJars(ImmutableSet<Path> directJars) {
+      this.directJars = directJars;
       return this;
     }
 

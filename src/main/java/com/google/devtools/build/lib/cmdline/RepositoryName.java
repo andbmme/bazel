@@ -18,11 +18,13 @@ import com.google.common.base.Throwables;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.SerializationConstant;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.StringCanonicalizer;
 import com.google.devtools.build.lib.util.StringUtilities;
+import com.google.devtools.build.lib.vfs.OsPathPolicy;
 import com.google.devtools.build.lib.vfs.PathFragment;
-
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -31,13 +33,12 @@ import java.io.Serializable;
 import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
 
-/**
- * A human-readable name for the repository.
- */
+/** A human-readable name for the repository. */
+@AutoCodec
 public final class RepositoryName implements Serializable {
-  public static final String DEFAULT_REPOSITORY = "";
-  public static final RepositoryName DEFAULT;
-  public static final RepositoryName MAIN;
+  static final String DEFAULT_REPOSITORY = "";
+  @SerializationConstant public static final RepositoryName DEFAULT;
+  @SerializationConstant public static final RepositoryName MAIN;
   private static final Pattern VALID_REPO_NAME = Pattern.compile("@[\\w\\-.]*");
 
   /** Helper for serializing {@link RepositoryName}. */
@@ -109,11 +110,12 @@ public final class RepositoryName implements Serializable {
    *
    * @throws LabelSyntaxException if the name is invalid
    */
+  @AutoCodec.Instantiator
   public static RepositoryName create(String name) throws LabelSyntaxException {
     try {
       return repositoryNameCache.get(name);
     } catch (ExecutionException e) {
-      Throwables.propagateIfInstanceOf(e.getCause(), LabelSyntaxException.class);
+      Throwables.propagateIfPossible(e.getCause(), LabelSyntaxException.class);
       throw new IllegalStateException("Failed to create RepositoryName from " + name, e);
     }
   }
@@ -131,20 +133,30 @@ public final class RepositoryName implements Serializable {
   }
 
   /**
-   * Extracts the repository name from a PathFragment that was created with
-   * {@code PackageIdentifier.getSourceRoot}.
+   * Extracts the repository name from a PathFragment that was created with {@code
+   * PackageIdentifier.getSourceRoot}.
    *
-   * @return a {@code Pair} of the extracted repository name and the path fragment with stripped
-   * of "external/"-prefix and repository name, or null if none was found or the repository name
-   * was invalid.
+   * @return a {@code Pair} of the extracted repository name and the path fragment with stripped of
+   *     "external/"-prefix and repository name, or null if none was found or the repository name
+   *     was invalid.
    */
-  public static Pair<RepositoryName, PathFragment> fromPathFragment(PathFragment path) {
-    if (path.segmentCount() < 2 || !path.startsWith(Label.EXTERNAL_PATH_PREFIX)) {
+  public static Pair<RepositoryName, PathFragment> fromPathFragment(
+      PathFragment path, boolean siblingRepositoryLayout) {
+    if (path.segmentCount() < 2) {
       return null;
     }
+
+    PathFragment prefix =
+        siblingRepositoryLayout
+            ? LabelConstants.EXPERIMENTAL_EXTERNAL_PATH_PREFIX
+            : LabelConstants.EXTERNAL_PATH_PREFIX;
+    if (!path.startsWith(prefix)) {
+      return null;
+    }
+
     try {
       RepositoryName repoName = RepositoryName.create("@" + path.getSegment(1));
-      PathFragment subPath = path.subFragment(2, path.segmentCount());
+      PathFragment subPath = path.subFragment(2);
       return Pair.of(repoName, subPath);
     } catch (LabelSyntaxException e) {
       return null;
@@ -195,6 +207,14 @@ public final class RepositoryName implements Serializable {
   }
 
   /**
+   * Returns the repository name without the leading "{@literal @}". For the default repository,
+   * returns "".
+   */
+  public static String stripName(String repoName) {
+    return repoName.startsWith("@") ? repoName.substring(1) : repoName;
+  }
+
+  /**
    * Returns if this is the default repository, that is, {@link #name} is "".
    */
   public boolean isDefault() {
@@ -217,22 +237,48 @@ public final class RepositoryName implements Serializable {
   }
 
   /**
+   * Returns the repository name, except that the main repo is conflated with the default repo
+   * ({@code "@"} becomes the empty string).
+   */
+  public String getDefaultCanonicalForm() {
+    return isMain() ? "" : getName();
+  }
+
+  /**
    * Returns the relative path to the repository source. Returns "" for the main repository and
    * external/[repository name] for external repositories.
    */
   public PathFragment getSourceRoot() {
     return isDefault() || isMain()
-        ? PathFragment.EMPTY_FRAGMENT : Label.EXTERNAL_PACKAGE_NAME.getRelative(strippedName());
+        ? PathFragment.EMPTY_FRAGMENT
+        : LabelConstants.EXTERNAL_REPOSITORY_LOCATION.getRelative(strippedName());
+  }
+
+  /**
+   * Returns the relative path to the repository's source for derived artifacts. This behavior is
+   * currently the same for source artifacts, but we create a new method name to keep call sites
+   * readable and not misleading.
+   */
+  public PathFragment getDerivedArtifactSourceRoot() {
+    return getSourceRoot();
   }
 
   /**
    * Returns the runfiles/execRoot path for this repository. If we don't know the name of this repo
    * (i.e., it is in the main repository), return an empty path fragment.
+   *
+   * <p>If --experimental_sibling_repository_layout is true, return "$execroot/../repo" (sibling of
+   * __main__), instead of "$execroot/external/repo".
    */
-  public PathFragment getPathUnderExecRoot() {
-    return isDefault() || isMain()
-        ? PathFragment.EMPTY_FRAGMENT
-        : Label.EXTERNAL_PATH_PREFIX.getRelative(strippedName());
+  public PathFragment getExecPath(boolean siblingRepositoryLayout) {
+    if (isDefault() || isMain()) {
+      return PathFragment.EMPTY_FRAGMENT;
+    }
+    PathFragment prefix =
+        siblingRepositoryLayout
+            ? LabelConstants.EXPERIMENTAL_EXTERNAL_PATH_PREFIX
+            : LabelConstants.EXTERNAL_PATH_PREFIX;
+    return prefix.getRelative(strippedName());
   }
 
   /**
@@ -260,11 +306,11 @@ public final class RepositoryName implements Serializable {
     if (!(object instanceof RepositoryName)) {
       return false;
     }
-    return name.equals(((RepositoryName) object).name);
+    return OsPathPolicy.getFilePathOs().equals(name, ((RepositoryName) object).name);
   }
 
   @Override
   public int hashCode() {
-    return name.hashCode();
+    return OsPathPolicy.getFilePathOs().hash(name);
   }
 }

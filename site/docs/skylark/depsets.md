@@ -25,13 +25,11 @@ Example uses of depsets include:
 If you don't need the merge operation, consider using another type, such as
 [list](lib/list.html) or [dict](lib/dict.html).
 
-<!-- [TOC] -->
-
 ## Full example
 
 
-_This example is avalable at
-[https://github.com/bazelbuild/examples/rules/depsets](https://github.com/bazelbuild/examples/rules/depsets).
+This example is available at
+[https://github.com/bazelbuild/examples/tree/master/rules/depsets](https://github.com/bazelbuild/examples/tree/master/rules/depsets).
 
 Suppose we have a hypothetical interpreted language Foo. In order to build each
 `foo_binary` we need to know all the `*.foo` files that it directly or indirectly
@@ -101,7 +99,7 @@ Here’s a complete implementation of the `foo_library` and `foo_binary` rules.
 # //depsets/foo.bzl
 
 # A provider with one field, transitive_sources.
-FooFiles = provider()
+FooFiles = provider(fields = ["transitive_sources"])
 
 def get_transitive_srcs(srcs, deps):
   """Obtain the source files for a target and its transitive dependencies.
@@ -165,7 +163,7 @@ Each node in the DAG holds a list of direct elements and a list of child nodes.
 The contents of the depset are the transitive elements, i.e. the direct elements
 of all the nodes. A new depset can be created using the
 [depset](lib/globals.html#depset) constructor: it accepts a list of direct
-elemens and another list of child nodes.
+elements and another list of child nodes.
 
 ```python
 s = depset(["a", "b", "c"])
@@ -260,7 +258,7 @@ duplicate elements in different nodes of the DAG.
 def create(order):
   cd = depset(["c", "d"], order = order)
   gh = depset(["g", "h"], order = order)
-  return depset(["a", "b", "e", "f"], transitive = [cd, gh])
+  return depset(["a", "b", "e", "f"], transitive = [cd, gh], order = order)
 
 print(create("postorder").to_list())  # ["c", "d", "g", "h", "a", "b", "e", "f"]
 print(create("preorder").to_list())   # ["a", "b", "e", "f", "c", "d", "g", "h"]
@@ -273,7 +271,7 @@ def create(order):
   a = depset(["a"], order=order)
   b = depset(["b"], transitive = [a], order = order)
   c = depset(["c"], transitive = [a], order = order)
-  d = depset(["d"], transtive = [b, c], order = order)
+  d = depset(["d"], transitive = [b, c], order = order)
   return d
 
 print(create("postorder").to_list())    # ["a", "b", "c", "d"]
@@ -284,13 +282,8 @@ print(create("topological").to_list())  # ["d", "b", "c", "a"]
 Due to how traversals are implemented, the order must be specified at the time
 the depset is created with the constructor’s `order` keyword argument. If this
 argument is omitted, the depset has the special `default` order, in which case
-there are no guarantees about the order of any of its elements.
-
-For safety, depsets with different orders cannot be merged with the `+` operator
-unless one of them uses the default order; the resulting depset’s order is the
-same as the left operand. Note that when two depsets of different order are
-merged in this way, the child may appear to have had its elements rearranged
-when it is traversed via the parent.
+there are no guarantees about the order of any of its elements (except that it
+is deterministic).
 
 ## Performance
 
@@ -312,16 +305,16 @@ will appear twice on the command line and twice in the contents of the output
 file.
 
 The next alternative is using a general set, which can be simulated by a
-dictionary where the keys are the elements and all the keys map to `None`.
+dictionary where the keys are the elements and all the keys map to `True`.
 
 ```python
 def get_transitive_srcs(srcs, deps):
   trans_srcs = {}
   for dep in deps:
     for file in dep[FooFiles].transitive_sources:
-      trans_srcs[file] = None
+      trans_srcs[file] = True
   for file in srcs:
-    trans_srcs[file] = None
+    trans_srcs[file] = True
   return trans_srcs
 ```
 
@@ -352,23 +345,5 @@ at the end in a binary rule is fine, since the overall cost is just O(n). It’s
 when many non-terminal targets try to call `to_list()` that we start to get into
 quadratic behavior.
 
-## Upcoming changes
-
-The API for depsets is being updated to be more consistent. Here are some recent
-and/or upcoming changes.
-
-*   Depset contents should be retrieved using `to_list()`, not by iterating over
-    the depset itself. Direct iteration over depsets is deprecated and will be
-    removed. I.e., don't use `list(...)`, `sorted(...)`, or other functions
-    expecting an iterable, on depsets.
-
-*   Depset elements currently must have the same type, e.g. all ints or all
-    strings. This restriction will be lifted.
-
-*   Depsets used to support `+` operator. It is now deprecated in favor of a new
-    depset constructor (described in this document). This avoids confusion
-    regarding how `+` treats direct elements vs children, and improves
-    performance.
-
-*   Both the `|` operator and the `.union()` methods are defined for depsets as
-    a synonym for `+`. They will be going away.
+The [performance](performance.md) page also contains information about using
+depsets efficiently.

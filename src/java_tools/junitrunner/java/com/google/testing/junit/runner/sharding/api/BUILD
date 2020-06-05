@@ -1,4 +1,8 @@
-package(default_visibility = ["//src:__subpackages__"])
+load("@rules_java//java:defs.bzl", "java_library")
+
+package(default_visibility = [
+    "//src/java_tools/junitrunner:junitrunner_package_group",
+])
 
 # TODO(bazel-team): This should be testonly = 1.
 java_library(
@@ -12,4 +16,5 @@ java_library(
 filegroup(
     name = "srcs",
     srcs = glob(["**/*.java"]) + ["BUILD"],
+    visibility = ["//src:__subpackages__"],
 )

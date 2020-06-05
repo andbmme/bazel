@@ -21,12 +21,10 @@ import com.google.common.base.MoreObjects;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.common.collect.Sets.SetView;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.devtools.build.android.AndroidResourceMerger.MergingException;
+import com.google.devtools.build.android.FullyQualifiedName.Qualifiers;
 import com.google.devtools.build.android.xml.StyleableXmlResourceValue;
 import java.io.IOException;
 import java.nio.file.FileVisitOption;
@@ -41,11 +39,9 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.function.BiConsumer;
 import java.util.logging.Logger;
 import javax.annotation.concurrent.Immutable;
 import javax.annotation.concurrent.NotThreadSafe;
@@ -112,13 +108,13 @@ public class ParsedAndroidData {
     /** Copies the data to the targetBuilder from the current builder. */
     public void copyTo(Builder targetBuilder) {
       KeyValueConsumers consumers = targetBuilder.consumers();
-      for (Entry<DataKey, DataResource> entry : overwritingResources.entrySet()) {
+      for (Map.Entry<DataKey, DataResource> entry : overwritingResources.entrySet()) {
         consumers.overwritingConsumer.accept(entry.getKey(), entry.getValue());
       }
-      for (Entry<DataKey, DataResource> entry : combiningResources.entrySet()) {
+      for (Map.Entry<DataKey, DataResource> entry : combiningResources.entrySet()) {
         consumers.combiningConsumer.accept(entry.getKey(), entry.getValue());
       }
-      for (Entry<DataKey, DataAsset> entry : assets.entrySet()) {
+      for (Map.Entry<DataKey, DataAsset> entry : assets.entrySet()) {
         consumers.assetConsumer.accept(entry.getKey(), entry.getValue());
       }
       targetBuilder.conflicts.addAll(conflicts);
@@ -145,7 +141,9 @@ public class ParsedAndroidData {
   }
 
   /** A Consumer style interface that will accept a DataKey and DataValue. */
-  interface KeyValueConsumer<K extends DataKey, V extends DataValue> extends BiConsumer<K, V> {}
+  interface KeyValueConsumer<K extends DataKey, V extends DataValue> {
+    void accept(K key, V value);
+  }
 
   @VisibleForTesting
   static class CombiningConsumer implements KeyValueConsumer<DataKey, DataResource> {
@@ -193,7 +191,11 @@ public class ParsedAndroidData {
         } else if (value.source().hasOveridden(other.source())) {
           target.put(key, value);
         } else {
-          target.put(key, overwrite(key, value, other));
+          target.put(
+              key,
+              value.compareMergePriorityTo(other) >= 0
+                  ? overwrite(key, value, other)
+                  : overwrite(key, other, value));
         }
       } else {
         target.put(key, value);
@@ -299,17 +301,16 @@ public class ParsedAndroidData {
     @Override
     public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
         throws IOException {
-      final String[] dirNameAndQualifiers =
-          dir.getFileName().toString().split(SdkConstants.RES_QUALIFIER_SEP);
-      folderType = ResourceFolderType.getTypeByName(dirNameAndQualifiers[0]);
-      if (folderType == null) {
-        return FileVisitResult.CONTINUE;
-      }
       try {
-        fqnFactory = FullyQualifiedName.Factory.fromDirectoryName(dirNameAndQualifiers);
+        final Qualifiers qualifiers = Qualifiers.parseFrom(dir.getFileName().toString());
+        folderType = qualifiers.asFolderType();
+        if (folderType == null) {
+          return FileVisitResult.CONTINUE;
+        }
+        fqnFactory = FullyQualifiedName.Factory.using(qualifiers);
         return FileVisitResult.CONTINUE;
       } catch (IllegalArgumentException e) {
-        logger.warning(
+        logger.severe(
             String.format("%s is an invalid resource directory due to %s", dir, e.getMessage()));
         return FileVisitResult.SKIP_SUBTREE;
       }
@@ -399,6 +400,8 @@ public class ParsedAndroidData {
 
   private static final class ParseDependencyDataTask implements Callable<Void> {
 
+    private final DependencyInfo.DependencyType dependencyType;
+
     private final SerializedAndroidData dependency;
 
     private final Builder targetBuilder;
@@ -406,9 +409,11 @@ public class ParsedAndroidData {
     private final AndroidDataDeserializer deserializer;
 
     private ParseDependencyDataTask(
+        DependencyInfo.DependencyType dependencyType,
         AndroidDataDeserializer deserializer,
         SerializedAndroidData dependency,
         Builder targetBuilder) {
+      this.dependencyType = dependencyType;
       this.deserializer = deserializer;
       this.dependency = dependency;
       this.targetBuilder = targetBuilder;
@@ -418,7 +423,7 @@ public class ParsedAndroidData {
     public Void call() throws Exception {
       final Builder parsedDataBuilder = ParsedAndroidData.Builder.newBuilder();
       try {
-        dependency.deserialize(deserializer, parsedDataBuilder.consumers());
+        dependency.deserialize(dependencyType, deserializer, parsedDataBuilder.consumers());
       } catch (DeserializationException e) {
         if (!e.isLegacy()) {
           throw MergingException.wrapException(e);
@@ -446,6 +451,7 @@ public class ParsedAndroidData {
    * @throws MergingException for deserialization errors.
    */
   public static ParsedAndroidData loadedFrom(
+      DependencyInfo.DependencyType dependencyType,
       List<? extends SerializedAndroidData> data,
       ListeningExecutorService executorService,
       AndroidDataDeserializer deserializer) {
@@ -453,7 +459,8 @@ public class ParsedAndroidData {
     final Builder target = Builder.newBuilder();
     for (SerializedAndroidData serialized : data) {
       tasks.add(
-          executorService.submit(new ParseDependencyDataTask(deserializer, serialized, target)));
+          executorService.submit(
+              new ParseDependencyDataTask(dependencyType, deserializer, serialized, target)));
     }
     FailedFutureAggregator.createForMergingExceptionWithMessage(
             "Failure(s) during dependency parsing")
@@ -565,111 +572,44 @@ public class ParsedAndroidData {
   }
 
   void writeResourcesTo(AndroidResourceSymbolSink writer) {
-    for (Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
+    for (Map.Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
       resource.getValue().writeResourceToClass((FullyQualifiedName) resource.getKey(), writer);
     }
   }
 
   void writeResourcesTo(AndroidDataWriter writer) throws MergingException {
-    for (Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
+    for (Map.Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
       resource.getValue().writeResource((FullyQualifiedName) resource.getKey(), writer);
     }
   }
 
   void serializeResourcesTo(AndroidDataSerializer serializer) {
-    for (Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
+    for (Map.Entry<DataKey, DataResource> resource : iterateDataResourceEntries()) {
       serializer.queueForSerialization(resource.getKey(), resource.getValue());
     }
   }
 
   void writeAssetsTo(AndroidDataWriter writer) throws IOException {
-    for (Entry<DataKey, DataAsset> resource : iterateAssetEntries()) {
+    for (Map.Entry<DataKey, DataAsset> resource : iterateAssetEntries()) {
       resource.getValue().writeAsset((RelativeAssetPath) resource.getKey(), writer);
     }
   }
 
   void serializeAssetsTo(AndroidDataSerializer serializer) {
-    for (Entry<DataKey, DataAsset> resource : iterateAssetEntries()) {
+    for (Map.Entry<DataKey, DataAsset> resource : iterateAssetEntries()) {
       serializer.queueForSerialization(resource.getKey(), resource.getValue());
     }
   }
 
-  Iterable<Entry<DataKey, DataResource>> iterateOverwritableEntries() {
+  Iterable<Map.Entry<DataKey, DataResource>> iterateOverwritableEntries() {
     return overwritingResources.entrySet();
   }
 
-  ParsedAndroidData overwrite(ParsedAndroidData overwritableData, boolean createConflicts) {
-    Map<DataKey, DataResource> newEntries = new LinkedHashMap<>();
-    Set<MergeConflict> newConflicts =
-        createConflicts ? new LinkedHashSet<MergeConflict>() : conflicts;
-    overwrite(
-        overwritableData.overwritingResources,
-        overwritingResources,
-        new OverwritableConsumer<>(newEntries, newConflicts));
-
-    Map<DataKey, DataAsset> newAssets = new LinkedHashMap<>();
-    overwrite(overwritableData.assets, assets, new OverwritableConsumer<>(newAssets, newConflicts));
-
-    return ParsedAndroidData.of(
-        ImmutableSet.copyOf(newConflicts),
-        ImmutableMap.copyOf(newEntries),
-        combiningResources,
-        ImmutableMap.copyOf(newAssets));
-  }
-
-  private static <K extends DataKey, V extends DataValue> void overwrite(
-      Map<K, V> overwritee, Map<K, V> overwriter, OverwritableConsumer<K, V> consumer) {
-    SetView<K> overwritten = Sets.intersection(overwritee.keySet(), overwriter.keySet());
-
-    // Feed the consumer keys and values that will be overwritten, followed by the overwritting
-    // value. This ensures the proper book keeping is done inside the consumer.
-    for (K key : overwritten) {
-      consumer.accept(key, overwritee.get(key));
-    }
-    for (K key : overwriter.keySet()) {
-      consumer.accept(key, overwriter.get(key));
-    }
-  }
-
-  /** Combines all combinable resources. */
-  ParsedAndroidData combine(ParsedAndroidData other) {
-    Map<DataKey, DataResource> combinedResources = new LinkedHashMap<>();
-    CombiningConsumer consumer = new CombiningConsumer(combinedResources);
-    for (Entry<DataKey, DataResource> entry :
-        Iterables.concat(combiningResources.entrySet(), other.combiningResources.entrySet())) {
-      consumer.accept(entry.getKey(), entry.getValue());
-    }
-    return of(conflicts, overwritingResources, ImmutableMap.copyOf(combinedResources), assets);
-  }
-
-  /** Removes conflicts, resources, and assets that are in the other. */
-  ParsedAndroidData difference(ParsedAndroidData other) {
-    return of(
-        ImmutableSet.copyOf(Sets.difference(conflicts, other.conflicts)),
-        ImmutableMap.copyOf(
-            Maps.difference(overwritingResources, other.overwritingResources).entriesOnlyOnLeft()),
-        ImmutableMap.copyOf(
-            Maps.difference(combiningResources, other.combiningResources).entriesOnlyOnLeft()),
-        ImmutableMap.copyOf(Maps.difference(assets, other.assets).entriesOnlyOnLeft()));
-  }
-
-  /** Creates a union of both sets. Duplicates are ignored. */
-  ParsedAndroidData union(ParsedAndroidData other) {
-    return of(
-        ImmutableSet.copyOf(Sets.union(conflicts, other.conflicts)),
-        ImmutableMap.copyOf(
-            Iterables.concat(
-                overwritingResources.entrySet(), other.overwritingResources.entrySet())),
-        ImmutableMap.copyOf(
-            Iterables.concat(combiningResources.entrySet(), other.combiningResources.entrySet())),
-        ImmutableMap.copyOf(Iterables.concat(assets.entrySet(), other.assets.entrySet())));
-  }
-
-  private Iterable<Entry<DataKey, DataResource>> iterateDataResourceEntries() {
+  private Iterable<Map.Entry<DataKey, DataResource>> iterateDataResourceEntries() {
     return Iterables.concat(overwritingResources.entrySet(), combiningResources.entrySet());
   }
 
-  public Iterable<Entry<DataKey, DataResource>> iterateCombiningEntries() {
+  public Iterable<Map.Entry<DataKey, DataResource>> iterateCombiningEntries() {
     return combiningResources.entrySet();
   }
 
@@ -677,7 +617,7 @@ public class ParsedAndroidData {
     return assets.containsKey(name);
   }
 
-  Iterable<Entry<DataKey, DataAsset>> iterateAssetEntries() {
+  Iterable<Map.Entry<DataKey, DataAsset>> iterateAssetEntries() {
     return assets.entrySet();
   }
 

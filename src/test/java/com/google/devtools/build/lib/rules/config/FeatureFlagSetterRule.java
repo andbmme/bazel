@@ -14,43 +14,38 @@
 
 package com.google.devtools.build.lib.rules.config;
 
-import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_KEYED_STRING_DICT;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL_LIST;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.PrerequisiteArtifacts;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TransitionMode;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 
-/** Rule introducing a transition to set feature flags for dependencies. */
+/** Rule introducing a transition to set feature flags for itself and dependencies. */
 public final class FeatureFlagSetterRule implements RuleDefinition, RuleConfiguredTargetFactory {
 
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment env) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
     return builder
         .requiresConfigurationFragments(ConfigFeatureFlagConfiguration.class)
         .cfg(new ConfigFeatureFlagTransitionFactory("flag_values"))
         .add(attr("deps", LABEL_LIST).allowedFileTypes())
-        .add(
-            attr("exports_setting", LABEL)
-                .allowedRuleClasses("config_setting")
-                .allowedFileTypes())
+        .add(attr("exports_setting", LABEL).allowedRuleClasses("config_setting").allowedFileTypes())
         .add(
             attr("exports_flag", LABEL)
                 .allowedRuleClasses("config_feature_flag")
@@ -75,20 +70,21 @@ public final class FeatureFlagSetterRule implements RuleDefinition, RuleConfigur
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
-      throws InterruptedException, RuleErrorException {
+      throws InterruptedException, RuleErrorException, ActionConflictException {
     TransitiveInfoCollection exportedFlag =
-        ruleContext.getPrerequisite("exports_flag", Mode.TARGET);
+        ruleContext.getPrerequisite("exports_flag", TransitionMode.TARGET);
     ConfigFeatureFlagProvider exportedFlagProvider =
         exportedFlag != null ? ConfigFeatureFlagProvider.fromTarget(exportedFlag) : null;
 
     TransitiveInfoCollection exportedSetting =
-        ruleContext.getPrerequisite("exports_setting", Mode.TARGET);
+        ruleContext.getPrerequisite("exports_setting", TransitionMode.TARGET);
     ConfigMatchingProvider exportedSettingProvider =
         exportedSetting != null ? exportedSetting.getProvider(ConfigMatchingProvider.class) : null;
 
     RuleConfiguredTargetBuilder builder =
         new RuleConfiguredTargetBuilder(ruleContext)
-            .setFilesToBuild(NestedSetBuilder.<Artifact>emptySet(STABLE_ORDER))
+            .setFilesToBuild(
+                PrerequisiteArtifacts.nestedSet(ruleContext, "deps", TransitionMode.TARGET))
             .addProvider(RunfilesProvider.class, RunfilesProvider.EMPTY);
     if (exportedFlagProvider != null) {
       builder.addNativeDeclaredProvider(exportedFlagProvider);

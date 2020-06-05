@@ -14,13 +14,10 @@
 
 package com.google.devtools.build.lib.analysis;
 
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.RequiredProviders;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
-import com.google.devtools.build.lib.syntax.SkylarkIndexable;
-import javax.annotation.Nullable;
+import com.google.devtools.build.lib.skylarkbuildapi.core.TransitiveInfoCollectionApi;
+import com.google.devtools.build.lib.syntax.StarlarkIndexable;
 
 /**
  * Multiple {@link TransitiveInfoProvider}s bundled together.
@@ -37,36 +34,8 @@ import javax.annotation.Nullable;
  * @see com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory
  * @see TransitiveInfoProvider
  */
-@SkylarkModule(
-  name = "Target",
-  category = SkylarkModuleCategory.BUILTIN,
-  doc =
-      "A BUILD target. It is essentially a <code>struct</code> with the following fields:"
-          + "<ul>"
-          + "<li><h3 id=\"modules.Target.label\">label</h3><code><a class=\"anchor\" "
-          + "href=\"Label.html\">Label</a> Target.label</code><br>The identifier of the "
-          + "target.</li>"
-          + "<li><h3 id=\"modules.Target.files\">files</h3><code><a class=\"anchor\" "
-          + "href=\"depset.html\">depset</a> Target.files </code><br>The set of "
-          + "<a class=\"anchor\" href=\"File.html\">File</a>s produced directly by this "
-          + "target.</li>"
-          + "<li><h3 id=\"modules.Target.aspect_ids\">aspect_ids</h3><code><a class=\"anchor\""
-          + "href=\"list.html\">list</a> Target.aspect_ids </code><br>The list of "
-          + "<a class=\"anchor\" href=\"ctx.html#aspect_id\">aspect_id</a>s applied to this "
-          + "target.</li>"
-          + "<li><h3 id=\"modules.Target.extraproviders\">Extra providers</h3>For rule targets all "
-          + "additional providers provided by this target are accessible as <code>struct</code> "
-          + "fields. These extra providers are defined in the <code>struct</code> returned by the "
-          + "rule implementation function.</li>"
-          + "</ul>"
-)
-public interface TransitiveInfoCollection extends SkylarkIndexable, SkylarkProviderCollection {
-
-  /**
-   * Returns the transitive information provider requested, or null if the provider is not found.
-   * The provider has to be a TransitiveInfoProvider Java class.
-   */
-  @Nullable <P extends TransitiveInfoProvider> P getProvider(Class<P> provider);
+public interface TransitiveInfoCollection
+    extends StarlarkIndexable, ProviderCollection, TransitiveInfoCollectionApi {
 
   /**
    * Returns the label associated with this prerequisite.
@@ -74,20 +43,11 @@ public interface TransitiveInfoCollection extends SkylarkIndexable, SkylarkProvi
   Label getLabel();
 
   /**
-   * <p>Returns the {@link BuildConfiguration} for which this transitive info collection is defined.
-   * Configuration is defined for all configured targets with exception of {@link
-   * InputFileConfiguredTarget} and {@link PackageGroupConfiguredTarget} for which it is always
-   * <b>null</b>.</p>
-   */
-  @Nullable BuildConfiguration getConfiguration();
-
-  /**
    * Checks whether this {@link TransitiveInfoCollection} satisfies given {@link RequiredProviders}.
    */
   default boolean satisfies(RequiredProviders providers) {
     return providers.isSatisfiedBy(
-        aClass -> getProvider(aClass.asSubclass(TransitiveInfoProvider.class)) != null,
-        id -> this.get(id) != null);
+        aClass -> getProvider(aClass) != null, id -> this.get(id) != null);
   }
 
   /**

@@ -1,6 +1,10 @@
 # Protos of the Actions for Android rules.
 
+load("@rules_java//java:defs.bzl", "java_proto_library")
+
 package(default_visibility = ["//visibility:public"])
+
+load("@rules_proto//proto:defs.bzl", "proto_library")
 
 java_proto_library(
     name = "serialize_format_java_pb",
@@ -13,16 +17,6 @@ proto_library(
 )
 
 java_proto_library(
-    name = "format_java_pb",
-    deps = [":format_proto"],
-)
-
-proto_library(
-    name = "format_proto",
-    srcs = ["format.proto"],
-)
-
-java_proto_library(
     name = "resources_java_proto",
     strict_deps = 0,
     deps = [":resources_proto"],
@@ -30,7 +24,11 @@ java_proto_library(
 
 proto_library(
     name = "resources_proto",
-    srcs = ["Resources.proto"],
+    srcs = [
+        "Configuration.proto",
+        "Resources.proto",
+        "ResourcesInternal.proto",
+    ],
 )
 
 filegroup(

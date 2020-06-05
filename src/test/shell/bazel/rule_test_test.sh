@@ -17,10 +17,35 @@
 # Test rule_test usage.
 #
 
-# Load the test setup defined in the parent directory
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${CURRENT_DIR}/../integration_test_setup.sh" \
+set -euo pipefail
+# --- begin runfiles.bash initialization ---
+if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  if [[ -f "$0.runfiles_manifest" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
+  elif [[ -f "$0.runfiles/MANIFEST" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
+  elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+    export RUNFILES_DIR="$0.runfiles"
+  fi
+fi
+if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
+elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
+            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
+else
+  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
+  exit 1
+fi
+# --- end runfiles.bash initialization ---
+
+source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
+
+function set_up() {
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL="*"
+}
 
 function test_local_rule_test_in_root() {
   create_new_workspace
@@ -148,6 +173,61 @@ rule_test(
 EOF
 
   bazel build //:turtle_rule_test &> $TEST_log || fail "turtle_rule_test failed"
+}
+
+# Regression test for https://github.com/bazelbuild/bazel/issues/8723
+#
+# rule_test() is a macro that expands to a sh_test and _rule_test_rule.
+# Expect that:
+# * test- and build-rule attributes (e.g. "tags") are applied to both rules,
+# * test-only attributes are applied only to the sh_rule,
+# * the build rule has its own visibility
+function test_kwargs_with_macro_rules() {
+  create_new_workspace
+  cat > BUILD <<'EOF'
+load("@bazel_tools//tools/build_rules:test_rules.bzl", "rule_test")
+
+genrule(
+    name = "x",
+    srcs = ["@does_not_exist//:bad"],
+    outs = ["x.out"],
+    cmd = "touch $@",
+    tags = ["dont_build_me"],
+)
+
+rule_test(
+    name = "x_test",
+    rule = "//:x",
+    generates = ["x.out"],
+    visibility = ["//foo:__pkg__"],
+    tags = ["dont_build_me"],
+    args = ["x"],
+    flaky = False,
+    local = True,
+    shard_count = 2,
+    size = "small",
+    timeout = "short",
+)
+EOF
+
+  bazel build //:all >& "$TEST_log" && fail "should have failed" || true
+
+  bazel build --build_tag_filters=-dont_build_me //:all >& "$TEST_log" || fail "build failed"
+
+  bazel query --output=label 'attr(tags, dont_build_me, //:all)' >& "$TEST_log" || fail "query failed"
+  expect_log '//:x_test_impl'
+  expect_log '//:x_test\b'
+  expect_log '//:x\b'
+
+  bazel query --output=label 'attr(visibility, private, //:all)' >& "$TEST_log" || fail "query failed"
+  expect_log '//:x_test_impl'
+  expect_log '//:x\b'
+  expect_not_log '//:x_test\b'
+
+  bazel query --output=label 'attr(visibility, foo, //:all)' >& "$TEST_log" || fail "query failed"
+  expect_log '//:x_test\b'
+  expect_not_log '//:x_test_impl'
+  expect_not_log '//:x\b'
 }
 
 run_suite "rule_test tests"

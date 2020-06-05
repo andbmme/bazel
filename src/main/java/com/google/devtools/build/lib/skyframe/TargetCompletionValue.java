@@ -14,62 +14,66 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.auto.value.AutoValue;
-import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.LabelAndConfiguration;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
-import com.google.devtools.build.skyframe.LegacySkyKey;
-import com.google.devtools.build.skyframe.SkyKey;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.util.Collection;
+import java.util.Set;
 
-/**
- * The value of a TargetCompletion. Currently this just stores a ConfiguredTarget.
- */
+/** The value of a TargetCompletion. Just a sentinel. */
 public class TargetCompletionValue implements SkyValue {
-  private final ConfiguredTarget ct;
+  @AutoCodec static final TargetCompletionValue INSTANCE = new TargetCompletionValue();
 
-  TargetCompletionValue(ConfiguredTarget ct) {
-    this.ct = ct;
+  private TargetCompletionValue() {}
+
+  public static TargetCompletionKey key(
+      ConfiguredTargetKey configuredTargetKey,
+      TopLevelArtifactContext topLevelArtifactContext,
+      boolean willTest) {
+    return TargetCompletionKey.create(configuredTargetKey, topLevelArtifactContext, willTest);
   }
 
-  public ConfiguredTarget getConfiguredTarget() {
-    return ct;
-  }
-
-  public static SkyKey key(
-      LabelAndConfiguration labelAndConfiguration,
-      TopLevelArtifactContext topLevelArtifactContext) {
-    return LegacySkyKey.create(
-        SkyFunctions.TARGET_COMPLETION,
-        TargetCompletionKey.create(labelAndConfiguration, topLevelArtifactContext));
-  }
-
-  public static Iterable<SkyKey> keys(Collection<ConfiguredTarget> targets,
-      final TopLevelArtifactContext ctx) {
+  public static Iterable<TargetCompletionKey> keys(
+      Collection<ConfiguredTarget> targets,
+      final TopLevelArtifactContext ctx,
+      final Set<ConfiguredTarget> targetsToTest) {
     return Iterables.transform(
         targets,
-        new Function<ConfiguredTarget, SkyKey>() {
-          @Override
-          public SkyKey apply(ConfiguredTarget ct) {
-            return LegacySkyKey.create(
-                SkyFunctions.TARGET_COMPLETION,
-                TargetCompletionKey.create(LabelAndConfiguration.of(ct), ctx));
-          }
-        });
+        ct ->
+            TargetCompletionKey.create(
+                ConfiguredTargetKey.builder()
+                    .setConfiguredTarget(ct)
+                    .setConfigurationKey(ct.getConfigurationKey())
+                    .build(),
+                ctx,
+                targetsToTest.contains(ct)));
   }
 
+  /** {@link com.google.devtools.build.skyframe.SkyKey} for {@link TargetCompletionValue}. */
+  @AutoCodec
   @AutoValue
-  abstract static class TargetCompletionKey {
-    public static TargetCompletionKey create(
-        LabelAndConfiguration labelAndConfiguration,
-        TopLevelArtifactContext topLevelArtifactContext) {
+  public abstract static class TargetCompletionKey
+      implements CompletionFunction.TopLevelActionLookupKey {
+    @AutoCodec.Instantiator
+    static TargetCompletionKey create(
+        ConfiguredTargetKey actionLookupKey,
+        TopLevelArtifactContext topLevelArtifactContext,
+        boolean willTest) {
       return new AutoValue_TargetCompletionValue_TargetCompletionKey(
-          labelAndConfiguration, topLevelArtifactContext);
+          topLevelArtifactContext, actionLookupKey, willTest);
     }
 
-    public abstract LabelAndConfiguration labelAndConfiguration();
-    public abstract TopLevelArtifactContext topLevelArtifactContext();
+    @Override
+    public abstract ConfiguredTargetKey actionLookupKey();
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.TARGET_COMPLETION;
+    }
+
+    abstract boolean willTest();
   }
 }

@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+
 # Description:
 #   Tests for the extension classes for desugaring try-with-resources for Android.
 package(
@@ -28,14 +30,12 @@ java_test(
     srcs = ["ThrowableExtensionTest.java"],
     jvm_flags = [
         "-Dfortest.simulated.android.sdk_int=18",
-        "'-Dexpected.strategy=com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$MimicDesugaringStrategy'",
+        "-Dexpected.strategy='com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$MimicDesugaringStrategy'",
     ],
-    tags = ["no_windows"],
     test_class = "com.google.devtools.build.android.desugar.runtime.ThrowableExtensionTest",
     deps = [
         ":throwable_extension_test_utility",
         "//src/test/java/com/google/devtools/build/android/desugar:mocked_android_os_sdk_for_testing",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
         "//src/tools/android/java/com/google/devtools/build/android/desugar/runtime:throwable_extension",
         "//third_party:guava",
         "//third_party:junit4",
@@ -50,14 +50,12 @@ java_test(
     jvm_flags = [
         "-Dfortest.simulated.android.sdk_int=18",
         "-Dcom.google.devtools.build.android.desugar.runtime.twr_disable_mimic=true",
-        "'-Dexpected.strategy=com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$NullDesugaringStrategy'",
+        "-Dexpected.strategy='com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$NullDesugaringStrategy'",
     ],
-    tags = ["no_windows"],
     test_class = "com.google.devtools.build.android.desugar.runtime.ThrowableExtensionTest",
     deps = [
         ":throwable_extension_test_utility",
         "//src/test/java/com/google/devtools/build/android/desugar:mocked_android_os_sdk_for_testing",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
         "//src/tools/android/java/com/google/devtools/build/android/desugar/runtime:throwable_extension",
         "//third_party:guava",
         "//third_party:junit4",
@@ -71,14 +69,12 @@ java_test(
     srcs = ["ThrowableExtensionTest.java"],
     jvm_flags = [
         "-Dfortest.simulated.android.sdk_int=19",
-        "'-Dexpected.strategy=com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$ReuseDesugaringStrategy'",
+        "-Dexpected.strategy='com.google.devtools.build.android.desugar.runtime.ThrowableExtension$$ReuseDesugaringStrategy'",
     ],
-    tags = ["no_windows"],
     test_class = "com.google.devtools.build.android.desugar.runtime.ThrowableExtensionTest",
     deps = [
         ":throwable_extension_test_utility",
         "//src/test/java/com/google/devtools/build/android/desugar:mocked_android_os_sdk_for_testing",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
         "//src/tools/android/java/com/google/devtools/build/android/desugar/runtime:throwable_extension",
         "//third_party:guava",
         "//third_party:junit4",

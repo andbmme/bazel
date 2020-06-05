@@ -18,11 +18,23 @@ import com.google.auto.value.AutoValue;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.packages.Rule;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Strings used to express requirements on action execution environments.
+ *
+ * <ol>
+ *   If you are adding a new execution requirement, pay attention to the following:
+ *   <li>If its name starts with one of the supported prefixes, then it can be also used as a tag on
+ *       a target and will be propagated to the execution requirements, see for prefixes {@link
+ *       com.google.devtools.build.lib.packages.TargetUtils#getExecutionInfo(Rule)}
+ *   <li>If this is a potentially conflicting execution requirements, e.g. you are adding a pair
+ *       'requires-x' and 'block-x', you MUST take care of a potential conflict in the Executor that
+ *       is using new execution requirements. As an example, see {@link
+ *       Spawns#requiresNetwork(com.google.devtools.build.lib.actions.Spawn, boolean)}.
+ * </ol>
  */
 public class ExecutionRequirements {
 
@@ -105,6 +117,9 @@ public class ExecutionRequirements {
     }
   }
 
+  /** If specified, the timeout of this action in seconds. Must be decimal integer. */
+  public static final String TIMEOUT = "timeout";
+
   /** If an action would not successfully run other than on Darwin. */
   public static final String REQUIRES_DARWIN = "requires-darwin";
 
@@ -141,6 +156,11 @@ public class ExecutionRequirements {
   /** If an action supports running in persistent worker mode. */
   public static final String SUPPORTS_WORKERS = "supports-workers";
 
+  public static final String SUPPORTS_MULTIPLEX_WORKERS = "supports-multiplex-workers";
+
+  /** Override for the action's mnemonic to allow for better worker process reuse. */
+  public static final String WORKER_KEY_MNEMONIC = "worker-key-mnemonic";
+
   public static final ImmutableMap<String, String> WORKER_MODE_ENABLED =
       ImmutableMap.of(SUPPORTS_WORKERS, "1");
 
@@ -161,14 +181,39 @@ public class ExecutionRequirements {
    */
   public static final String NO_CACHE = "no-cache";
 
+  /** Disables remote caching of a spawn. Note: does not disable remote execution */
+  public static final String NO_REMOTE_CACHE = "no-remote-cache";
+
+  /** Disables remote execution of a spawn. Note: does not disable remote caching */
+  public static final String NO_REMOTE_EXEC = "no-remote-exec";
+
+  /**
+   * Disables both remote execution and remote caching of a spawn. This is the equivalent of using
+   * no-remote-cache and no-remote-exec together.
+   */
+  public static final String NO_REMOTE = "no-remote";
+
+  /** Disables local execution of a spawn. */
+  public static final String NO_LOCAL = "no-local";
+
   /** Disables local sandboxing of a spawn. */
   public static final String LEGACY_NOSANDBOX = "nosandbox";
 
   /** Disables local sandboxing of a spawn. */
   public static final String NO_SANDBOX = "no-sandbox";
 
-  /** Disables remote execution of a spawn. */
-  public static final String NO_REMOTE = "no-remote";
+  /**
+   * Set for Xcode-related rules. Used for quality control to make sure that all Xcode-dependent
+   * rules propagate the necessary configurations. Begins with "supports" so as not to be filtered
+   * out for Bazel by {@code TargetUtils}.
+   */
+  public static final String REQUIREMENTS_SET = "supports-xcode-requirements-set";
+
+  /**
+   * Enables networking for a spawn if possible (only if sandboxing is enabled and if the sandbox
+   * supports it).
+   */
+  public static final String REQUIRES_NETWORK = "requires-network";
 
   /**
    * Disables networking for a spawn if possible (only if sandboxing is enabled and if the sandbox
@@ -181,4 +226,11 @@ public class ExecutionRequirements {
    * effect otherwise.
    */
   public static final String REQUIRES_FAKEROOT = "requires-fakeroot";
+
+  /** Suppress CLI reporting for this spawn - it's part of another action. */
+  public static final String DO_NOT_REPORT = "internal-do-not-report";
+
+  /** Use this to request eager fetching of a single remote output into local memory. */
+  public static final String REMOTE_EXECUTION_INLINE_OUTPUTS = "internal-inline-outputs";
+
 }

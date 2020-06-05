@@ -18,11 +18,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "src/main/cpp/util/path_platform.h"
 #include "src/tools/singlejar/diag.h"
 
 /*
@@ -57,7 +59,19 @@ class ArgTokenStream {
   class FileTokenStream {
    public:
     FileTokenStream(const char *filename) {
-      if (!(fp_ = fopen(filename, "r"))) {
+#ifdef _WIN32
+      std::wstring wpath;
+      std::string error;
+      if (!blaze_util::AsAbsoluteWindowsPath(filename, &wpath, &error)) {
+        diag_err(1, "%s:%d: AsAbsoluteWindowsPath failed: %s", __FILE__,
+                 __LINE__, error.c_str());
+      }
+      fp_ = _wfopen(wpath.c_str(), L"r");
+#else
+      fp_ = fopen(filename, "r");
+#endif
+
+      if (!fp_) {
         diag_err(1, "%s", filename);
       }
       filename_ = filename;

@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+
 package(
     default_testonly = 1,
     default_visibility = ["//src:__subpackages__"],
@@ -7,49 +9,27 @@ filegroup(
     name = "srcs",
     testonly = 0,
     srcs = glob(["**"]),
-    visibility = ["//src/test/java/com/google/devtools/build/lib:__pkg__"],
-)
-
-SERIALIZATION_TEST_SRCS = ["AppleConfigurationSerializationTest.java"]
-
-java_library(
-    name = "AppleConfigurationSerializationTest_lib",
-    testonly = 1,
-    srcs = SERIALIZATION_TEST_SRCS,
-    deps = [
-        "//src/main/java/com/google/devtools/build/lib:build-base",
-        "//src/main/java/com/google/devtools/build/lib/cmdline",
-        "//src/main/java/com/google/devtools/build/lib/rules/apple",
-        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization",
-        "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/testutils",
-        "//src/main/java/com/google/devtools/common/options",
-        "//third_party:guava",
-        "//third_party:junit4",
-        "//third_party/protobuf:protobuf_java",
-    ],
-)
-
-java_test(
-    name = "AppleConfigurationSerializationTest",
-    test_class = "com.google.devtools.build.lib.AllTests",
-    runtime_deps = [
-        ":AppleConfigurationSerializationTest_lib",
-        "//src/test/java/com/google/devtools/build/lib:test_runner",
-    ],
+    visibility = ["//src:__subpackages__"],
 )
 
 java_library(
     name = "AppleRulesTests_lib",
-    srcs = glob(
-        ["*.java"],
-        exclude = SERIALIZATION_TEST_SRCS,
-    ),
+    srcs = glob(["*.java"]),
     deps = [
-        "//src/main/java/com/google/devtools/build/lib:build-base",
-        "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:syntax",
+        "//src/main/java/com/google/devtools/build/lib/actions",
+        "//src/main/java/com/google/devtools/build/lib/analysis:analysis_cluster",
+        "//src/main/java/com/google/devtools/build/lib/analysis:configured_target",
+        "//src/main/java/com/google/devtools/build/lib/analysis:xcode_config_event",
+        "//src/main/java/com/google/devtools/build/lib/cmdline",
+        "//src/main/java/com/google/devtools/build/lib/packages",
+        "//src/main/java/com/google/devtools/build/lib/packages:type",
         "//src/main/java/com/google/devtools/build/lib/rules/apple",
-        "//src/test/java/com/google/devtools/build/lib:analysis_testutil",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:configured_target_and_data",
+        "//src/main/protobuf:xcode_java_proto",
+        "//src/test/java/com/google/devtools/build/lib/analysis/util",
+        "//src/test/java/com/google/devtools/build/lib/packages:testutil",
+        "//src/test/java/com/google/devtools/build/lib/testutil",
         "//third_party:guava",
         "//third_party:guava-testlib",
         "//third_party:jsr305",
@@ -63,8 +43,7 @@ java_test(
     test_class = "com.google.devtools.build.lib.AllTests",
     runtime_deps = [
         ":AppleRulesTests_lib",
-        "//src/main/java/com/google/devtools/build/lib:util",
-        "//src/test/java/com/google/devtools/build/lib:testutil",
+        "//src/test/java/com/google/devtools/build/lib:test_runner",
     ],
 )
 
@@ -74,7 +53,6 @@ test_suite(
         "-no_windows",
         "-slow",
     ],
-    visibility = ["//visibility:private"],
 )
 
 test_suite(
@@ -82,5 +60,4 @@ test_suite(
     tests = [
         ":windows_tests",
     ],
-    visibility = ["//src/test/java/com/google/devtools/build/lib:__pkg__"],
 )

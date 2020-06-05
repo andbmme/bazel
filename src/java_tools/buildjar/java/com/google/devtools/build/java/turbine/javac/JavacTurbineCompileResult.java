@@ -15,27 +15,41 @@
 package com.google.devtools.build.java.turbine.javac;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.sun.tools.javac.util.Context;
-import java.io.StringWriter;
+import java.nio.file.Path;
 
 /** The output from a {@link JavacTurbineCompiler} compilation. */
 class JavacTurbineCompileResult {
+
 
   enum Status {
     OK, ERROR
   }
 
-  private final ImmutableMap<String, byte[]> files;
+  private final ImmutableMap<String, byte[]> classOutputs;
+  private final ImmutableMap<String, byte[]> sourceOutputs;
   private final Status status;
-  private final StringWriter sb;
+  private final ImmutableList<Path> classPath;
+  private final String output;
+  private final ImmutableList<FormattedDiagnostic> diagnostics;
   private final Context context;
 
   JavacTurbineCompileResult(
-      ImmutableMap<String, byte[]> files, Status status, StringWriter sb, Context context) {
-    this.files = files;
+      ImmutableMap<String, byte[]> classOutputs,
+      ImmutableMap<String, byte[]> sourceOutputs,
+      Status status,
+      ImmutableList<Path> classPath,
+      String output,
+      ImmutableList<FormattedDiagnostic> diagnostics,
+      Context context) {
+    this.classOutputs = classOutputs;
+    this.sourceOutputs = sourceOutputs;
     this.status = status;
-    this.sb = sb;
+    this.classPath = classPath;
+    this.output = output;
+    this.diagnostics = diagnostics;
     this.context = context;
   }
 
@@ -44,14 +58,29 @@ class JavacTurbineCompileResult {
     return status == Status.OK;
   }
 
-  /** The stderr from the compilation. */
-  String output() {
-    return sb.toString();
+  /** The classpath used for the compilation. */
+  public ImmutableList<Path> classPath() {
+    return classPath;
   }
 
-  /** The files produced by the compilation. */
-  ImmutableMap<String, byte[]> files() {
-    return files;
+  /** The stderr from the compilation. */
+  String output() {
+    return output;
+  }
+
+  /** The diagnostics from the compilation. */
+  ImmutableList<FormattedDiagnostic> diagnostics() {
+    return diagnostics;
+  }
+
+  /** The class files produced by the compilation. */
+  ImmutableMap<String, byte[]> classOutputs() {
+    return classOutputs;
+  }
+
+  /** The sources generated during the compilation. */
+  ImmutableMap<String, byte[]> sourceOutputs() {
+    return sourceOutputs;
   }
 
   /** The compilation context, may by inspected by integration tests. */

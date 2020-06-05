@@ -14,16 +14,22 @@
 
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.devtools.build.lib.actions.FileValue;
+import com.google.devtools.build.lib.actions.InconsistentFilesystemException;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.packages.BuildFileNotFoundException;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
-import com.google.devtools.build.lib.syntax.BuildFileAST;
-import com.google.devtools.build.lib.syntax.Mutability;
-import com.google.devtools.build.lib.syntax.Runtime;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.FileOptions;
+import com.google.devtools.build.lib.syntax.Module;
+import com.google.devtools.build.lib.syntax.ParserInput;
+import com.google.devtools.build.lib.syntax.Resolver;
+import com.google.devtools.build.lib.syntax.StarlarkFile;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
+import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
@@ -34,110 +40,129 @@ import java.io.IOException;
 import javax.annotation.Nullable;
 
 /**
- * A SkyFunction for {@link ASTFileLookupValue}s.
+ * A Skyframe function that reads, parses, and resolves the .bzl file denoted by a Label.
  *
- * <p> Given a {@link Label} referencing a Skylark file, loads it as a syntax tree
- * ({@link BuildFileAST}). The Label must be absolute, and must not reference the special
- * {@code external} package. If the file (or the package containing it) doesn't exist, the
- * function doesn't fail, but instead returns a specific {@code NO_FILE} {@link ASTFileLookupValue}.
+ * <p>Given a {@link Label} referencing a Starlark file, loads it as a syntax tree ({@link
+ * StarlarkFile}). The Label must be absolute, and must not reference the special {@code external}
+ * package. If the file (or the package containing it) doesn't exist, the function doesn't fail, but
+ * instead returns a specific {@code NO_FILE} {@link ASTFileLookupValue}.
  */
 public class ASTFileLookupFunction implements SkyFunction {
 
   private final RuleClassProvider ruleClassProvider;
+  private final DigestHashFunction digestHashFunction;
 
-  public ASTFileLookupFunction(RuleClassProvider ruleClassProvider) {
+  public ASTFileLookupFunction(
+      RuleClassProvider ruleClassProvider, DigestHashFunction digestHashFunction) {
     this.ruleClassProvider = ruleClassProvider;
+    this.digestHashFunction = digestHashFunction;
   }
 
   @Override
   public SkyValue compute(SkyKey skyKey, Environment env) throws SkyFunctionException,
       InterruptedException {
-    Label fileLabel = (Label) skyKey.argument();
-    PathFragment filePathFragment = fileLabel.toPathFragment();
+    try {
+      return computeInline(skyKey, env, ruleClassProvider, digestHashFunction);
+    } catch (ErrorReadingStarlarkExtensionException e) {
+      throw new ASTLookupFunctionException(e, e.getTransience());
+    } catch (InconsistentFilesystemException e) {
+      throw new ASTLookupFunctionException(e, Transience.PERSISTENT);
+    }
+  }
 
-    //
+  static ASTFileLookupValue computeInline(
+      SkyKey skyKey,
+      Environment env,
+      RuleClassProvider ruleClassProvider,
+      DigestHashFunction digestHashFunction)
+      throws ErrorReadingStarlarkExtensionException, InconsistentFilesystemException,
+          InterruptedException {
+    Label fileLabel = (Label) skyKey.argument();
+
     // Determine whether the package designated by fileLabel exists.
-    //
+    // TODO(bazel-team): After --incompatible_disallow_load_labels_to_cross_package_boundaries is
+    // removed and the new behavior is unconditional, we can instead safely assume the package
+    // exists and pass in the Root in the SkyKey and therefore this dep can be removed.
     SkyKey pkgSkyKey = PackageLookupValue.key(fileLabel.getPackageIdentifier());
     PackageLookupValue pkgLookupValue = null;
     try {
       pkgLookupValue = (PackageLookupValue) env.getValueOrThrow(
           pkgSkyKey, BuildFileNotFoundException.class, InconsistentFilesystemException.class);
     } catch (BuildFileNotFoundException e) {
-      throw new ASTLookupFunctionException(
-          new ErrorReadingSkylarkExtensionException(e), Transience.PERSISTENT);
-    } catch (InconsistentFilesystemException e) {
-      throw new ASTLookupFunctionException(e, Transience.PERSISTENT);
+      throw new ErrorReadingStarlarkExtensionException(e);
     }
     if (pkgLookupValue == null) {
       return null;
     }
     if (!pkgLookupValue.packageExists()) {
-      return ASTFileLookupValue.forBadPackage(fileLabel, pkgLookupValue.getErrorMsg());
+      return ASTFileLookupValue.noFile(
+          "cannot load '%s': %s", fileLabel, pkgLookupValue.getErrorMsg());
     }
 
-    //
     // Determine whether the file designated by fileLabel exists.
-    //
-    Path packageRoot = pkgLookupValue.getRoot();
-    RootedPath rootedPath = RootedPath.toRootedPath(packageRoot, filePathFragment);
+    Root packageRoot = pkgLookupValue.getRoot();
+    RootedPath rootedPath = RootedPath.toRootedPath(packageRoot, fileLabel.toPathFragment());
     SkyKey fileSkyKey = FileValue.key(rootedPath);
     FileValue fileValue = null;
     try {
-      fileValue = (FileValue) env.getValueOrThrow(fileSkyKey, IOException.class,
-          FileSymlinkException.class, InconsistentFilesystemException.class);
+      fileValue = (FileValue) env.getValueOrThrow(fileSkyKey, IOException.class);
     } catch (IOException e) {
-      throw new ASTLookupFunctionException(new ErrorReadingSkylarkExtensionException(e),
-          Transience.PERSISTENT);
-    } catch (FileSymlinkException e) {
-      throw new ASTLookupFunctionException(new ErrorReadingSkylarkExtensionException(e),
-          Transience.PERSISTENT);
-    } catch (InconsistentFilesystemException e) {
-      throw new ASTLookupFunctionException(e, Transience.PERSISTENT);
+      throw new ErrorReadingStarlarkExtensionException(e, Transience.PERSISTENT);
     }
     if (fileValue == null) {
       return null;
     }
-    if (!fileValue.isFile()) {
-      return ASTFileLookupValue.forBadFile(fileLabel);
+    if (!fileValue.exists()) {
+      return ASTFileLookupValue.noFile("cannot load '%s': no such file", fileLabel);
     }
-    SkylarkSemantics skylarkSemantics = PrecomputedValue.SKYLARK_SEMANTICS.get(env);
-    if (skylarkSemantics == null) {
+    if (!fileValue.isFile()) {
+      return fileValue.isDirectory()
+          ? ASTFileLookupValue.noFile("cannot load '%s': is a directory", fileLabel)
+          : ASTFileLookupValue.noFile(
+              "cannot load '%s': not a regular file (dangling link?)", fileLabel);
+    }
+    StarlarkSemantics semantics = PrecomputedValue.STARLARK_SEMANTICS.get(env);
+    if (semantics == null) {
       return null;
     }
 
-    //
-    // Both the package and the file exist; load the file and parse it as an AST.
-    //
-    BuildFileAST ast = null;
+    // Options for scanning, parsing, and resolving a .bzl file (including the prelude).
+    FileOptions options =
+        FileOptions.builder()
+            .restrictStringEscapes(semantics.incompatibleRestrictStringEscapes())
+            .build();
+
+    // Both the package and the file exist; load and parse the file.
     Path path = rootedPath.asPath();
+    StarlarkFile file;
+    byte[] digest;
     try {
-      long astFileSize = fileValue.getSize();
-      try (Mutability mutability = Mutability.create("validate")) {
-        com.google.devtools.build.lib.syntax.Environment validationEnv =
-            ruleClassProvider
-                .createSkylarkRuleClassEnvironment(
-                    fileLabel,
-                    mutability,
-                    skylarkSemantics,
-                    env.getListener(),
-                    // the two below don't matter for extracting the ValidationEnvironment:
-                    /*astFileContentHashCode=*/ null,
-                    /*importMap=*/ null)
-                .setupDynamic(Runtime.PKG_NAME, Runtime.NONE)
-                .setupDynamic(Runtime.REPOSITORY_NAME, Runtime.NONE);
-        byte[] bytes = FileSystemUtils.readWithKnownFileSize(path, astFileSize);
-        ast =
-            BuildFileAST.parseSkylarkFile(
-                bytes, path.getDigest(), path.asFragment(), env.getListener());
-          ast = ast.validate(validationEnv, env.getListener());
-        }
+      byte[] bytes =
+          fileValue.isSpecialFile()
+              ? FileSystemUtils.readContent(path)
+              : FileSystemUtils.readWithKnownFileSize(path, fileValue.getSize());
+      digest = getDigestFromFileValueOrFromKnownFileContents(fileValue, bytes, digestHashFunction);
+      ParserInput input = ParserInput.create(bytes, path.toString());
+      file = StarlarkFile.parse(input, options);
     } catch (IOException e) {
-      throw new ASTLookupFunctionException(new ErrorReadingSkylarkExtensionException(e),
-          Transience.TRANSIENT);
+      throw new ErrorReadingStarlarkExtensionException(e, Transience.TRANSIENT);
     }
 
-    return ASTFileLookupValue.withFile(ast);
+    // resolve (and soon, compile)
+    Module module = Module.withPredeclared(semantics, ruleClassProvider.getEnvironment());
+    Resolver.resolveFile(file, module);
+    Event.replayEventsOn(env.getListener(), file.errors()); // TODO(adonovan): fail if !ok()?
+
+    return ASTFileLookupValue.withFile(file, digest);
+  }
+
+  private static byte[] getDigestFromFileValueOrFromKnownFileContents(
+      FileValue fileValue, byte[] contents, DigestHashFunction digestHashFunction) {
+    byte[] digest = fileValue.getDigest();
+    if (digest != null) {
+      return digest;
+    }
+    return digestHashFunction.getHashFunction().hashBytes(contents).asBytes();
   }
 
   @Nullable
@@ -147,8 +172,8 @@ public class ASTFileLookupFunction implements SkyFunction {
   }
 
   private static final class ASTLookupFunctionException extends SkyFunctionException {
-    private ASTLookupFunctionException(ErrorReadingSkylarkExtensionException e,
-        Transience transience) {
+    private ASTLookupFunctionException(
+        ErrorReadingStarlarkExtensionException e, Transience transience) {
       super(e, transience);
     }
 

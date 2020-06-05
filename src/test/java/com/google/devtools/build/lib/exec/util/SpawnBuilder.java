@@ -13,17 +13,25 @@
 // limitations under the License.
 package com.google.devtools.build.lib.exec.util;
 
+import static com.google.common.base.Preconditions.checkNotNull;
+
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.EmptyRunfilesSupplier;
+import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.SimpleSpawn;
 import com.google.devtools.build.lib.actions.Spawn;
+import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -36,34 +44,46 @@ import javax.annotation.Nullable;
 public final class SpawnBuilder {
   private String mnemonic = "Mnemonic";
   private String progressMessage = "progress message";
-  @Nullable private String ownerLabel;
+  private String ownerLabel = "//dummy:label";
+  @Nullable private PlatformInfo platform;
   private final List<String> args;
   private final Map<String, String> environment = new HashMap<>();
   private final Map<String, String> executionInfo = new HashMap<>();
-  private final List<ActionInput> inputs = new ArrayList<>();
+  private ImmutableMap<String, String> execProperties = ImmutableMap.of();
+  private final NestedSetBuilder<ActionInput> inputs = NestedSetBuilder.stableOrder();
   private final List<ActionInput> outputs = new ArrayList<>();
+  private final Map<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings =
+      new HashMap<>();
+
+  private RunfilesSupplier runfilesSupplier = EmptyRunfilesSupplier.INSTANCE;
 
   public SpawnBuilder(String... args) {
     this.args = ImmutableList.copyOf(args);
   }
 
   public Spawn build() {
-    ActionExecutionMetadata owner = new FakeOwner(mnemonic, progressMessage, ownerLabel);
+    ActionExecutionMetadata owner =
+        new FakeOwner(mnemonic, progressMessage, ownerLabel, platform, execProperties);
     return new SimpleSpawn(
         owner,
         ImmutableList.copyOf(args),
         ImmutableMap.copyOf(environment),
         ImmutableMap.copyOf(executionInfo),
-        /*runfilesSupplier=*/EmptyRunfilesSupplier.INSTANCE, 
-        ImmutableList.copyOf(inputs),
-        /*tools=*/ImmutableList.<Artifact>of(),
-        /*filesetManifests=*/ImmutableList.<Artifact>of(),
-        ImmutableList.copyOf(outputs),
+        runfilesSupplier,
+        ImmutableMap.copyOf(filesetMappings),
+        inputs.build(),
+        /*tools=*/ NestedSetBuilder.emptySet(Order.STABLE_ORDER),
+        ImmutableSet.copyOf(outputs),
         ResourceSet.ZERO);
   }
 
+  public SpawnBuilder withPlatform(PlatformInfo platform) {
+    this.platform = platform;
+    return this;
+  }
+
   public SpawnBuilder withMnemonic(String mnemonic) {
-    this.mnemonic = Preconditions.checkNotNull(mnemonic);
+    this.mnemonic = checkNotNull(mnemonic);
     return this;
   }
 
@@ -73,7 +93,7 @@ public final class SpawnBuilder {
   }
 
   public SpawnBuilder withOwnerLabel(String ownerLabel) {
-    this.ownerLabel = ownerLabel;
+    this.ownerLabel = checkNotNull(ownerLabel);
     return this;
   }
 
@@ -84,6 +104,11 @@ public final class SpawnBuilder {
 
   public SpawnBuilder withExecutionInfo(String key, String value) {
     this.executionInfo.put(key, value);
+    return this;
+  }
+
+  public SpawnBuilder withExecProperties(ImmutableMap<String, String> execProperties) {
+    this.execProperties = execProperties;
     return this;
   }
 
@@ -113,6 +138,18 @@ public final class SpawnBuilder {
     for (String name : names) {
       this.outputs.add(ActionInputHelper.fromPath(name));
     }
+    return this;
+  }
+
+  public SpawnBuilder withFilesetMapping(
+      Artifact fileset, ImmutableList<FilesetOutputSymlink> mappings) {
+    Preconditions.checkArgument(fileset.isFileset(), "Artifact %s is not fileset", fileset);
+    filesetMappings.put(fileset, mappings);
+    return this;
+  }
+
+  public SpawnBuilder withRunfilesSupplier(RunfilesSupplier runfilesSupplier) {
+    this.runfilesSupplier = runfilesSupplier;
     return this;
   }
 }

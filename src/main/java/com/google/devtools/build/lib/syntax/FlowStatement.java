@@ -13,56 +13,41 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import java.io.IOException;
 
-/**
- * A class for flow statements (e.g. break and continue)
- */
+/** A class for flow statements (break, continue, and pass) */
 public final class FlowStatement extends Statement {
-  // TODO(laurentlb): This conflicts with Statement.Kind, maybe remove it?
-  public enum Kind {
-    BREAK("break"),
-    CONTINUE("continue");
 
-    private final String name;
+  private final TokenKind kind; // BREAK | CONTINUE | PASS
+  private final int offset;
 
-    private Kind(String name) {
-      this.name = name;
-    }
-
-    public String getName() {
-      return name;
-    }
-  }
-
-  private final Kind kind;
-
-  /**
-   *
-   * @param kind The label of the statement (either break or continue)
-   */
-  public FlowStatement(Kind kind) {
+  /** @param kind The label of the statement (break, continue, or pass) */
+  FlowStatement(FileLocations locs, TokenKind kind, int offset) {
+    super(locs);
     this.kind = kind;
+    this.offset = offset;
   }
 
-  public Kind getKind() {
+  public TokenKind getKind() {
     return kind;
   }
 
   @Override
-  public void prettyPrint(Appendable buffer, int indentLevel) throws IOException {
-    printIndent(buffer, indentLevel);
-    buffer.append(kind.name);
-    buffer.append('\n');
-  }
-
-  @Override
   public String toString() {
-    return kind.name + "\n";
+    return kind.toString() + "\n";
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getStartOffset() {
+    return offset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return offset + kind.toString().length();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

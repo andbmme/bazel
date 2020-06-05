@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # pylint: disable=g-direct-third-party-import
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -15,12 +16,23 @@
 
 """Unit tests for stubify_incremental_install."""
 
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
 import os
 import unittest
 import zipfile
 
+# Do not edit this line. Copybara replaces it with PY2 migration helper.
+import six
+
+if six.PY3:
+    from unittest import mock
+else:
+    import mock
+
 from tools.android import incremental_install
-from third_party.py import mock
 
 
 class MockAdb(object):
@@ -49,7 +61,7 @@ class MockAdb(object):
     if cmd == "push":
       # "/test/adb push local remote"
       with open(args[2], "rb") as f:
-        content = f.read()
+        content = f.read().decode("utf-8")
       self.files[args[3]] = content
     elif cmd == "pull":
       # "/test/adb pull remote local"
@@ -58,7 +70,7 @@ class MockAdb(object):
       content = self.files.get(remote)
       if content is not None:
         with open(local, "wb") as f:
-          f.write(content)
+          f.write(six.ensure_binary(content, "utf-8"))
       else:
         returncode = 1
         stderr = "remote object '%s' does not exist\n" % remote
@@ -69,7 +81,7 @@ class MockAdb(object):
     elif cmd == "install-multiple":
       if args[3] == "-p":
         with open(args[5], "rb") as f:
-          content = f.read()
+          content = f.read().decode("utf-8")
         self.split_apks.add(content)
       else:
         self.package_timestamp = self._last_package_timestamp
@@ -86,16 +98,16 @@ class MockAdb(object):
       self.shell_cmdlns.append(shell_cmdln)
       if shell_cmdln.startswith(("mkdir", "am", "monkey", "input")):
         pass
-      elif shell_cmdln.startswith("dumpsys package "):
+      elif six.ensure_str(shell_cmdln).startswith("dumpsys package "):
         if self.package_timestamp is not None:
           timestamp = "firstInstallTime=%s" % self.package_timestamp
         else:
           timestamp = ""
         return self._CreatePopenMock(0, timestamp, "")
-      elif shell_cmdln.startswith("rm"):
+      elif six.ensure_str(shell_cmdln).startswith("rm"):
         file_path = shell_cmdln.split()[2]
         self.files.pop(file_path, None)
-      elif shell_cmdln.startswith("getprop ro.product.cpu.abi"):
+      elif six.ensure_str(shell_cmdln).startswith("getprop ro.product.cpu.abi"):
         return self._CreatePopenMock(0, self.abi, "")
       else:
         raise Exception("Unknown shell command line: %s" % shell_cmdln)
@@ -133,11 +145,12 @@ class IncrementalInstallTest(unittest.TestCase):
 
     # Write the stub datafile which contains the package name of the app.
     with open(self._STUB_DATAFILE, "wb") as f:
-      f.write("\n".join([self._OLD_APP_PACKGE, self._APP_PACKAGE]))
+      f.write(("\n".join([self._OLD_APP_PACKGE, self._APP_PACKAGE]))
+              .encode("utf-8"))
 
     # Write the local resource apk file.
     with open(self._RESOURCE_APK, "wb") as f:
-      f.write("resource apk")
+      f.write(b"resource apk")
 
     # Mock out subprocess.Popen to use our mock adb.
     self._popen_patch = mock.patch.object(incremental_install, "subprocess")
@@ -157,7 +170,7 @@ class IncrementalInstallTest(unittest.TestCase):
   def _CreateLocalManifest(self, *lines):
     content = "\n".join(lines)
     with open(self._DEXMANIFEST, "wb") as f:
-      f.write(content)
+      f.write(content.encode("utf-8"))
     return content
 
   def _CreateRemoteManifest(self, *lines):
@@ -205,7 +218,7 @@ class IncrementalInstallTest(unittest.TestCase):
     self._CreateZip()
 
     with open("dex1", "wb") as f:
-      f.write("content3")
+      f.write(b"content3")
 
     manifest = self._CreateLocalManifest(
         "zip1 zp1 ip1 0",
@@ -224,10 +237,10 @@ class IncrementalInstallTest(unittest.TestCase):
 
   def testSplitInstallToPristineDevice(self):
     with open("split1", "wb") as f:
-      f.write("split_content1")
+      f.write(b"split_content1")
 
     with open("main", "wb") as f:
-      f.write("main_Content")
+      f.write(b"main_Content")
 
     self._CallIncrementalInstall(
         incremental=False, split_main_apk="main", split_apks=["split1"])
@@ -235,10 +248,10 @@ class IncrementalInstallTest(unittest.TestCase):
 
   def testSplitInstallUnchanged(self):
     with open("split1", "wb") as f:
-      f.write("split_content1")
+      f.write(b"split_content1")
 
     with open("main", "wb") as f:
-      f.write("main_Content")
+      f.write(b"main_Content")
 
     self._CallIncrementalInstall(
         incremental=False, split_main_apk="main", split_apks=["split1"])
@@ -250,17 +263,17 @@ class IncrementalInstallTest(unittest.TestCase):
 
   def testSplitInstallChanges(self):
     with open("split1", "wb") as f:
-      f.write("split_content1")
+      f.write(b"split_content1")
 
     with open("main", "wb") as f:
-      f.write("main_Content")
+      f.write(b"main_Content")
 
     self._CallIncrementalInstall(
         incremental=False, split_main_apk="main", split_apks=["split1"])
     self.assertEqual(set(["split_content1"]), self._mock_adb.split_apks)
 
     with open("split1", "wb") as f:
-      f.write("split_content2")
+      f.write(b"split_content2")
     self._mock_adb.split_apks = set()
     self._CallIncrementalInstall(
         incremental=False, split_main_apk="main", split_apks=["split1"])
@@ -269,7 +282,7 @@ class IncrementalInstallTest(unittest.TestCase):
   def testMissingNativeManifestWithIncrementalInstall(self):
     self._CreateZip()
     with open("liba.so", "wb") as f:
-      f.write("liba_1")
+      f.write(b"liba_1")
 
     # Upload a library to the device.
     native_libs = ["armeabi-v7a:liba.so"]
@@ -285,7 +298,7 @@ class IncrementalInstallTest(unittest.TestCase):
   def testNonIncrementalInstallOverwritesNativeLibs(self):
     self._CreateZip()
     with open("liba.so", "wb") as f:
-      f.write("liba_1")
+      f.write(b"liba_1")
 
     # Upload a library to the device.
     native_libs = ["armeabi-v7a:liba.so"]
@@ -305,7 +318,7 @@ class IncrementalInstallTest(unittest.TestCase):
   def testNativeAbiCompatibility(self):
     self._CreateZip()
     with open("liba.so", "wb") as f:
-      f.write("liba")
+      f.write(b"liba")
 
     native_libs = ["armeabi:liba.so"]
     self._mock_adb.SetAbi("arm64-v8a")
@@ -315,9 +328,9 @@ class IncrementalInstallTest(unittest.TestCase):
   def testUploadNativeLibs(self):
     self._CreateZip()
     with open("liba.so", "wb") as f:
-      f.write("liba_1")
+      f.write(b"liba_1")
     with open("libb.so", "wb") as f:
-      f.write("libb_1")
+      f.write(b"libb_1")
 
     native_libs = ["armeabi-v7a:liba.so", "armeabi-v7a:libb.so"]
     self._CallIncrementalInstall(incremental=False, native_libs=native_libs)
@@ -326,7 +339,7 @@ class IncrementalInstallTest(unittest.TestCase):
 
     # Change a library
     with open("libb.so", "wb") as f:
-      f.write("libb_2")
+      f.write(b"libb_2")
     self._CallIncrementalInstall(incremental=True, native_libs=native_libs)
     self.assertEqual("libb_2", self._GetDeviceFile("native/libb.so"))
 
@@ -520,7 +533,7 @@ class IncrementalInstallTest(unittest.TestCase):
     self._CreateZip()
 
     with open("dex1", "wb") as f:
-      f.write("content3")
+      f.write(b"content3")
 
     self._CreateLocalManifest(
         "zip1 zp1 ip1 0",
@@ -536,7 +549,7 @@ class IncrementalInstallTest(unittest.TestCase):
     self._CreateZip()
 
     with open("dex1", "wb") as f:
-      f.write("content3")
+      f.write(b"content3")
 
     self._CreateLocalManifest(
         "zip1 zp1 ip1 0",

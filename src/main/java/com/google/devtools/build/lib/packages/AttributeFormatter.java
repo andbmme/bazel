@@ -25,15 +25,14 @@ import static com.google.devtools.build.lib.packages.BuildType.NODEP_LABEL_LIST;
 import static com.google.devtools.build.lib.packages.BuildType.OUTPUT;
 import static com.google.devtools.build.lib.packages.BuildType.OUTPUT_LIST;
 import static com.google.devtools.build.lib.packages.BuildType.TRISTATE;
-import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
-import static com.google.devtools.build.lib.syntax.Type.INTEGER;
-import static com.google.devtools.build.lib.syntax.Type.INTEGER_LIST;
-import static com.google.devtools.build.lib.syntax.Type.STRING;
-import static com.google.devtools.build.lib.syntax.Type.STRING_DICT;
-import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
-import static com.google.devtools.build.lib.syntax.Type.STRING_LIST_DICT;
+import static com.google.devtools.build.lib.packages.Type.BOOLEAN;
+import static com.google.devtools.build.lib.packages.Type.INTEGER;
+import static com.google.devtools.build.lib.packages.Type.INTEGER_LIST;
+import static com.google.devtools.build.lib.packages.Type.STRING;
+import static com.google.devtools.build.lib.packages.Type.STRING_DICT;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST;
+import static com.google.devtools.build.lib.packages.Type.STRING_LIST_DICT;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -42,18 +41,15 @@ import com.google.devtools.build.lib.packages.BuildType.SelectorList;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.Attribute.Discriminator;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.Attribute.SelectorEntry;
-import com.google.devtools.build.lib.query2.proto.proto2api.Build.Attribute.SelectorEntry.Builder;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.Attribute.Tristate;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.LabelDictUnaryEntry;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.LabelKeyedStringDictEntry;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.LabelListDictEntry;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.StringDictEntry;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.StringListDictEntry;
-import com.google.devtools.build.lib.syntax.Type;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import javax.annotation.Nullable;
 
 /** Common utilities for serializing {@link Attribute}s as protocol buffers. */
@@ -98,8 +94,7 @@ public class AttributeFormatter {
         encodeBooleanAndTriStateAsIntegerAndString);
   }
 
-  @VisibleForTesting
-  static Build.Attribute getAttributeProto(
+  private static Build.Attribute getAttributeProto(
       String name,
       Type<?> type,
       @Nullable Object value,
@@ -146,12 +141,14 @@ public class AttributeFormatter {
           .setHasDefaultValue(selector.hasDefault());
 
       // Note that the order of entries returned by selector.getEntries is stable. The map's
-      // entries' order is preserved from the sorting performed by the SelectorValue constructor.
-      for (Entry<Label, ?> entry : selector.getEntries().entrySet()) {
+      // entries' order is preserved from the fact that Starlark dictionary entry order is stable
+      // (it's determined by insertion order).
+      for (Map.Entry<Label, ?> entry : selector.getEntries().entrySet()) {
         Label condition = entry.getKey();
-        Builder selectorEntryBuilder = SelectorEntry.newBuilder()
-            .setLabel(condition.toString())
-            .setIsDefaultValue(!selector.isValueSet(condition));
+        SelectorEntry.Builder selectorEntryBuilder =
+            SelectorEntry.newBuilder()
+                .setLabel(condition.toString())
+                .setIsDefaultValue(!selector.isValueSet(condition));
 
         Object conditionValue = entry.getValue();
         if (conditionValue != null) {
@@ -306,8 +303,6 @@ public class AttributeFormatter {
 
     void addFilesetListValue(Build.FilesetEntry.Builder builder);
 
-    void addGlobCriteria(Build.GlobCriteria.Builder builder);
-
     void addLabelDictUnaryValue(LabelDictUnaryEntry.Builder builder);
 
     void addLabelKeyedStringDictValue(LabelKeyedStringDictEntry.Builder builder);
@@ -357,11 +352,6 @@ public class AttributeFormatter {
     @Override
     public void addFilesetListValue(Build.FilesetEntry.Builder builder) {
       attributeBuilder.addFilesetListValue(builder);
-    }
-
-    @Override
-    public void addGlobCriteria(Build.GlobCriteria.Builder builder) {
-      attributeBuilder.addGlobCriteria(builder);
     }
 
     @Override
@@ -460,18 +450,16 @@ public class AttributeFormatter {
    * An {@link AttributeValueBuilderAdapter} which writes to a {@link SelectorEntry.Builder}.
    *
    * <p>Note that there is no {@code encodeBooleanAndTriStateAsIntegerAndString} parameter needed
-   * here. This is because the clients that expect those alternate encodings of boolean and
-   * tristate attribute values do not support {@link SelectorList} values. When providing output to
-   * those clients, we compute the set of possible attribute values (expanding {@link SelectorList}
+   * here. This is because the clients that expect those alternate encodings of boolean and tristate
+   * attribute values do not support {@link SelectorList} values. When providing output to those
+   * clients, we compute the set of possible attribute values (expanding {@link SelectorList}
    * values, evaluating computed defaults, and flattening collections of collections; see {@link
-   * com.google.devtools.build.lib.packages.AggregatingAttributeMapper#getPossibleAttributeValues}
-   * and {@link
-   * com.google.devtools.build.lib.packages.AggregatingAttributeMapper#flattenAttributeValues}).
+   * com.google.devtools.build.lib.packages.AggregatingAttributeMapper#visitAttribute}).
    */
   private static class SelectorEntryBuilderAdapter implements AttributeValueBuilderAdapter {
     private final SelectorEntry.Builder selectorEntryBuilder;
 
-    private SelectorEntryBuilderAdapter(Builder selectorEntryBuilder) {
+    private SelectorEntryBuilderAdapter(SelectorEntry.Builder selectorEntryBuilder) {
       this.selectorEntryBuilder = Preconditions.checkNotNull(selectorEntryBuilder);
     }
 
@@ -483,11 +471,6 @@ public class AttributeFormatter {
     @Override
     public void addFilesetListValue(Build.FilesetEntry.Builder builder) {
       selectorEntryBuilder.addFilesetListValue(builder);
-    }
-
-    @Override
-    public void addGlobCriteria(Build.GlobCriteria.Builder builder) {
-      selectorEntryBuilder.addGlobCriteria(builder);
     }
 
     @Override
@@ -546,4 +529,3 @@ public class AttributeFormatter {
     }
   }
 }
-

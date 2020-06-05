@@ -19,8 +19,10 @@
 
 #include "src/main/cpp/util/file.h"
 #include "src/main/cpp/util/file_platform.h"
+#include "src/main/cpp/util/path.h"
+#include "src/main/cpp/util/path_platform.h"
 #include "src/test/cpp/util/test_util.h"
-#include "gtest/gtest.h"
+#include "googletest/include/gtest/gtest.h"
 
 namespace blaze_util {
 
@@ -44,73 +46,6 @@ static bool CreateEmptyFile(const string& path) {
     return false;
   }
   return close(fd) == 0;
-}
-
-TEST(FilePosixTest, TestDirname) {
-  // The Posix version of SplitPath (thus Dirname too, which is implemented on
-  // top of it) is not aware of Windows paths.
-  ASSERT_EQ("", Dirname(""));
-  ASSERT_EQ("/", Dirname("/"));
-  ASSERT_EQ("", Dirname("foo"));
-  ASSERT_EQ("/", Dirname("/foo"));
-  ASSERT_EQ("/foo", Dirname("/foo/"));
-  ASSERT_EQ("foo", Dirname("foo/bar"));
-  ASSERT_EQ("foo/bar", Dirname("foo/bar/baz"));
-  ASSERT_EQ("", Dirname("\\foo"));
-  ASSERT_EQ("", Dirname("\\foo\\"));
-  ASSERT_EQ("", Dirname("foo\\bar"));
-  ASSERT_EQ("", Dirname("foo\\bar\\baz"));
-  ASSERT_EQ("foo\\bar", Dirname("foo\\bar/baz\\qux"));
-  ASSERT_EQ("c:", Dirname("c:/"));
-  ASSERT_EQ("", Dirname("c:\\"));
-  ASSERT_EQ("c:", Dirname("c:/foo"));
-  ASSERT_EQ("", Dirname("c:\\foo"));
-  ASSERT_EQ("", Dirname("\\\\?\\c:\\"));
-  ASSERT_EQ("", Dirname("\\\\?\\c:\\foo"));
-}
-
-TEST(FilePosixTest, TestBasename) {
-  // The Posix version of SplitPath (thus Basename too, which is implemented on
-  // top of it) is not aware of Windows paths.
-  ASSERT_EQ("", Basename(""));
-  ASSERT_EQ("", Basename("/"));
-  ASSERT_EQ("foo", Basename("foo"));
-  ASSERT_EQ("foo", Basename("/foo"));
-  ASSERT_EQ("", Basename("/foo/"));
-  ASSERT_EQ("bar", Basename("foo/bar"));
-  ASSERT_EQ("baz", Basename("foo/bar/baz"));
-  ASSERT_EQ("\\foo", Basename("\\foo"));
-  ASSERT_EQ("\\foo\\", Basename("\\foo\\"));
-  ASSERT_EQ("foo\\bar", Basename("foo\\bar"));
-  ASSERT_EQ("foo\\bar\\baz", Basename("foo\\bar\\baz"));
-  ASSERT_EQ("baz\\qux", Basename("foo\\bar/baz\\qux"));
-  ASSERT_EQ("qux", Basename("qux"));
-  ASSERT_EQ("", Basename("c:/"));
-  ASSERT_EQ("c:\\", Basename("c:\\"));
-  ASSERT_EQ("foo", Basename("c:/foo"));
-  ASSERT_EQ("c:\\foo", Basename("c:\\foo"));
-  ASSERT_EQ("\\\\?\\c:\\", Basename("\\\\?\\c:\\"));
-  ASSERT_EQ("\\\\?\\c:\\foo", Basename("\\\\?\\c:\\foo"));
-}
-
-TEST(FilePosixTest, JoinPath) {
-  std::string path = JoinPath("", "");
-  ASSERT_EQ("", path);
-
-  path = JoinPath("a", "b");
-  ASSERT_EQ("a/b", path);
-
-  path = JoinPath("a/", "b");
-  ASSERT_EQ("a/b", path);
-
-  path = JoinPath("a", "/b");
-  ASSERT_EQ("a/b", path);
-
-  path = JoinPath("a/", "/b");
-  ASSERT_EQ("a/b", path);
-
-  path = JoinPath("/", "/");
-  ASSERT_EQ("/", path);
 }
 
 void MockDirectoryListingFunction(const string& path,
@@ -159,7 +94,7 @@ TEST(FilePosixTest, MakeDirectories) {
   ASSERT_TRUE(ok);
   struct stat filestat = {};
   ASSERT_EQ(0, stat(dir.c_str(), &filestat));
-  ASSERT_EQ(0750, filestat.st_mode & 0777);
+  ASSERT_EQ(mode_t(0750), filestat.st_mode & 0777);
 
   // srcdir shouldn't be writable.
   // TODO(ulfjack): Fix this!
@@ -272,24 +207,6 @@ TEST(FilePosixTest, CanAccess) {
   ASSERT_EQ(0, rmdir(dir.c_str()));
 }
 
-TEST(FilePosixTest, GetCwd) {
-  char cwdbuf[PATH_MAX];
-  ASSERT_EQ(cwdbuf, getcwd(cwdbuf, PATH_MAX));
-
-  // Assert that GetCwd() and getcwd() return the same value.
-  string cwd(cwdbuf);
-  ASSERT_EQ(cwd, blaze_util::GetCwd());
-
-  // Change to a different directory.
-  ASSERT_EQ(0, chdir("/usr"));
-
-  // Assert that GetCwd() returns the new CWD.
-  ASSERT_EQ(string("/usr"), blaze_util::GetCwd());
-
-  ASSERT_EQ(0, chdir(cwd.c_str()));
-  ASSERT_EQ(cwd, blaze_util::GetCwd());
-}
-
 TEST(FilePosixTest, ChangeDirectory) {
   // Retrieve the current working directory.
   char old_wd[PATH_MAX];
@@ -361,7 +278,7 @@ TEST(FilePosixTest, ForEachDirectoryEntry) {
   // Actual test: list the directory.
   MockDirectoryEntryConsumer consumer;
   ForEachDirectoryEntry(root, &consumer);
-  ASSERT_EQ(4, consumer.entries.size());
+  ASSERT_EQ(size_t(4), consumer.entries.size());
 
   // Sort the collected directory entries.
   struct {
@@ -387,7 +304,7 @@ TEST(FilePosixTest, ForEachDirectoryEntry) {
   // Actual test: list a directory symlink.
   consumer.entries.clear();
   ForEachDirectoryEntry(dir_sym, &consumer);
-  ASSERT_EQ(1, consumer.entries.size());
+  ASSERT_EQ(size_t(1), consumer.entries.size());
   expected = pair<string, bool>(subfile_through_sym, false);
   ASSERT_EQ(expected, consumer.entries[0]);
 
@@ -405,32 +322,63 @@ TEST(FilePosixTest, ForEachDirectoryEntry) {
   rmdir(root.c_str());
 }
 
-TEST(FilePosixTest, IsAbsolute) {
-  ASSERT_FALSE(IsAbsolute(""));
-  ASSERT_TRUE(IsAbsolute("/"));
-  ASSERT_TRUE(IsAbsolute("/foo"));
-  ASSERT_FALSE(IsAbsolute("\\"));
-  ASSERT_FALSE(IsAbsolute("\\foo"));
-  ASSERT_FALSE(IsAbsolute("c:"));
-  ASSERT_FALSE(IsAbsolute("c:/"));
-  ASSERT_FALSE(IsAbsolute("c:\\"));
-  ASSERT_FALSE(IsAbsolute("c:\\foo"));
-  ASSERT_FALSE(IsAbsolute("\\\\?\\c:\\"));
-  ASSERT_FALSE(IsAbsolute("\\\\?\\c:\\foo"));
+TEST(FileTest, TestRemoveRecursivelyPosix) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  ASSERT_NE(tempdir_cstr, nullptr);
+  string tempdir(tempdir_cstr);
+  ASSERT_TRUE(PathExists(tempdir));
+
+  string unwritable_dir(JoinPath(tempdir, "test_rmr_unwritable"));
+  EXPECT_TRUE(MakeDirectories(unwritable_dir, 0700));
+  EXPECT_TRUE(WriteFile("junkdata", 8, JoinPath(unwritable_dir, "file")));
+  ASSERT_EQ(0, chmod(unwritable_dir.c_str(), 0500));
+  EXPECT_FALSE(RemoveRecursively(unwritable_dir));
+
+  string symlink_target_dir(JoinPath(tempdir, "test_rmr_symlink_target_dir"));
+  EXPECT_TRUE(MakeDirectories(symlink_target_dir, 0700));
+  string symlink_target_dir_file(JoinPath(symlink_target_dir, "file"));
+  EXPECT_TRUE(WriteFile("junkdata", 8, symlink_target_dir_file));
+  string symlink_dir(JoinPath(tempdir, "test_rmr_symlink_dir"));
+  EXPECT_EQ(0, symlink(symlink_target_dir.c_str(), symlink_dir.c_str()));
+  EXPECT_TRUE(RemoveRecursively(symlink_dir));
+  EXPECT_FALSE(PathExists(symlink_dir));
+  EXPECT_TRUE(PathExists(symlink_target_dir));
+  EXPECT_TRUE(PathExists(symlink_target_dir_file));
+
+  string dir_with_symlinks(JoinPath(tempdir, "test_rmr_dir_w_symlinks"));
+  EXPECT_TRUE(MakeDirectories(dir_with_symlinks, 0700));
+  string file_symlink_target(JoinPath(tempdir, "test_rmr_dir_w_symlinks_file"));
+  EXPECT_TRUE(WriteFile("junkdata", 8, file_symlink_target));
+  EXPECT_EQ(0, symlink(file_symlink_target.c_str(),
+                       JoinPath(dir_with_symlinks, "file").c_str()));
+  string dir_symlink_target(JoinPath(tempdir, "test_rmr_dir_w_symlinks_dir"));
+  EXPECT_TRUE(MakeDirectories(dir_symlink_target, 0700));
+  string dir_symlink_target_file(JoinPath(dir_symlink_target, "file"));
+  EXPECT_TRUE(WriteFile("junkdata", 8, dir_symlink_target_file));
+  EXPECT_EQ(0, symlink(dir_symlink_target.c_str(),
+                       JoinPath(dir_with_symlinks, "dir").c_str()));
+  EXPECT_TRUE(RemoveRecursively(dir_with_symlinks));
+  EXPECT_FALSE(PathExists(dir_with_symlinks));
+  EXPECT_TRUE(PathExists(dir_symlink_target));
+  EXPECT_TRUE(PathExists(dir_symlink_target_file));
+  EXPECT_TRUE(PathExists(file_symlink_target));
 }
 
-TEST(FilePosixTest, IsRootDirectory) {
-  ASSERT_FALSE(IsRootDirectory(""));
-  ASSERT_TRUE(IsRootDirectory("/"));
-  ASSERT_FALSE(IsRootDirectory("/foo"));
-  ASSERT_FALSE(IsRootDirectory("\\"));
-  ASSERT_FALSE(IsRootDirectory("\\foo"));
-  ASSERT_FALSE(IsRootDirectory("c:"));
-  ASSERT_FALSE(IsRootDirectory("c:/"));
-  ASSERT_FALSE(IsRootDirectory("c:\\"));
-  ASSERT_FALSE(IsRootDirectory("c:\\foo"));
-  ASSERT_FALSE(IsRootDirectory("\\\\?\\c:\\"));
-  ASSERT_FALSE(IsRootDirectory("\\\\?\\c:\\foo"));
+TEST(FileTest, TestCreateTempDirDoesntClobberParentPerms) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  ASSERT_NE(tempdir_cstr, nullptr);
+  string tempdir(tempdir_cstr);
+  ASSERT_TRUE(PathExists(tempdir));
+
+  string existing_parent_dir(JoinPath(tempdir, "existing"));
+  ASSERT_TRUE(MakeDirectories(existing_parent_dir, 0700));
+  string prefix(JoinPath(existing_parent_dir, "mytmp"));
+  string result(CreateTempDir(prefix));
+  ASSERT_EQ(0, result.find(prefix));
+  EXPECT_TRUE(PathExists(result));
+  struct stat filestat = {};
+  ASSERT_EQ(0, stat(existing_parent_dir.c_str(), &filestat));
+  ASSERT_EQ(mode_t(0700), filestat.st_mode & 0777);
 }
 
 }  // namespace blaze_util

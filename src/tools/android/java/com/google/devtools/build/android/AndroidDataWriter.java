@@ -28,7 +28,6 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.android.AndroidResourceMerger.MergingException;
-import com.google.devtools.build.android.AndroidResourceMergingAction.Options;
 import com.google.devtools.build.android.junctions.JunctionCreator;
 import com.google.devtools.build.android.junctions.NoopJunctionCreator;
 import com.google.devtools.build.android.junctions.WindowsJunctionCreator;
@@ -45,12 +44,11 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -132,41 +130,9 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
         }
       };
 
-  /**
-   * The merged {@link Options#resourcesOutput} is only used for validation and not for running
-   * (unlike the final APK), so the image files do not need to be the true image files. We only need
-   * the filenames to be the same.
-   *
-   * <p>Thus, we only create empty files for PNGs (convenient with a custom PngCruncher object).
-   * This does miss out on other image files like .webp.
-   */
-  static final PngCruncher STUB_CRUNCHER =
-      new PngCruncher() {
-
-        @Override
-        public void crunchPng(int key, File from, File to) throws PngException {
-          try {
-            to.createNewFile();
-            if (!to.setLastModified(System.currentTimeMillis())) {
-              throw new PngException("Could not set milliseconds");
-            }
-          } catch (IOException e) {
-            throw new PngException(e);
-          }
-        }
-
-        @Override
-        public int start() {
-          return 0;
-        }
-
-        @Override
-        public void end(int key) {}
-      };
-
   private final Path destination;
 
-  private final Map<String, ResourceValuesDefinitions> valueTags = new HashMap<>();
+  private final Map<String, ResourceValuesDefinitions> valueTags = new LinkedHashMap<>();
   private final Path resourceDirectory;
   private final Path assetDirectory;
   private final PngCruncher cruncher;
@@ -189,7 +155,7 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
   /**
    * Creates a new, naive writer for testing.
    *
-   * This writer has "assets" and a "res" directory from the destination directory, as well as a
+   * <p>This writer has "assets" and a "res" directory from the destination directory, as well as a
    * noop png cruncher and a {@link ExecutorService} of 1 thread.
    *
    * @param destination The base directory to derive all paths.
@@ -212,7 +178,7 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
    * @param resourceDirectory The directory to copy resources into.
    * @param assetsDirectory The directory to copy assets into.
    * @param cruncher The cruncher for png files. If the cruncher is null, it will be replaced with a
-   *    noop cruncher.
+   *     noop cruncher.
    * @param executorService An execution service for multi-threaded writing.
    * @return A new {@link AndroidDataWriter}.
    */
@@ -268,12 +234,10 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
     writeTasks.add(executorService.submit(new CopyTask(sourcePath, destinationPath)));
   }
 
-  /**
-   * Finalizes all operations and flushes the buffers.
-   */
+  /** Finalizes all operations and flushes the buffers. */
   @Override
   public void flush() throws IOException {
-    for (Entry<String, ResourceValuesDefinitions> entry : valueTags.entrySet()) {
+    for (Map.Entry<String, ResourceValuesDefinitions> entry : valueTags.entrySet()) {
       writeTasks.add(
           executorService.submit(
               entry.getValue().createWritingTask(resourceDirectory().resolve(entry.getKey()))));
@@ -312,9 +276,7 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
     valueTags.get(valuesPath).addAllNamespaces(namespaces);
   }
 
-  /**
-   * A container for the {@linkplain Segment}s of a values.xml file.
-   */
+  /** A container for the {@linkplain Segment}s of a values.xml file. */
   private static class ResourceValuesDefinitions {
     private static final class WritingTask implements Callable<Boolean> {
 
@@ -349,14 +311,14 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
                 StandardOpenOption.WRITE)) {
           writer.write(PRELUDE);
           writer.write(START_RESOURCES_TAG);
-          for (Entry<String, String> prefixToUri : namespaces) {
+          for (Map.Entry<String, String> prefixToUri : namespaces) {
             writer.write(" xmlns:");
             writer.write(prefixToUri.getKey());
             writer.write("=\"");
             writer.write(prefixToUri.getValue());
             writer.write("\"");
           }
-          for (Entry<String, String> attribute : attributes.entrySet()) {
+          for (Map.Entry<String, String> attribute : attributes.entrySet()) {
             writer.write(" ");
             writer.write(attribute.getKey());
             writer.write("=\"");
@@ -380,9 +342,9 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
     }
 
     final Multimap<FullyQualifiedName, Segment> segments = ArrayListMultimap.create();
-    final Set<FullyQualifiedName> adopted = new HashSet<>();
+    final Set<FullyQualifiedName> adopted = new LinkedHashSet<>();
     Namespaces namespaces = Namespaces.empty();
-    final Map<String, String> attributes = Maps.newHashMap();
+    final Map<String, String> attributes = Maps.newLinkedHashMap();
 
     private ValueResourceDefinitionMetadata resource(final FullyQualifiedName fqn) {
       return new StringValueResourceDefinitionMetadata(segments, adopted, fqn);
@@ -541,9 +503,9 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
     }
 
     @Override
-    public StartTag addAttributesFrom(Iterable<Entry<String, String>> entries) {
+    public StartTag addAttributesFrom(Iterable<Map.Entry<String, String>> entries) {
       StartTag tag = this;
-      for (Entry<String, String> entry : entries) {
+      for (Map.Entry<String, String> entry : entries) {
         tag = tag.attribute(entry.getKey()).setTo(entry.getValue());
       }
       return tag;
@@ -589,8 +551,8 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
 
     @Override
     public ValuesResourceDefinition endTag() {
-      Preconditions.checkArgument(!tagStack.isEmpty(),
-          "Unable to endTag, as no tag has been started.");
+      Preconditions.checkArgument(
+          !tagStack.isEmpty(), "Unable to endTag, as no tag has been started.");
       mapper.add("</" + tagStack.pop() + ">");
       return this;
     }
@@ -685,8 +647,11 @@ public class AndroidDataWriter implements AndroidDataWritingVisitor {
     @Override
     public Path write(Path previousSource, Writer writer) throws IOException {
       Path source = previousSource;
-      Preconditions.checkArgument(segmentsByName.containsKey(fqn), "%s has no segment in %s",
-          fqn.toPrettyString(), segmentsByName.keySet());
+      Preconditions.checkArgument(
+          segmentsByName.containsKey(fqn),
+          "%s has no segment in %s",
+          fqn.toPrettyString(),
+          segmentsByName.keySet());
       for (Segment s : segmentsByName.get(fqn)) {
         // not recording the source
         source = s.write(source, writer);

@@ -14,11 +14,12 @@
 
 package com.google.devtools.build.lib.rules.proto;
 
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.HOST;
-import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.TARGET;
+import static com.google.devtools.build.lib.analysis.TransitionMode.HOST;
+import static com.google.devtools.build.lib.analysis.TransitionMode.TARGET;
 import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
@@ -27,18 +28,28 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.packages.Type;
 
 /** Implements {code proto_lang_toolchain}. */
 public class ProtoLangToolchain implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
-      throws InterruptedException, RuleErrorException {
+      throws InterruptedException, RuleErrorException, ActionConflictException {
+    ProtoCommon.checkRuleHasValidMigrationTag(ruleContext);
     NestedSetBuilder<Artifact> blacklistedProtos = NestedSetBuilder.stableOrder();
-    for (FileProvider protos :
-        ruleContext.getPrerequisites("blacklisted_protos", TARGET, FileProvider.class)) {
-      blacklistedProtos.addTransitive(protos.getFilesToBuild());
+    for (TransitiveInfoCollection protos :
+        ruleContext.getPrerequisites("blacklisted_protos", TARGET)) {
+      ProtoInfo protoInfo = protos.get(ProtoInfo.PROVIDER);
+      // TODO(cushon): it would be nice to make this mandatory and stop adding files to build too
+      if (protoInfo != null) {
+        blacklistedProtos.addTransitive(protoInfo.getOriginalTransitiveProtoSources());
+      } else {
+        // Only add files from FileProvider if |protos| is not a proto_library to avoid adding
+        // the descriptor_set of proto_library to the list of blacklisted files.
+        blacklistedProtos.addTransitive(protos.getProvider(FileProvider.class).getFilesToBuild());
+      }
     }
 
     return new RuleConfiguredTargetBuilder(ruleContext)

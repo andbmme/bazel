@@ -17,12 +17,14 @@ import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Interner;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
-import com.google.devtools.build.skyframe.LegacySkyKey;
+import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.util.Objects;
@@ -32,7 +34,8 @@ import javax.annotation.Nullable;
  * The value computed by {@link CollectPackagesUnderDirectoryFunction}. Contains a mapping for all
  * its non-excluded directories to whether there are packages or error messages beneath them.
  *
- * <p>This value is used by {@link GraphBackedRecursivePackageProvider#getPackagesUnderDirectory} to
+ * <p>This value is used by {@link
+ * com.google.devtools.build.lib.pkgcache.RecursivePackageProvider#streamPackagesUnderDirectory} to
  * help it traverse the graph and find the set of packages under a directory, recursively by {@link
  * CollectPackagesUnderDirectoryFunction} which computes a value for a directory by aggregating
  * results calculated from its subdirectories, and by {@link
@@ -50,8 +53,9 @@ import javax.annotation.Nullable;
  * directories above that one, but they don't need to be re-run.
  */
 public abstract class CollectPackagesUnderDirectoryValue implements SkyValue {
-
-  private final ImmutableMap<RootedPath, Boolean> subdirectoryTransitivelyContainsPackagesOrErrors;
+  @AutoCodec.VisibleForSerialization
+  protected final ImmutableMap<RootedPath, Boolean>
+      subdirectoryTransitivelyContainsPackagesOrErrors;
 
   CollectPackagesUnderDirectoryValue(
       ImmutableMap<RootedPath, Boolean> subdirectoryTransitivelyContainsPackagesOrErrors) {
@@ -60,15 +64,19 @@ public abstract class CollectPackagesUnderDirectoryValue implements SkyValue {
   }
 
   /** Represents a successfully loaded package or a directory without a BUILD file. */
+  @AutoCodec
   public static class NoErrorCollectPackagesUnderDirectoryValue
       extends CollectPackagesUnderDirectoryValue {
+    @AutoCodec
     public static final NoErrorCollectPackagesUnderDirectoryValue EMPTY =
         new NoErrorCollectPackagesUnderDirectoryValue(
             false, ImmutableMap.<RootedPath, Boolean>of());
 
     private final boolean isDirectoryPackage;
 
-    private NoErrorCollectPackagesUnderDirectoryValue(
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    NoErrorCollectPackagesUnderDirectoryValue(
         boolean isDirectoryPackage,
         ImmutableMap<RootedPath, Boolean> subdirectoryTransitivelyContainsPackagesOrErrors) {
       super(subdirectoryTransitivelyContainsPackagesOrErrors);
@@ -121,11 +129,14 @@ public abstract class CollectPackagesUnderDirectoryValue implements SkyValue {
   }
 
   /** Represents a directory with a BUILD file that failed to load. */
+  @AutoCodec
   public static class ErrorCollectPackagesUnderDirectoryValue
       extends CollectPackagesUnderDirectoryValue {
     private final String errorMessage;
 
-    private ErrorCollectPackagesUnderDirectoryValue(
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    ErrorCollectPackagesUnderDirectoryValue(
         String errorMessage,
         ImmutableMap<RootedPath, Boolean> subdirectoryTransitivelyContainsPackagesOrErrors) {
       super(subdirectoryTransitivelyContainsPackagesOrErrors);
@@ -227,10 +238,33 @@ public abstract class CollectPackagesUnderDirectoryValue implements SkyValue {
   @ThreadSafe
   public static SkyKey key(
       RepositoryName repository, RootedPath rootedPath, ImmutableSet<PathFragment> excludedPaths) {
-    return key(new RecursivePkgKey(repository, rootedPath, excludedPaths));
+    return Key.create(repository, rootedPath, excludedPaths);
   }
 
-  static SkyKey key(RecursivePkgKey recursivePkgKey) {
-    return LegacySkyKey.create(SkyFunctions.COLLECT_PACKAGES_UNDER_DIRECTORY, recursivePkgKey);
+  @AutoCodec.VisibleForSerialization
+  @AutoCodec
+  static class Key extends RecursivePkgSkyKey {
+    private static final Interner<Key> interner = BlazeInterners.newWeakInterner();
+
+    private Key(
+        RepositoryName repositoryName,
+        RootedPath rootedPath,
+        ImmutableSet<PathFragment> excludedPaths) {
+      super(repositoryName, rootedPath, excludedPaths);
+    }
+
+    @AutoCodec.VisibleForSerialization
+    @AutoCodec.Instantiator
+    static Key create(
+        RepositoryName repositoryName,
+        RootedPath rootedPath,
+        ImmutableSet<PathFragment> excludedPaths) {
+      return interner.intern(new Key(repositoryName, rootedPath, excludedPaths));
+    }
+
+    @Override
+    public SkyFunctionName functionName() {
+      return SkyFunctions.COLLECT_PACKAGES_UNDER_DIRECTORY;
+    }
   }
 }

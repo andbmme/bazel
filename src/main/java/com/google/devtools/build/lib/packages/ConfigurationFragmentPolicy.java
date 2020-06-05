@@ -13,20 +13,24 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSetMultimap;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.SetMultimap;
-import com.google.devtools.build.lib.packages.Attribute.ConfigurationTransition;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
-
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import java.util.Collection;
 import java.util.Set;
+import net.starlark.java.annot.StarlarkBuiltin;
+import net.starlark.java.annot.StarlarkInterfaceUtils;
 
 /**
- * Policy used to express the set of configuration fragments which are legal for a rule or aspect
- * to access.
+ * Policy used to express the set of configuration fragments which are legal for a rule or aspect to
+ * access.
  */
+@AutoCodec
 public final class ConfigurationFragmentPolicy {
 
   /**
@@ -67,11 +71,14 @@ public final class ConfigurationFragmentPolicy {
     private final SetMultimap<ConfigurationTransition, Class<?>> requiredConfigurationFragments
         = LinkedHashMultimap.create();
     /**
-     * Sets of configuration fragment names required by this rule, a set for each configuration.
-     * Duplicate entries will automatically be ignored by the SetMultimap.
+     * Sets of configuration fragments required by this rule, as defined by their Starlark names
+     * (see {@link StarlarkBuiltin}, a set for each configuration.
+     *
+     * <p>Duplicate entries will automatically be ignored by the SetMultimap.
      */
-    private final SetMultimap<ConfigurationTransition, String> requiredConfigurationFragmentNames
-        = LinkedHashMultimap.create();
+    private final SetMultimap<ConfigurationTransition, String>
+        starlarkRequiredConfigurationFragments = LinkedHashMultimap.create();
+
     private MissingFragmentPolicy missingFragmentPolicy = MissingFragmentPolicy.FAIL_ANALYSIS;
 
     /**
@@ -81,18 +88,7 @@ public final class ConfigurationFragmentPolicy {
      * <p>The value is inherited by subclasses.
      */
     public Builder requiresConfigurationFragments(Collection<Class<?>> configurationFragments) {
-      requiresConfigurationFragments(ConfigurationTransition.NONE, configurationFragments);
-      return this;
-    }
-
-    /**
-     * Declares that the implementation of the associated rule class requires the given
-     * fragments to be present in this rule's host configuration only.
-     *
-     * <p>The value is inherited by subclasses.
-     */
-    public Builder requiresHostConfigurationFragments(Collection<Class<?>> configurationFragments) {
-      requiresConfigurationFragments(ConfigurationTransition.HOST, configurationFragments);
+      requiresConfigurationFragments(NoTransition.INSTANCE, configurationFragments);
       return this;
     }
 
@@ -103,57 +99,50 @@ public final class ConfigurationFragmentPolicy {
      *
      * <p>The value is inherited by subclasses.
      */
-    private void requiresConfigurationFragments(ConfigurationTransition transition,
+    public Builder requiresConfigurationFragments(ConfigurationTransition transition,
         Collection<Class<?>> configurationFragments) {
+      // We can relax this assumption if needed. But it's already sketchy to let a rule see more
+      // than its own configuration. So we don't want to casually proliferate this pattern.
+      Preconditions.checkArgument(
+          transition == NoTransition.INSTANCE || transition.isHostTransition());
       requiredConfigurationFragments.putAll(transition, configurationFragments);
-    }
-
-    /**
-     * Declares that the implementation of the associated rule class requires the given
-     * fragments to be present in this rule's target configuration only.
-     *
-     * <p>In contrast to {@link #requiresConfigurationFragments(Collection)}, this method takes the
-     * names of fragments (as determined by {@link SkylarkModule.Resolver}) instead of their
-     * classes.
-     *
-     * <p>The value is inherited by subclasses.
-     */
-    public Builder requiresConfigurationFragmentsBySkylarkModuleName(
-        Collection<String> configurationFragmentNames) {
-      requiresConfigurationFragmentsBySkylarkModuleName(
-          ConfigurationTransition.NONE, configurationFragmentNames);
       return this;
     }
 
     /**
-     * Declares that the implementation of the associated rule class requires the given
-     * fragments to be present in this rule's host configuration only.
+     * Declares that the implementation of the associated rule class requires the given fragments to
+     * be present in this rule's target configuration only.
      *
-     * <p>In contrast to {@link #requiresHostConfigurationFragments(Collection)}, this method takes
-     * the names of fragments (as determined by {@link SkylarkModule.Resolver}) instead of their
-     * classes.
+     * <p>In contrast to {@link #requiresConfigurationFragments(Collection)}, this method takes the
+     * names of fragments (as determined by {@link StarlarkBuiltin}) instead of their classes.
      *
      * <p>The value is inherited by subclasses.
      */
-    public Builder requiresHostConfigurationFragmentsBySkylarkModuleName(
+    public Builder requiresConfigurationFragmentsByStarlarkBuiltinName(
         Collection<String> configurationFragmentNames) {
-      requiresConfigurationFragmentsBySkylarkModuleName(
-          ConfigurationTransition.HOST, configurationFragmentNames);
+
+      requiresConfigurationFragmentsByStarlarkBuiltinName(
+          NoTransition.INSTANCE, configurationFragmentNames);
       return this;
     }
 
     /**
      * Declares the configuration fragments that are required by this rule for the specified
-     * configuration. Valid transition values are HOST for the host configuration and NONE for
-     * the target configuration.
+     * configuration. Valid transition values are HOST for the host configuration and NONE for the
+     * target configuration.
      *
-     * <p>In contrast to {@link #requiresConfigurationFragments(Collection)}, this method takes the
-     * names of fragments (as determined by {@link SkylarkModule.Resolver}) instead of their
-     * classes.
+     * <p>In contrast to {@link #requiresConfigurationFragments(ConfigurationTransition,
+     * Collection)}, this method takes the names of fragments (as determined by {@link
+     * StarlarkBuiltin}) instead of their classes.
      */
-    private void requiresConfigurationFragmentsBySkylarkModuleName(
+    public Builder requiresConfigurationFragmentsByStarlarkBuiltinName(
         ConfigurationTransition transition, Collection<String> configurationFragmentNames) {
-      requiredConfigurationFragmentNames.putAll(transition, configurationFragmentNames);
+      // We can relax this assumption if needed. But it's already sketchy to let a rule see more
+      // than its own configuration. So we don't want to casually proliferate this pattern.
+      Preconditions.checkArgument(
+          transition == NoTransition.INSTANCE || transition.isHostTransition());
+      starlarkRequiredConfigurationFragments.putAll(transition, configurationFragmentNames);
+      return this;
     }
 
     /**
@@ -163,7 +152,7 @@ public final class ConfigurationFragmentPolicy {
      */
     public Builder includeConfigurationFragmentsFrom(ConfigurationFragmentPolicy other) {
       requiredConfigurationFragments.putAll(other.requiredConfigurationFragments);
-      requiredConfigurationFragmentNames.putAll(other.requiredConfigurationFragmentNames);
+      starlarkRequiredConfigurationFragments.putAll(other.starlarkRequiredConfigurationFragments);
       return this;
     }
 
@@ -179,7 +168,7 @@ public final class ConfigurationFragmentPolicy {
     public ConfigurationFragmentPolicy build() {
       return new ConfigurationFragmentPolicy(
           ImmutableSetMultimap.copyOf(requiredConfigurationFragments),
-          ImmutableSetMultimap.copyOf(requiredConfigurationFragmentNames),
+          ImmutableSetMultimap.copyOf(starlarkRequiredConfigurationFragments),
           missingFragmentPolicy);
     }
   }
@@ -193,22 +182,23 @@ public final class ConfigurationFragmentPolicy {
 
   /**
    * A dictionary that maps configurations (NONE for target configuration, HOST for host
-   * configuration) to lists of Skylark module names of required configuration fragments.
+   * configuration) to lists of Starlark module names of required configuration fragments.
    */
   private final ImmutableSetMultimap<ConfigurationTransition, String>
-      requiredConfigurationFragmentNames;
+      starlarkRequiredConfigurationFragments;
 
   /**
    * What to do during analysis if a configuration fragment is missing.
    */
   private final MissingFragmentPolicy missingFragmentPolicy;
 
-  private ConfigurationFragmentPolicy(
+  @AutoCodec.VisibleForSerialization
+  ConfigurationFragmentPolicy(
       ImmutableSetMultimap<ConfigurationTransition, Class<?>> requiredConfigurationFragments,
-      ImmutableSetMultimap<ConfigurationTransition, String> requiredConfigurationFragmentNames,
+      ImmutableSetMultimap<ConfigurationTransition, String> starlarkRequiredConfigurationFragments,
       MissingFragmentPolicy missingFragmentPolicy) {
     this.requiredConfigurationFragments = requiredConfigurationFragments;
-    this.requiredConfigurationFragmentNames = requiredConfigurationFragmentNames;
+    this.starlarkRequiredConfigurationFragments = starlarkRequiredConfigurationFragments;
     this.missingFragmentPolicy = missingFragmentPolicy;
   }
 
@@ -220,6 +210,17 @@ public final class ConfigurationFragmentPolicy {
     return ImmutableSet.copyOf(requiredConfigurationFragments.values());
   }
 
+  /**
+   * Returns the fragments required by Starlark definitions (e.g. <code>fragments = ["cpp"]</code>
+   * with the naming form seen in the Starlark API.
+   *
+   * <p>{@link
+   * com.google.devtools.build.lib.analysis.config.BuildConfiguration#getStarlarkFragmentByName} can
+   * be used to convert this to Java fragment instances.
+   */
+  public Collection<String> getRequiredStarlarkFragments() {
+    return starlarkRequiredConfigurationFragments.values();
+  }
   /**
    * Checks if the configuration fragment may be accessed (i.e., if it's declared) in the specified
    * configuration (target or host).
@@ -247,9 +248,12 @@ public final class ConfigurationFragmentPolicy {
    * specified configuration (target or host).
    */
   private boolean hasLegalFragmentName(
-      Class<?> configurationFragment, ConfigurationTransition config) {
-    return requiredConfigurationFragmentNames.containsEntry(
-        config, SkylarkModule.Resolver.resolveName(configurationFragment));
+      Class<?> configurationFragment, ConfigurationTransition transition) {
+    StarlarkBuiltin fragmentModule =
+        StarlarkInterfaceUtils.getStarlarkBuiltin(configurationFragment);
+
+    return fragmentModule != null
+        && starlarkRequiredConfigurationFragments.containsEntry(transition, fragmentModule.name());
   }
 
   /**
@@ -257,8 +261,11 @@ public final class ConfigurationFragmentPolicy {
    * configuration.
    */
   private boolean hasLegalFragmentName(Class<?> configurationFragment) {
-    return requiredConfigurationFragmentNames.containsValue(
-        SkylarkModule.Resolver.resolveName(configurationFragment));
+    StarlarkBuiltin fragmentModule =
+        StarlarkInterfaceUtils.getStarlarkBuiltin(configurationFragment);
+
+    return fragmentModule != null
+        && starlarkRequiredConfigurationFragments.containsValue(fragmentModule.name());
   }
 
   /**

@@ -15,29 +15,12 @@
 
 package com.google.devtools.build.lib.rules.cpp;
 
-import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
-
-import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * "White-box" unit test of cc_import rule.
- */
+/** "White-box" unit test of cc_import rule. */
 @RunWith(JUnit4.class)
-public class CcImportConfiguredTargetTest extends BuildViewTestCase {
-
-  @Test
-  public void testCcImportRule() throws Exception {
-    scratch.file("third_party/BUILD",
-        "cc_import(",
-        "  name = 'a_import',",
-        "  static_library = 'A.a',",
-        "  shared_library = 'A.so',",
-        "  interface_library = 'A.ifso',",
-        "  hdrs = ['a.h'],",
-        "  alwayslink = 1,",
-        ")");
-    getConfiguredTarget("//third_party:a_import");
-  }
+public class CcImportConfiguredTargetTest extends CcImportBaseConfiguredTargetTest {
+  @Override
+  protected void setIsStarlarkImplementation() {}
 }

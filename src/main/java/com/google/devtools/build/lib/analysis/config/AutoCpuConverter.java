@@ -37,6 +37,8 @@ public class AutoCpuConverter implements Converter<String> {
           return "darwin";
         case FREEBSD:
           return "freebsd";
+        case OPENBSD:
+          return "openbsd";
         case WINDOWS:
           switch (CPU.getCurrent()) {
             case X86_64:
@@ -55,6 +57,8 @@ public class AutoCpuConverter implements Converter<String> {
               return "ppc";
             case ARM:
               return "arm";
+            case AARCH64:
+              return "aarch64";
             case S390X:
               return "s390x";
             default:
@@ -79,6 +83,8 @@ public class AutoCpuConverter implements Converter<String> {
       return Pair.of(CPU.getCurrent(), OS.DARWIN);
     } else if (input.startsWith("freebsd")) {
       return Pair.of(CPU.getCurrent(), OS.FREEBSD);
+    } else if (input.startsWith("openbsd")) {
+      return Pair.of(CPU.getCurrent(), OS.OPENBSD);
     } else if (input.startsWith("x64_windows")) {
       return Pair.of(CPU.getCurrent(), OS.WINDOWS);
     }

@@ -17,8 +17,8 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.clock.Clock;
-import com.google.devtools.build.lib.skyframe.FileArtifactValue;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
+import com.google.devtools.build.lib.testutil.ManualClock;
 import com.google.devtools.build.lib.testutil.Scratch;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -31,20 +31,6 @@ import org.junit.runners.JUnit4;
 /** Test for the CompactPersistentActionCache class. */
 @RunWith(JUnit4.class)
 public class CompactPersistentActionCacheTest {
-
-  private static class ManualClock implements Clock {
-    private long currentTime = 0L;
-
-    ManualClock() { }
-
-    @Override public long currentTimeMillis() {
-      return currentTime;
-    }
-
-    @Override public long nanoTime() {
-      return 0;
-    }
-  }
 
   private Scratch scratch = new Scratch();
   private Path dataRoot;
@@ -158,7 +144,8 @@ public class CompactPersistentActionCacheTest {
     ActionCache.Entry entry =
         new ActionCache.Entry("actionKey", ImmutableMap.<String, String>of(), false);
     entry.toString();
-    entry.addFile(PathFragment.create("foo/bar"), FileArtifactValue.createDirectory(1234));
+    entry.addFile(
+        PathFragment.create("foo/bar"), FileArtifactValue.createForDirectoryWithMtime(1234));
     entry.toString();
     entry.getFileDigest();
     entry.toString();
@@ -211,7 +198,7 @@ public class CompactPersistentActionCacheTest {
 
   private void putKey(String key, ActionCache ac, boolean discoversInputs) {
     ActionCache.Entry entry =
-        new ActionCache.Entry(key, ImmutableMap.<String, String>of(), discoversInputs);
+        new ActionCache.Entry(key, ImmutableMap.<String, String>of("k", "v"), discoversInputs);
     entry.getFileDigest();
     ac.put(key, entry);
   }

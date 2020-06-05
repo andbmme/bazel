@@ -22,7 +22,9 @@ import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.TransitionMode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.OS;
 import java.io.IOException;
@@ -51,7 +53,7 @@ public final class LauncherFileWriteAction extends AbstractFileWriteAction {
         new LauncherFileWriteAction(
             ruleContext.getActionOwner(),
             output,
-            ruleContext.getPrerequisiteArtifact("$launcher", Mode.HOST),
+            ruleContext.getPrerequisiteArtifact("$launcher", TransitionMode.HOST),
             launchInfo));
   }
 
@@ -60,7 +62,7 @@ public final class LauncherFileWriteAction extends AbstractFileWriteAction {
       ActionOwner owner, Artifact output, Artifact launcher, LaunchInfo launchInfo) {
     super(
         owner,
-        ImmutableList.of(Preconditions.checkNotNull(launcher)),
+        NestedSetBuilder.create(Order.STABLE_ORDER, Preconditions.checkNotNull(launcher)),
         output,
         /*makeExecutable=*/ true);
     this.launcher = launcher; // already null-checked in the superclass c'tor
@@ -75,8 +77,9 @@ public final class LauncherFileWriteAction extends AbstractFileWriteAction {
     // single-machine execution environment, but problematic with remote execution.
     Preconditions.checkState(OS.getCurrent() == OS.WINDOWS);
     return out -> {
-      InputStream in = this.launcher.getPath().getInputStream();
-      ByteStreams.copy(in, out);
+      try (InputStream in = ctx.getInputPath(this.launcher).getInputStream()) {
+        ByteStreams.copy(in, out);
+      }
       long dataLength = this.launchInfo.write(out);
       ByteBuffer buffer = ByteBuffer.allocate(Long.BYTES);
       buffer.order(ByteOrder.LITTLE_ENDIAN); // All Windows versions are little endian.
@@ -87,16 +90,10 @@ public final class LauncherFileWriteAction extends AbstractFileWriteAction {
   }
 
   @Override
-  protected String computeKey(ActionKeyContext actionKeyContext) {
-    Fingerprint f = new Fingerprint();
-    f.addString(GUID);
-    try {
-      f.addBytes(this.launcher.getPath().getDigest());
-    } catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-    f.addString(this.launchInfo.fingerPrint);
-    return f.hexDigestAndReset();
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+    fp.addString(GUID);
+    fp.addPath(this.launcher.getExecPath());
+    fp.addString(this.launchInfo.fingerPrint);
   }
 
   /**

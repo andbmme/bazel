@@ -14,36 +14,47 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.graph.GraphBuilder;
+import com.google.common.graph.ImmutableGraph;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
+import com.google.devtools.build.lib.util.GroupedList;
 import java.util.Map;
 import javax.annotation.Nullable;
 
 /**
  * Machinery to evaluate a single value.
  *
- * <p>The SkyFunction {@link #compute} implementation is supposed to access only direct
- * dependencies of the value. However, the direct dependencies need not be known in advance. The
- * implementation can request arbitrary values using {@link Environment#getValue}. If the values
- * are not ready, the call will return {@code null}; in that case the implementation should just
- * return {@code null}, in which case the missing dependencies will be computed and the {@link
- * #compute} method will be started again.
- * */
+ * <p>The SkyFunction {@link #compute} implementation is supposed to access only direct dependencies
+ * of the value. However, the direct dependencies need not be known in advance. The implementation
+ * can request arbitrary values using {@link Environment#getValue}. If the values are not ready, the
+ * call will return {@code null}; in that case the implementation should just return {@code null},
+ * in which case the missing dependencies will be computed and the {@link #compute} method will be
+ * started again.
+ */
 public interface SkyFunction {
 
   /**
    * When a value is requested, this method is called with the name of the value and a
    * dependency-tracking environment.
    *
-   * <p>This method should return a non-{@code null} value, or {@code null} if any dependencies
-   * were missing ({@link Environment#valuesMissing} was true before returning). In that case the
-   * missing dependencies will be computed and the {@code compute} method called again.
+   * <p>This method should return a non-{@code null} value, or {@code null} if any dependencies were
+   * missing ({@link Environment#valuesMissing} was true before returning). In that case the missing
+   * dependencies will be computed and the {@code compute} method called again.
    *
-   * <p>This method should throw if it fails, or if one of its dependencies fails with an
-   * exception and this method cannot recover. If one of its dependencies fails and this method can
-   * enrich the exception with additional context, then this method should catch that exception and
-   * throw another containing that additional context. If it has no such additional context, then
-   * it should allow its dependency's exception to be thrown through it.
+   * <p>This method should throw if it fails, or if one of its dependencies fails with an exception
+   * and this method cannot recover. If one of its dependencies fails and this method can enrich the
+   * exception with additional context, then this method should catch that exception and throw
+   * another containing that additional context. If it has no such additional context, then it
+   * should allow its dependency's exception to be thrown through it.
+   *
+   * <p>This method may return {@link Restart} in rare circumstances. See its docs. Do not return
+   * values of this type unless you know exactly what you are doing.
+   *
+   * <p>If version information is discovered for the given {@code skyKey}, {@link
+   * Environment#injectVersionForNonHermeticFunction(Version)} may be called on {@code env}.
    *
    * @throws SkyFunctionException on failure
    * @throws InterruptedException if interrupted
@@ -56,13 +67,50 @@ public interface SkyFunction {
   /**
    * Extracts a tag (target label) from a SkyKey if it has one. Otherwise return {@code null}.
    *
-   * <p>The tag is used for filtering out non-error event messages that do not match
-   * --output_filter flag. If a SkyFunction returns {@code null} in this method it means that all
-   * the info/warning messages associated with this value will be shown, no matter what
-   * --output_filter says.
+   * <p>The tag is used for filtering out non-error event messages that do not match --output_filter
+   * flag. If a SkyFunction returns {@code null} in this method it means that all the info/warning
+   * messages associated with this value will be shown, no matter what --output_filter says.
    */
   @Nullable
   String extractTag(SkyKey skyKey);
+
+  /**
+   * Sentinel {@link SkyValue} type for {@link #compute} to return, indicating that something went
+   * wrong, and that the evaluation returning this value must be restarted, and the nodes associated
+   * with other keys in {@link #rewindGraph()} (whose directed edges should correspond to the nodes'
+   * direct dependencies) must also be restarted.
+   *
+   * <p>An intended cause for returning this is external data loss; e.g., if a dependency's
+   * "done-ness" is intended to mean that certain data is available in an external system, but
+   * during evaluation of a node that depends on that external data, that data has gone missing, and
+   * reevaluation of the dependency is expected to repair the discrepancy.
+   *
+   * <p>Values of this type will <em>never</em> be returned by {@link Environment}'s getValue
+   * methods or from {@link NodeEntry#getValue()}.
+   *
+   * <p>All {@link ListenableFuture}s used in calls to {@link Environment#dependOnFuture} which were
+   * not already complete will be cancelled.
+   *
+   * <p>This may only be returned by {@link #compute} if {@link Environment#restartPermitted} is
+   * true. If restarting is not permitted, {@link #compute} should throw an appropriate {@link
+   * SkyFunctionException}.
+   */
+  interface Restart extends SkyValue {
+    ImmutableGraph<SkyKey> EMPTY_SKYKEY_GRAPH =
+        ImmutableGraph.copyOf(GraphBuilder.directed().allowsSelfLoops(false).build());
+
+    Restart SELF = () -> EMPTY_SKYKEY_GRAPH;
+
+    static Restart selfAnd(ImmutableGraph<SkyKey> rewindGraph) {
+      Preconditions.checkArgument(
+          rewindGraph.isDirected(), "rewindGraph undirected: %s", rewindGraph);
+      Preconditions.checkArgument(
+          !rewindGraph.allowsSelfLoops(), "rewindGraph allows self loops: %s", rewindGraph);
+      return () -> rewindGraph;
+    }
+
+    ImmutableGraph<SkyKey> rewindGraph();
+  }
 
   /**
    * The services provided to the {@link SkyFunction#compute} implementation by the Skyframe
@@ -151,14 +199,18 @@ public interface SkyFunction {
      * call, the two calls cannot be merged into a single getValues call, since the result of the
      * first call might change on a later evaluation. Inversely, if the result of one getValue call
      * cannot affect the parameters of the next getValue call, the two keys can form a dependency
-     * group and the two getValue calls merged into one getValues call.
+     * group and the two getValue calls should be merged into one getValues call. In the latter
+     * case, if we fail to combine the _multiple_ getValue (or getValues) calls into one _single_
+     * getValues call, it would result in multiple dependency groups with an implicit ordering
+     * between them. This would unnecessarily cause sequential evaluations of these groups and could
+     * impact overall performance.
      *
-     * <p>This means that on subsequent evaluations, when checking to see if dependencies require
-     * re-evaluation, all the values in this group may be simultaneously checked. A SkyFunction
-     * should request a dependency group if checking the deps serially on a subsequent evaluation
-     * would take too long, and if the {@link #compute} method would request all deps anyway as long
-     * as no earlier deps had changed. SkyFunction.Environment implementations may also choose to
-     * request these deps in parallel on the first evaluation, potentially speeding it up.
+     * <p>On subsequent evaluations, when checking to see if dependencies require re-evaluation, all
+     * the values within one group may be simultaneously checked. A SkyFunction should request a
+     * dependency group if checking the deps serially on a subsequent evaluation would take too
+     * long, and if the {@link #compute} method would request all deps anyway as long as no earlier
+     * deps had changed. SkyFunction.Environment implementations may also choose to request these
+     * deps in parallel on the first evaluation, potentially speeding it up.
      *
      * <p>While re-evaluating every value in the group may take longer than re-evaluating just the
      * first one and finding that it has changed, no extra work is done: the contract of the
@@ -190,7 +242,7 @@ public interface SkyFunction {
      * is {@code true}, and, {@code m.get(k) != null} iff the dependency was already evaluated and
      * was not in error.
      */
-    Map<SkyKey, SkyValue> getValues(Iterable<SkyKey> depKeys) throws InterruptedException;
+    Map<SkyKey, SkyValue> getValues(Iterable<? extends SkyKey> depKeys) throws InterruptedException;
 
     /**
      * Similar to {@link #getValues} but allows the caller to specify a set of types that are proper
@@ -214,9 +266,10 @@ public interface SkyFunction {
 
     <E1 extends Exception, E2 extends Exception>
         Map<SkyKey, ValueOrException2<E1, E2>> getValuesOrThrow(
-            Iterable<? extends SkyKey> depKeys, Class<E1> exceptionClass1,
+            Iterable<? extends SkyKey> depKeys,
+            Class<E1> exceptionClass1,
             Class<E2> exceptionClass2)
-                throws InterruptedException;
+            throws InterruptedException;
 
     <E1 extends Exception, E2 extends Exception, E3 extends Exception>
         Map<SkyKey, ValueOrException3<E1, E2, E3>> getValuesOrThrow(
@@ -224,7 +277,7 @@ public interface SkyFunction {
             Class<E1> exceptionClass1,
             Class<E2> exceptionClass2,
             Class<E3> exceptionClass3)
-                throws InterruptedException;
+            throws InterruptedException;
 
     <E1 extends Exception, E2 extends Exception, E3 extends Exception, E4 extends Exception>
         Map<SkyKey, ValueOrException4<E1, E2, E3, E4>> getValuesOrThrow(
@@ -233,7 +286,7 @@ public interface SkyFunction {
             Class<E2> exceptionClass2,
             Class<E3> exceptionClass3,
             Class<E4> exceptionClass4)
-                throws InterruptedException;
+            throws InterruptedException;
 
     <
             E1 extends Exception,
@@ -248,19 +301,17 @@ public interface SkyFunction {
             Class<E3> exceptionClass3,
             Class<E4> exceptionClass4,
             Class<E5> exceptionClass5)
-                throws InterruptedException;
+            throws InterruptedException;
 
     /**
      * Returns whether there was a previous getValue[s][OrThrow] that indicated a missing
      * dependency. Formally, returns true iff at least one of the following occurred:
      *
      * <ul>
-     *   <li>getValue[OrThrow](k[, c]) returned {@code null} for some k</li>
-     *   <li>getValues(ks).get(k) == {@code null} for some ks and k such that ks.contains(k)</li>
-     *   <li>
-     *     getValuesOrThrow(ks, c).get(k).get() == {@code null} for some ks and k such that
-     *     ks.contains(k)
-     *   </li>
+     *   <li>getValue[OrThrow](k[, c]) returned {@code null} for some k
+     *   <li>getValues(ks).get(k) == {@code null} for some ks and k such that ks.contains(k)
+     *   <li>getValuesOrThrow(ks, c).get(k).get() == {@code null} for some ks and k such that
+     *       ks.contains(k)
      * </ul>
      *
      * <p>If this returns true, the {@link SkyFunction} must return {@code null}.
@@ -268,13 +319,71 @@ public interface SkyFunction {
     boolean valuesMissing();
 
     /**
-     * Returns the {@link EventHandler} that a SkyFunction should use to print any errors, warnings,
-     * or progress messages during execution of {@link SkyFunction#compute}.
+     * Returns the {@link ExtendedEventHandler} that a SkyFunction should use to print any errors,
+     * warnings, or progress messages during execution of {@link SkyFunction#compute}.
      */
     ExtendedEventHandler getListener();
+
+    /**
+     * A live view of deps known to have already been requested either through an earlier call to
+     * {@link SkyFunction#compute} or inferred during change pruning. Should return {@code null} if
+     * unknown.
+     */
+    @Nullable
+    default GroupedList<SkyKey> getTemporaryDirectDeps() {
+      return null;
+    }
+
+    /**
+     * Injects non-hermetic {@link Version} information for this environment.
+     *
+     * <p>This may be called during the course of {@link SkyFunction#compute(SkyKey, Environment)}
+     * if the function discovers version information for the {@link SkyKey}.
+     *
+     * <p>Environments that either do not need or wish to ignore non-hermetic version information
+     * may keep the default no-op implementation.
+     */
+    default void injectVersionForNonHermeticFunction(Version version) {}
+
+    /**
+     * Register dependencies on keys without necessarily requiring their values.
+     *
+     * <p>WARNING: Dependencies here MUST be done! Only use this function if you know what you're
+     * doing.
+     *
+     * <p>If the {@link EvaluationVersionBehavior} is {@link
+     * EvaluationVersionBehavior#MAX_CHILD_VERSIONS} then this method may fall back to just doing a
+     * {@link #getValues} call internally. Thus, any graph evaluations that require this method to
+     * be performant <i>must</i> run with {@link EvaluationVersionBehavior#GRAPH_VERSION}.
+     */
+    default void registerDependencies(Iterable<SkyKey> keys) throws InterruptedException {
+      getValues(keys);
+    }
 
     /** Returns whether we are currently in error bubbling. */
     @VisibleForTesting
     boolean inErrorBubblingForTesting();
+
+    /**
+     * Adds a dependency on a Skyframe-external event. If the given future is already complete, this
+     * method silently returns without doing anything (to avoid unnecessary function restarts).
+     * Otherwise, Skyframe adds a listener to the passed-in future, and only re-enqueues the current
+     * node after the future completes and all requested deps are done. The added listener will
+     * perform the minimum amount of work on the thread completing the future necessary for Skyframe
+     * bookkeeping.
+     *
+     * <p>Callers of this method must check {@link #valuesMissing} before returning {@code null}
+     * from a {@link SkyFunction}.
+     *
+     * <p>This API is intended for performing async computations (e.g., remote execution) in another
+     * thread pool without blocking the current Skyframe thread.
+     */
+    void dependOnFuture(ListenableFuture<?> future);
+
+    /**
+     * A {@link SkyFunction#compute} call may return {@link Restart} only if this returns {@code
+     * true}.
+     */
+    boolean restartPermitted();
   }
 }

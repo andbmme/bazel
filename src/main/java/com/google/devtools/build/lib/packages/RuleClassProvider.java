@@ -14,19 +14,19 @@
 
 package com.google.devtools.build.lib.packages;
 
+import com.google.common.collect.ImmutableMap;
+import com.google.devtools.build.lib.analysis.RuleDefinitionContext;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.syntax.Environment;
-import com.google.devtools.build.lib.syntax.Environment.Extension;
-import com.google.devtools.build.lib.syntax.Mutability;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
+import com.google.devtools.build.lib.syntax.StarlarkThread;
 import java.util.Map;
-import javax.annotation.Nullable;
 
 /**
- * The collection of the supported build rules. Provides an Environment for Skylark rule creation.
+ * The collection of the supported build rules. Provides an StarlarkThread for Starlark rule
+ * creation.
  */
-public interface RuleClassProvider {
+public interface RuleClassProvider extends RuleDefinitionContext {
 
   /**
    * Label referencing the prelude file.
@@ -44,24 +44,27 @@ public interface RuleClassProvider {
   Map<String, RuleClass> getRuleClassMap();
 
   /**
-   * Returns a new Skylark Environment instance for rule creation.
-   * Implementations need to be thread safe.
-   * Be sure to close() the mutability before you return the results of said evaluation.
+   * Stores a BazelStarlarkContext in the specified StarlarkThread about to initialize a .bzl file.
    *
-   * @param label the location of the rule.
-   * @param mutability the Mutability for the current evaluation context
-   * @param skylarkSemantics the semantics options that modify the interpreter
-   * @param eventHandler the EventHandler for warnings, errors, etc.
-   * @param astFileContentHashCode the hash code identifying this environment.
-   * @return an Environment, in which to evaluate load time skylark forms.
+   * <p>A .bzl file loaded by (or indirectly by) a BUILD file may differ semantically from the same
+   * file loaded on behalf of a WORKSPACE file, because of the repository mapping and native module;
+   * these differences much be accounted for by caching.
+   *
+   * @param thread StarlarkThread in which to store the context.
+   * @param label the label of the .bzl file
+   * @param repoMapping map of RepositoryNames to be remapped
    */
-  Environment createSkylarkRuleClassEnvironment(
+  void setStarlarkThreadContext(
+      StarlarkThread thread,
       Label label,
-      Mutability mutability,
-      SkylarkSemantics skylarkSemantics,
-      EventHandler eventHandler,
-      @Nullable String astFileContentHashCode,
-      @Nullable Map<String, Extension> importMap);
+      ImmutableMap<RepositoryName, RepositoryName> repoMapping);
+
+  /**
+   * Returns the predeclared environment for a loading-phase thread. Includes "native", though its
+   * value may be inappropriate for a WORKSPACE file. Excludes universal bindings (e.g. True, len).
+   */
+  // TODO(adonovan): update doc comment. And does it really include native?
+  ImmutableMap<String, Object> getEnvironment();
 
   /**
    * Returns a map from aspect names to aspect factory objects.
@@ -76,18 +79,12 @@ public interface RuleClassProvider {
    */
   String getDefaultWorkspacePrefix();
 
-
   /**
    * Returns the default content that should be added at the end of the WORKSPACE file.
    *
-   * <p>Used to load skylark repository in the bazel_tools repository.
+   * <p>Used to load Starlark repository in the bazel_tools repository.
    */
   String getDefaultWorkspaceSuffix();
-
-  /**
-   * Returns the path to the tools repository
-   */
-  String getToolsRepository();
 
   /**
    * Retrieves an aspect from the aspect factory map using the key provided
@@ -95,8 +92,11 @@ public interface RuleClassProvider {
   NativeAspectClass getNativeAspectClass(String key);
 
   /**
-   * Retrieves a {@link Map} from skylark configuration fragment name to configuration fragment
+   * Retrieves a {@link Map} from Starlark configuration fragment name to configuration fragment
    * class.
    */
   Map<String, Class<?>> getConfigurationFragmentMap();
+
+  /** Returns the policy on checking that third-party rules have licenses. */
+  ThirdPartyLicenseExistencePolicy getThirdPartyLicenseExistencePolicy();
 }

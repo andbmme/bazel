@@ -14,6 +14,8 @@
 
 package com.google.devtools.build.lib.buildeventstream;
 
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import java.util.Collection;
 
 /** Wrapper class for a build event marking it as the final event in the protocol. */
@@ -35,7 +37,17 @@ public class LastBuildEvent implements BuildEvent {
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public Collection<LocalFile> referencedLocalFiles() {
+    return event.referencedLocalFiles();
+  }
+
+  @Override
+  public Collection<ListenableFuture<String>> remoteUploads() {
+    return event.remoteUploads();
+  }
+
+  @Override
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     return BuildEventStreamProtos.BuildEvent.newBuilder(event.asStreamProto(converters))
         .setLastMessage(true)
         .build();

@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime.commands;
 
+import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
@@ -22,18 +23,56 @@ import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
+import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
+import com.google.devtools.build.lib.runtime.InfoItem;
+import com.google.devtools.build.lib.runtime.StarlarkOptionsParser;
+import com.google.devtools.build.lib.runtime.commands.info.BlazeBinInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.BlazeGenfilesInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.BlazeTestlogsInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.BuildLanguageInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.CharacterEncodingInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.ClientEnv;
+import com.google.devtools.build.lib.runtime.commands.info.CommitedHeapSizeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.DefaultPackagePathInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.DefaultsPackageInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.ExecutionRootInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.GcCountInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.GcTimeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.InstallBaseInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.JavaHomeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.JavaRuntimeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.JavaVirtualMachineInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.MakeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.MaxHeapSizeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.OutputBaseInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.OutputPathInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.PackagePathInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.ReleaseInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.ServerLogInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.ServerPidInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.StarlarkSemanticsInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.UsedHeapSizeAfterGcInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.UsedHeapSizeInfoItem;
+import com.google.devtools.build.lib.runtime.commands.info.WorkspaceInfoItem;
+import com.google.devtools.build.lib.server.FailureDetails;
+import com.google.devtools.build.lib.server.FailureDetails.BuildConfiguration.Code;
+import com.google.devtools.build.lib.server.FailureDetails.FailureDetail;
+import com.google.devtools.build.lib.server.FailureDetails.Interrupted;
 import com.google.devtools.build.lib.util.AbruptExitException;
+import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.ExitCode;
+import com.google.devtools.build.lib.util.InterruptedFailureDetails;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
+import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
-import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -63,48 +102,50 @@ import java.util.TreeMap;
          inherits = { BuildCommand.class })
 public class InfoCommand implements BlazeCommand {
 
+  /** Options for the info command. */
   public static class Options extends OptionsBase {
     @Option(
       name = "show_make_env",
       defaultValue = "false",
-      category = "misc",
       documentationCategory = OptionDocumentationCategory.LOGGING,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.TERMINAL_OUTPUT},
       help = "Include the \"Make\" environment in the output."
     )
     public boolean showMakeEnvironment;
+
+    @Option(
+        name = "experimental_supports_info_crosstool_configuration",
+        defaultValue = "true",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        metadataTags = {OptionMetadataTag.HIDDEN},
+        help = "Noop.")
+    public boolean experimentalSupportsInfoCrosstoolConfiguration;
   }
 
   /**
-   * Unchecked variant of ExitCausingException. Below, we need to throw from the Supplier interface,
-   * which does not allow checked exceptions.
+   * Unchecked variant of {@link AbruptExitException}. Below, we need to throw from the Supplier
+   * interface, which does not allow checked exceptions.
    */
-  public static class ExitCausingRuntimeException extends RuntimeException {
+  private static class AbruptExitRuntimeException extends RuntimeException {
 
-    private final ExitCode exitCode;
+    private final DetailedExitCode detailedExitCode;
 
-    public ExitCausingRuntimeException(String message, ExitCode exitCode) {
-      super(message);
-      this.exitCode = exitCode;
+    private AbruptExitRuntimeException(DetailedExitCode exitCode) {
+      this.detailedExitCode = exitCode;
     }
 
-    public ExitCausingRuntimeException(ExitCode exitCode) {
-      this.exitCode = exitCode;
-    }
-
-    public ExitCode getExitCode() {
-      return exitCode;
+    private DetailedExitCode getDetailedExitCode() {
+      return detailedExitCode;
     }
   }
 
   @Override
-  public void editOptions(OptionsParser optionsParser) { }
-
-  @Override
-  public ExitCode exec(final CommandEnvironment env, final OptionsProvider optionsProvider) {
+  public BlazeCommandResult exec(
+      final CommandEnvironment env, final OptionsParsingResult optionsParsingResult) {
     final BlazeRuntime runtime = env.getRuntime();
     env.getReporter().switchToAnsiAllowingHandler();
-    Options infoOptions = optionsProvider.getOptions(Options.class);
+    Options infoOptions = optionsParsingResult.getOptions(Options.class);
     OutErr outErr = env.getReporter().getOutErr();
     // Creating a BuildConfiguration is expensive and often unnecessary. Delay the creation until
     // it is needed. We memoize so that it's cached intra-command (it's still created freshly on
@@ -116,43 +157,65 @@ public class InfoCommand implements BlazeCommand {
                 // In order to be able to answer configuration-specific queries, we need to set up
                 // the package path. Since info inherits all the build options, all the necessary
                 // information is available here.
-                env.setupPackageCache(
-                    optionsProvider, runtime.getDefaultsPackageContent(optionsProvider));
-                env.getSkyframeExecutor()
-                    .setConfigurationFragmentFactories(runtime.getConfigurationFragmentFactories());
+                env.syncPackageLoading(optionsParsingResult);
                 // TODO(bazel-team): What if there are multiple configurations? [multi-config]
                 return env.getSkyframeExecutor()
                     .getConfiguration(
                         env.getReporter(),
-                        runtime.createBuildOptions(optionsProvider),
+                        runtime.createBuildOptions(optionsParsingResult),
                         /*keepGoing=*/ true);
               } catch (InvalidConfigurationException e) {
                 env.getReporter().handle(Event.error(e.getMessage()));
-                throw new ExitCausingRuntimeException(ExitCode.COMMAND_LINE_ERROR);
+                throw new AbruptExitRuntimeException(
+                    DetailedExitCode.of(
+                        ExitCode.COMMAND_LINE_ERROR,
+                        FailureDetail.newBuilder()
+                            .setMessage(Strings.nullToEmpty(e.getMessage()))
+                            .setBuildConfiguration(
+                                FailureDetails.BuildConfiguration.newBuilder()
+                                    .setCode(
+                                        e.getDetailedCode() == null
+                                            ? Code.BUILD_CONFIGURATION_UNKNOWN
+                                            : e.getDetailedCode()))
+                            .build()));
               } catch (AbruptExitException e) {
-                throw new ExitCausingRuntimeException(
-                    "unknown error: " + e.getMessage(), e.getExitCode());
+                throw new AbruptExitRuntimeException(e.getDetailedExitCode());
               } catch (InterruptedException e) {
                 env.getReporter().handle(Event.error("interrupted"));
-                throw new ExitCausingRuntimeException(ExitCode.INTERRUPTED);
+                throw new AbruptExitRuntimeException(
+                    InterruptedFailureDetails.detailedExitCode(
+                        "command interrupted while syncing package loading",
+                        Interrupted.Code.PACKAGE_LOADING_SYNC));
               }
             });
 
-    Map<String, InfoItem> items = getInfoItemMap(env, optionsProvider);
+    Map<String, InfoItem> items = getInfoItemMap(env, optionsParsingResult);
 
     try {
       if (infoOptions.showMakeEnvironment) {
         Map<String, String> makeEnv = configurationSupplier.get().getMakeEnvironment();
         for (Map.Entry<String, String> entry : makeEnv.entrySet()) {
-          InfoItem item = new InfoItem.MakeInfoItem(entry.getKey(), entry.getValue());
+          InfoItem item = new MakeInfoItem(entry.getKey(), entry.getValue());
           items.put(item.getName(), item);
         }
       }
 
-      List<String> residue = optionsProvider.getResidue();
+      Pair<ImmutableList<String>, ImmutableList<String>> starlarkOptionsAndResidue =
+          StarlarkOptionsParser.removeStarlarkOptions(optionsParsingResult.getResidue());
+      ImmutableList<String> removedStarlarkOptions = starlarkOptionsAndResidue.getFirst();
+      ImmutableList<String> residue = starlarkOptionsAndResidue.getSecond();
+      if (!removedStarlarkOptions.isEmpty()) {
+        env.getReporter()
+            .handle(
+                Event.warn(
+                    "Blaze info does not support starlark options. Ignoring options: "
+                        + removedStarlarkOptions));
+      }
       if (residue.size() > 1) {
-        env.getReporter().handle(Event.error("at most one key may be specified"));
-        return ExitCode.COMMAND_LINE_ERROR;
+        String message = "at most one key may be specified";
+        env.getReporter().handle(Event.error(message));
+        return createFailureResult(
+            message, ExitCode.COMMAND_LINE_ERROR, FailureDetails.InfoCommand.Code.TOO_MANY_KEYS);
       }
 
       String key = residue.size() == 1 ? residue.get(0) : null;
@@ -162,15 +225,23 @@ public class InfoCommand implements BlazeCommand {
         if (items.containsKey(key)) {
           value = items.get(key).get(configurationSupplier, env);
         } else {
-          env.getReporter().handle(Event.error("unknown key: '" + key + "'"));
-          return ExitCode.COMMAND_LINE_ERROR;
+          String message = "unknown key: '" + key + "'";
+          env.getReporter().handle(Event.error(message));
+          return createFailureResult(
+              message,
+              ExitCode.COMMAND_LINE_ERROR,
+              FailureDetails.InfoCommand.Code.KEY_NOT_RECOGNIZED);
         }
         try {
           outErr.getOutputStream().write(value);
           outErr.getOutputStream().flush();
         } catch (IOException e) {
-          env.getReporter().handle(Event.error("Cannot write info block: " + e.getMessage()));
-          return ExitCode.ANALYSIS_FAILURE;
+          String message = "Cannot write info block: " + e.getMessage();
+          env.getReporter().handle(Event.error(message));
+          return createFailureResult(
+              message,
+              ExitCode.ANALYSIS_FAILURE,
+              FailureDetails.InfoCommand.Code.INFO_BLOCK_WRITE_FAILURE);
         }
       } else { // print them all
         configurationSupplier.get();  // We'll need this later anyway
@@ -184,47 +255,64 @@ public class InfoCommand implements BlazeCommand {
         }
       }
     } catch (AbruptExitException e) {
-      return e.getExitCode();
-    } catch (ExitCausingRuntimeException e) {
-      return e.getExitCode();
+      return BlazeCommandResult.detailedExitCode(e.getDetailedExitCode());
+    } catch (AbruptExitRuntimeException e) {
+      return BlazeCommandResult.detailedExitCode(e.getDetailedExitCode());
     } catch (IOException e) {
-      return ExitCode.LOCAL_ENVIRONMENTAL_ERROR;
+      return createFailureResult(
+          "Cannot write info block: " + e.getMessage(),
+          ExitCode.LOCAL_ENVIRONMENTAL_ERROR,
+          FailureDetails.InfoCommand.Code.ALL_INFO_WRITE_FAILURE);
     } catch (InterruptedException e) {
-      return ExitCode.INTERRUPTED;
+      return BlazeCommandResult.detailedExitCode(
+          InterruptedFailureDetails.detailedExitCode(
+              "info interrupted", Interrupted.Code.INFO_ITEM));
     }
-    return ExitCode.SUCCESS;
+    return BlazeCommandResult.success();
   }
 
-  static Map<String, InfoItem> getHardwiredInfoItemMap(OptionsProvider commandOptions,
-      String productName) {
+  private static BlazeCommandResult createFailureResult(
+      String message, ExitCode exitCode, FailureDetails.InfoCommand.Code detailedCode) {
+    return BlazeCommandResult.detailedExitCode(
+        DetailedExitCode.of(
+            exitCode,
+            FailureDetail.newBuilder()
+                .setMessage(message)
+                .setInfoCommand(FailureDetails.InfoCommand.newBuilder().setCode(detailedCode))
+                .build()));
+  }
+
+  private static Map<String, InfoItem> getHardwiredInfoItemMap(
+      OptionsParsingResult commandOptions, String productName) {
     List<InfoItem> hardwiredInfoItems =
         ImmutableList.<InfoItem>of(
-            new InfoItem.WorkspaceInfoItem(),
-            new InfoItem.InstallBaseInfoItem(),
-            new InfoItem.OutputBaseInfoItem(productName),
-            new InfoItem.ExecutionRootInfoItem(),
-            new InfoItem.OutputPathInfoItem(),
-            new InfoItem.ClientEnv(),
-            new InfoItem.BlazeBinInfoItem(productName),
-            new InfoItem.BlazeGenfilesInfoItem(productName),
-            new InfoItem.BlazeTestlogsInfoItem(productName),
-            new InfoItem.MessageLogInfoItem(),
-            new InfoItem.ReleaseInfoItem(productName),
-            new InfoItem.ServerPidInfoItem(productName),
-            new InfoItem.PackagePathInfoItem(commandOptions),
-            new InfoItem.UsedHeapSizeInfoItem(),
-            new InfoItem.UsedHeapSizeAfterGcInfoItem(),
-            new InfoItem.CommitedHeapSizeInfoItem(),
-            new InfoItem.MaxHeapSizeInfoItem(),
-            new InfoItem.GcTimeInfoItem(),
-            new InfoItem.GcCountInfoItem(),
-            new InfoItem.JavaRuntimeInfoItem(),
-            new InfoItem.JavaVirtualMachineInfoItem(),
-            new InfoItem.JavaHomeInfoItem(),
-            new InfoItem.CharacterEncodingInfoItem(),
-            new InfoItem.DefaultsPackageInfoItem(),
-            new InfoItem.BuildLanguageInfoItem(),
-            new InfoItem.DefaultPackagePathInfoItem(commandOptions));
+            new WorkspaceInfoItem(),
+            new InstallBaseInfoItem(),
+            new OutputBaseInfoItem(productName),
+            new ExecutionRootInfoItem(),
+            new OutputPathInfoItem(),
+            new ClientEnv(),
+            new BlazeBinInfoItem(productName),
+            new BlazeGenfilesInfoItem(productName),
+            new BlazeTestlogsInfoItem(productName),
+            new ReleaseInfoItem(productName),
+            new ServerPidInfoItem(productName),
+            new ServerLogInfoItem(productName),
+            new PackagePathInfoItem(commandOptions),
+            new UsedHeapSizeInfoItem(),
+            new UsedHeapSizeAfterGcInfoItem(),
+            new CommitedHeapSizeInfoItem(),
+            new MaxHeapSizeInfoItem(),
+            new GcTimeInfoItem(),
+            new GcCountInfoItem(),
+            new JavaRuntimeInfoItem(),
+            new JavaVirtualMachineInfoItem(),
+            new JavaHomeInfoItem(),
+            new CharacterEncodingInfoItem(),
+            new DefaultsPackageInfoItem(),
+            new BuildLanguageInfoItem(),
+            new DefaultPackagePathInfoItem(commandOptions),
+            new StarlarkSemanticsInfoItem(commandOptions));
     ImmutableMap.Builder<String, InfoItem> result = new ImmutableMap.Builder<>();
     for (InfoItem item : hardwiredInfoItems) {
       result.put(item.getName(), item);
@@ -241,9 +329,9 @@ public class InfoCommand implements BlazeCommand {
   }
 
   static Map<String, InfoItem> getInfoItemMap(
-      CommandEnvironment env, OptionsProvider optionsProvider) {
+      CommandEnvironment env, OptionsParsingResult optionsParsingResult) {
     Map<String, InfoItem> items = new TreeMap<>(env.getRuntime().getInfoItems());
-    items.putAll(getHardwiredInfoItemMap(optionsProvider, env.getRuntime().getProductName()));
+    items.putAll(getHardwiredInfoItemMap(optionsParsingResult, env.getRuntime().getProductName()));
     return items;
   }
 }

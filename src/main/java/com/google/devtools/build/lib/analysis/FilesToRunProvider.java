@@ -21,17 +21,17 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skylarkbuildapi.FilesToRunProviderApi;
 import javax.annotation.Nullable;
 
 /** Returns information about executables produced by a target and the files needed to run it. */
 @Immutable
-@SkylarkModule(name = "FilesToRunProvider", doc = "", category = SkylarkModuleCategory.PROVIDER)
-public final class FilesToRunProvider implements TransitiveInfoProvider {
-  /** The name of the field in Skylark used to access this class. */
-  public static final String SKYLARK_NAME = "files_to_run";
+@AutoCodec
+public final class FilesToRunProvider
+    implements TransitiveInfoProvider, FilesToRunProviderApi<Artifact> {
+  /** The name of the field in Starlark used to access this class. */
+  public static final String STARLARK_NAME = "files_to_run";
 
   public static final FilesToRunProvider EMPTY =
       new FilesToRunProvider(NestedSetBuilder.<Artifact>emptySet(Order.STABLE_ORDER), null, null);
@@ -57,6 +57,11 @@ public final class FilesToRunProvider implements TransitiveInfoProvider {
         NestedSetBuilder.create(Order.STABLE_ORDER, artifact), null, artifact);
   }
 
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
+  }
+
   /** Returns artifacts needed to run the executable for this target. */
   public NestedSet<Artifact> getFilesToRun() {
     return filesToRun;
@@ -70,12 +75,7 @@ public final class FilesToRunProvider implements TransitiveInfoProvider {
   }
 
   /** Returns the Executable or null if it does not exist. */
-  @SkylarkCallable(
-    name = "executable",
-    doc = "The main executable or None if it does not exist.",
-    structField = true,
-    allowReturnNones = true
-  )
+  @Override
   @Nullable
   public Artifact getExecutable() {
     return executable;
@@ -85,12 +85,7 @@ public final class FilesToRunProvider implements TransitiveInfoProvider {
    * Returns the RunfilesManifest or null if it does not exist. It is a shortcut to
    * getRunfilesSupport().getRunfilesManifest().
    */
-  @SkylarkCallable(
-    name = "runfiles_manifest",
-    doc = "The runfiles manifest or None if it does not exist.",
-    structField = true,
-    allowReturnNones = true
-  )
+  @Override
   @Nullable
   public Artifact getRunfilesManifest() {
     return runfilesSupport != null ? runfilesSupport.getRunfilesManifest() : null;
@@ -98,8 +93,8 @@ public final class FilesToRunProvider implements TransitiveInfoProvider {
 
   /** Return a {@link RunfilesSupplier} encapsulating runfiles for this tool. */
   public RunfilesSupplier getRunfilesSupplier() {
-    if (executable != null && runfilesSupport != null) {
-      return new RunfilesSupplierImpl(executable, runfilesSupport.getRunfiles());
+    if (runfilesSupport != null) {
+      return RunfilesSupplierImpl.create(runfilesSupport);
     } else {
       return EmptyRunfilesSupplier.INSTANCE;
     }

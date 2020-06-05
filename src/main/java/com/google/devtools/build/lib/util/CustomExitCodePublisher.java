@@ -13,32 +13,49 @@
 // limitations under the License.
 package com.google.devtools.build.lib.util;
 
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
-import com.google.devtools.build.lib.vfs.Path;
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import javax.annotation.Nullable;
 
 /**
  * Provides an external way for the Bazel server to communicate its exit code to the client, when
  * the main gRPC channel is unavailable because the exit is too abrupt or originated in an async
  * thread.
+ *
+ * <p>Uses Java 8 {@link Path} objects rather than Bazel ones to avoid depending on the rest of
+ * Bazel.
  */
+// TODO(b/138456686): When the Bazel server is completely converted to use FailureDetail messages
+//  for its failure modes, this publishing mechanism and the file it creates can probably be
+//  deleted. We'll need to confirm that nothing other than the Bazel client consumes it.
 public class CustomExitCodePublisher {
   private static final String EXIT_CODE_FILENAME = "exit_code_to_use_on_abrupt_exit";
-  @Nullable private static Path abruptExitCodeFilePath = null;
+  @Nullable private static volatile Path abruptExitCodeFilePath = null;
 
-  public static void setAbruptExitStatusFileDir(Path path) {
-    abruptExitCodeFilePath = path.getChild(EXIT_CODE_FILENAME);
+  private CustomExitCodePublisher() {}
+
+  public static void setAbruptExitStatusFileDir(String path) {
+    abruptExitCodeFilePath = Paths.get(path).resolve(EXIT_CODE_FILENAME);
+  }
+
+  @VisibleForTesting
+  public static void resetAbruptExitStatusFile() {
+    abruptExitCodeFilePath = null;
   }
 
   public static void maybeWriteExitStatusFile(int exitCode) {
-    if (abruptExitCodeFilePath != null) {
+    Path path = CustomExitCodePublisher.abruptExitCodeFilePath;
+    if (path != null) {
       try {
-        FileSystemUtils.writeContentAsLatin1(abruptExitCodeFilePath, String.valueOf(exitCode));
+        Files.write(path, String.valueOf(exitCode).getBytes(StandardCharsets.UTF_8));
       } catch (IOException ioe) {
         System.err.printf(
             "io error writing %d to abrupt exit status file %s: %s\n",
-            exitCode, abruptExitCodeFilePath, ioe.getMessage());
+            exitCode, path, ioe.getMessage());
       }
     }
   }

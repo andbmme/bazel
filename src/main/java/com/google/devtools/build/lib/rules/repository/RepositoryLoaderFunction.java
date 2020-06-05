@@ -14,25 +14,21 @@
 
 package com.google.devtools.build.lib.rules.repository;
 
-import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.skyframe.RepositoryValue;
-import com.google.devtools.build.lib.skyframe.WorkspaceFileValue;
-import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
+import com.google.devtools.build.skyframe.SkyFunctionException.Transience;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
+import java.io.IOException;
 import javax.annotation.Nullable;
 
-/**
- * Creates a local or remote repository and checks its WORKSPACE file.
- */
+/** Creates a local or remote repository. */
 public class RepositoryLoaderFunction implements SkyFunction {
 
   @Nullable
@@ -51,32 +47,35 @@ public class RepositoryLoaderFunction implements SkyFunction {
     if (!repository.repositoryExists()) {
       return RepositoryValue.notFound(nameFromRule);
     }
-
-    SkyKey workspaceKey =
-        WorkspaceFileValue.key(
-            RootedPath.toRootedPath(repository.getPath(), PathFragment.create("WORKSPACE")));
+    RootedPath workspaceFilePath;
+    try {
+      workspaceFilePath =
+          WorkspaceFileHelper.getWorkspaceRootedFile(Root.fromPath(repository.getPath()), env);
+      if (workspaceFilePath == null) {
+        return null;
+      }
+    } catch (IOException e) {
+      throw new RepositoryLoaderFunctionException(
+          new IOException(
+              "Could not determine workspace file (\"WORKSPACE.bazel\" or \"WORKSPACE\"): "
+                  + e.getMessage()),
+          Transience.PERSISTENT);
+    }
+    SkyKey workspaceKey = WorkspaceFileValue.key(workspaceFilePath);
     WorkspaceFileValue workspacePackage = (WorkspaceFileValue) env.getValue(workspaceKey);
     if (workspacePackage == null) {
       return null;
     }
 
-    RepositoryName workspaceName;
     try {
       String workspaceNameStr = workspacePackage.getPackage().getWorkspaceName();
-      workspaceName = workspaceNameStr.isEmpty()
-          ? RepositoryName.create("") : RepositoryName.create("@" + workspaceNameStr);
+      if (workspaceNameStr.isEmpty()) {
+        RepositoryName.create("");
+      } else {
+        RepositoryName.create("@" + workspaceNameStr);
+      }
     } catch (LabelSyntaxException e) {
       throw new IllegalStateException(e);
-    }
-
-    if (!workspaceName.isDefault()
-        && !workspaceName.strippedName().equals(Label.DEFAULT_REPOSITORY_DIRECTORY)
-        && !nameFromRule.equals(workspaceName)) {
-      Path workspacePath = repository.getPath().getRelative("WORKSPACE");
-      env.getListener().handle(Event.warn(Location.fromFile(workspacePath),
-          "Workspace name in " + workspacePath + " (" + workspaceName + ") does not match the "
-              + "name given in the repository's definition (" + nameFromRule + "); this will "
-              + "cause a build error in future versions"));
     }
 
     return RepositoryValue.success(nameFromRule, repository);
@@ -86,5 +85,14 @@ public class RepositoryLoaderFunction implements SkyFunction {
   @Override
   public String extractTag(SkyKey skyKey) {
     return null;
+  }
+
+  /** An exception thrown by RepositoryLoaderFunction */
+  public static class RepositoryLoaderFunctionException extends SkyFunctionException {
+
+    /** Error reading or writing to the filesystem. */
+    public RepositoryLoaderFunctionException(IOException cause, Transience transience) {
+      super(cause, transience);
+    }
   }
 }

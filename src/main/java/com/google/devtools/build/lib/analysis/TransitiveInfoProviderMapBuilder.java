@@ -100,7 +100,7 @@ public class TransitiveInfoProviderMapBuilder {
 
   @Nullable
   public <P extends TransitiveInfoProvider> P getProvider(Class<P> providerClass) {
-    return (P) providers.get(providerClass);
+    return providerClass.cast(providers.get(providerClass));
   }
 
   @Nullable
@@ -109,6 +109,6 @@ public class TransitiveInfoProviderMapBuilder {
   }
 
   public TransitiveInfoProviderMap build() {
-    return new TransitiveInfoProviderMapImpl(providers);
+    return TransitiveInfoProviderMapImpl.create(providers);
   }
 }

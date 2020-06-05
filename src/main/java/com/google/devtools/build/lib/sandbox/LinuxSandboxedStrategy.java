@@ -14,33 +14,46 @@
 
 package com.google.devtools.build.lib.sandbox;
 
-import com.google.devtools.build.lib.actions.ExecutionStrategy;
-import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.exec.AbstractSpawnStrategy;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import java.io.IOException;
+import java.time.Duration;
+import javax.annotation.Nullable;
 
 /** Strategy that uses sandboxing to execute a process. */
-// TODO(ulfjack): This class only exists for this annotation. Find a better way to handle this!
-@ExecutionStrategy(
-  name = {"sandboxed", "linux-sandbox"},
-  contextType = SpawnActionContext.class
-)
 public final class LinuxSandboxedStrategy extends AbstractSpawnStrategy {
-  LinuxSandboxedStrategy(SpawnRunner spawnRunner) {
-    super(spawnRunner);
+  LinuxSandboxedStrategy(Path execRoot, SpawnRunner spawnRunner) {
+    super(execRoot, spawnRunner);
   }
 
   @Override
   public String toString() {
-    return "sandboxed";
+    return "linux-sandbox";
   }
 
+  /**
+   * Creates a sandboxed spawn runner that uses the {@code linux-sandbox} tool.
+   *
+   * @param helpers common tools and state across all spawns during sandboxed execution
+   * @param cmdEnv the command environment to use
+   * @param sandboxBase path to the sandbox base directory
+   * @param timeoutKillDelay additional grace period before killing timing out commands
+   * @param sandboxfsProcess instance of the sandboxfs process to use; may be null for none, in
+   *     which case the runner uses a symlinked sandbox
+   * @param sandboxfsMapSymlinkTargets map the targets of symlinks within the sandbox if true
+   */
   static LinuxSandboxedSpawnRunner create(
-      CommandEnvironment cmdEnv, Path sandboxBase, String productName, int timeoutGraceSeconds)
+      SandboxHelpers helpers,
+      CommandEnvironment cmdEnv,
+      Path sandboxBase,
+      Duration timeoutKillDelay,
+      @Nullable SandboxfsProcess sandboxfsProcess,
+      boolean sandboxfsMapSymlinkTargets,
+      TreeDeleter treeDeleter)
       throws IOException {
     Path inaccessibleHelperFile = sandboxBase.getRelative("inaccessibleHelperFile");
     FileSystemUtils.touchFile(inaccessibleHelperFile);
@@ -55,11 +68,14 @@ public final class LinuxSandboxedStrategy extends AbstractSpawnStrategy {
     inaccessibleHelperDir.setExecutable(false);
 
     return new LinuxSandboxedSpawnRunner(
+        helpers,
         cmdEnv,
         sandboxBase,
-        productName,
         inaccessibleHelperFile,
         inaccessibleHelperDir,
-        timeoutGraceSeconds);
+        timeoutKillDelay,
+        sandboxfsProcess,
+        sandboxfsMapSymlinkTargets,
+        treeDeleter);
   }
 }

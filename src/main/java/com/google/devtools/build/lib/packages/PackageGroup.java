@@ -20,9 +20,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.License.DistributionType;
 import com.google.devtools.build.lib.packages.PackageSpecification.PackageGroupContents;
+import com.google.devtools.build.lib.syntax.Location;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -53,6 +53,7 @@ public class PackageGroup implements Target {
     this.containingPackage = pkg;
     this.includes = ImmutableList.copyOf(includes);
 
+    // TODO(bazel-team): Consider refactoring so constructor takes a PackageGroupContents. 
     ImmutableList.Builder<PackageSpecification> packagesBuilder = ImmutableList.builder();
     for (String packageSpecification : packageSpecifications) {
       PackageSpecification specification = null;

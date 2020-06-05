@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library", "java_test")
+
 package(
     default_testonly = 1,
     default_visibility = ["//src:__subpackages__"],
@@ -7,36 +9,27 @@ filegroup(
     name = "srcs",
     testonly = 0,
     srcs = glob(["**"]),
-    visibility = ["//src/test/java/com/google/devtools/build/lib:__pkg__"],
+    visibility = ["//src:__subpackages__"],
 )
 
 TESTUTIL_SRCS = ["ToolchainTestCase.java"]
 
-java_test(
-    name = "PlatformRulesTests",
+java_library(
+    name = "PlatformRulesTests_lib",
     srcs = glob(
         ["*.java"],
         exclude = TESTUTIL_SRCS,
     ),
-    test_class = "com.google.devtools.build.lib.AllTests",
     deps = [
-        "//src/main/java/com/google/devtools/build/lib:build-base",
-        "//src/main/java/com/google/devtools/build/lib:os_util",
-        "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:syntax",
-        "//src/main/java/com/google/devtools/build/lib:util",
+        "//src/main/java/com/google/devtools/build/lib/analysis:configured_target",
         "//src/main/java/com/google/devtools/build/lib/analysis/platform",
         "//src/main/java/com/google/devtools/build/lib/analysis/platform:utils",
         "//src/main/java/com/google/devtools/build/lib/cmdline",
-        "//src/main/java/com/google/devtools/build/lib/collect",
-        "//src/main/java/com/google/devtools/build/skyframe",
-        "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
-        "//src/test/java/com/google/devtools/build/lib:analysis_testutil",
-        "//src/test/java/com/google/devtools/build/lib:packages_testutil",
-        "//src/test/java/com/google/devtools/build/lib/skyframe:testutil",
-        "//src/test/java/com/google/devtools/build/lib/skylark:testutil",
+        "//src/main/java/com/google/devtools/build/lib/packages",
+        "//src/test/java/com/google/devtools/build/lib/analysis/util",
         "//third_party:guava",
-        "//third_party:guava-testlib",
+        "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:truth",
     ],
@@ -45,18 +38,27 @@ java_test(
 java_library(
     name = "testutil",
     srcs = TESTUTIL_SRCS,
-    visibility = ["//src/test/java/com/google/devtools/build/lib:__subpackages__"],
     deps = [
-        "//src/main/java/com/google/devtools/build/lib:build-base",
         "//src/main/java/com/google/devtools/build/lib/analysis/platform",
         "//src/main/java/com/google/devtools/build/lib/cmdline",
+        "//src/main/java/com/google/devtools/build/lib/skyframe:skyframe_cluster",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
+        "//src/test/java/com/google/devtools/build/lib/analysis/util",
         "//src/test/java/com/google/devtools/build/lib/skyframe:testutil",
-        "//src/test/java/com/google/devtools/build/lib/skylark:testutil",
         "//third_party:guava",
+        "//third_party:jsr305",
         "//third_party:junit4",
         "//third_party:truth",
+    ],
+)
+
+java_test(
+    name = "PlatformRulesTests",
+    test_class = "com.google.devtools.build.lib.AllTests",
+    runtime_deps = [
+        ":PlatformRulesTests_lib",
+        "//src/test/java/com/google/devtools/build/lib:test_runner",
     ],
 )
 
@@ -66,7 +68,6 @@ test_suite(
         "-no_windows",
         "-slow",
     ],
-    visibility = ["//visibility:private"],
 )
 
 test_suite(
@@ -74,5 +75,4 @@ test_suite(
     tests = [
         ":windows_tests",
     ],
-    visibility = ["//src/test/java/com/google/devtools/build/lib:__pkg__"],
 )

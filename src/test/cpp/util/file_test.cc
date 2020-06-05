@@ -21,8 +21,10 @@
 #include <vector>
 
 #include "src/main/cpp/util/file.h"
+#include "src/main/cpp/util/path.h"
+#include "src/main/cpp/util/path_platform.h"
 #include "src/test/cpp/util/test_util.h"
-#include "gtest/gtest.h"
+#include "googletest/include/gtest/gtest.h"
 
 namespace blaze_util {
 
@@ -31,13 +33,13 @@ using std::string;
 TEST(FileTest, TestSingleThreadedPipe) {
   std::unique_ptr<IPipe> pipe(CreatePipe());
   char buffer[50] = {0};
-  ASSERT_TRUE(pipe.get()->Send("hello", 5));
+  ASSERT_TRUE(pipe->Send("hello", 5));
   int error = -1;
-  ASSERT_EQ(3, pipe.get()->Receive(buffer, 3, &error));
-  ASSERT_TRUE(pipe.get()->Send(" world", 6));
-  ASSERT_EQ(5, pipe.get()->Receive(buffer + 3, 5, &error));
+  ASSERT_EQ(3, pipe->Receive(buffer, 3, &error));
+  ASSERT_TRUE(pipe->Send(" world", 6));
+  ASSERT_EQ(5, pipe->Receive(buffer + 3, 5, &error));
   ASSERT_EQ(IPipe::SUCCESS, error);
-  ASSERT_EQ(3, pipe.get()->Receive(buffer + 8, 40, &error));
+  ASSERT_EQ(3, pipe->Receive(buffer + 8, 40, &error));
   ASSERT_EQ(IPipe::SUCCESS, error);
   ASSERT_EQ(0, strncmp(buffer, "hello world", 11));
 }
@@ -46,19 +48,19 @@ TEST(FileTest, TestMultiThreadedPipe) {
   std::unique_ptr<IPipe> pipe(CreatePipe());
   char buffer[50] = {0};
   std::thread writer_thread([&pipe]() {
-    ASSERT_TRUE(pipe.get()->Send("hello", 5));
-    ASSERT_TRUE(pipe.get()->Send(" world", 6));
+    ASSERT_TRUE(pipe->Send("hello", 5));
+    ASSERT_TRUE(pipe->Send(" world", 6));
   });
 
   // Wait for all data to be fully written to the pipe.
   writer_thread.join();
 
   int error = -1;
-  ASSERT_EQ(3, pipe.get()->Receive(buffer, 3, &error));
+  ASSERT_EQ(3, pipe->Receive(buffer, 3, &error));
   ASSERT_EQ(IPipe::SUCCESS, error);
-  ASSERT_EQ(5, pipe.get()->Receive(buffer + 3, 5, &error));
+  ASSERT_EQ(5, pipe->Receive(buffer + 3, 5, &error));
   ASSERT_EQ(IPipe::SUCCESS, error);
-  ASSERT_EQ(3, pipe.get()->Receive(buffer + 8, 40, &error));
+  ASSERT_EQ(3, pipe->Receive(buffer + 8, 40, &error));
   ASSERT_EQ(IPipe::SUCCESS, error);
   ASSERT_EQ(0, strncmp(buffer, "hello world", 11));
 }
@@ -71,7 +73,7 @@ TEST(FileTest, TestReadFileIntoString) {
   std::string filename(JoinPath(tempdir, "test.readfile"));
   AutoFileStream fh(fopen(filename.c_str(), "wt"));
   EXPECT_TRUE(fh.IsOpen());
-  ASSERT_EQ(11, fwrite("hello world", 1, 11, fh));
+  ASSERT_EQ(size_t(11), fwrite("hello world", 1, 11, fh));
   fh.Close();
 
   std::string actual;
@@ -93,7 +95,7 @@ TEST(FileTest, TestReadFileIntoBuffer) {
   std::string filename(JoinPath(tempdir, "test.readfile"));
   AutoFileStream fh(fopen(filename.c_str(), "wt"));
   EXPECT_TRUE(fh.IsOpen());
-  EXPECT_EQ(11, fwrite("hello world", 1, 11, fh));
+  EXPECT_EQ(size_t(11), fwrite("hello world", 1, 11, fh));
   fh.Close();
 
   char buffer[30];
@@ -123,7 +125,7 @@ TEST(FileTest, TestWriteFile) {
   AutoFileStream fh(fopen(filename.c_str(), "rt"));
   EXPECT_TRUE(fh.IsOpen());
   fflush(fh);
-  ASSERT_EQ(3, fread(buf, 1, 5, fh));
+  ASSERT_EQ(size_t(3), fread(buf, 1, 5, fh));
   fh.Close();
   ASSERT_EQ(std::string(buf), std::string("hel"));
 
@@ -131,7 +133,7 @@ TEST(FileTest, TestWriteFile) {
   fh = fopen(filename.c_str(), "rt");
   EXPECT_TRUE(fh.IsOpen());
   memset(buf, 0, 6);
-  ASSERT_EQ(5, fread(buf, 1, 5, fh));
+  ASSERT_EQ(size_t(5), fread(buf, 1, 5, fh));
   fh.Close();
   ASSERT_EQ(std::string(buf), std::string("hello"));
 
@@ -143,40 +145,56 @@ TEST(FileTest, TestMtimeHandling) {
   const char* tempdir_cstr = getenv("TEST_TMPDIR");
   ASSERT_NE(tempdir_cstr, nullptr);
   ASSERT_NE(tempdir_cstr[0], 0);
-  string tempdir(tempdir_cstr);
+  Path tempdir(tempdir_cstr);
 
   std::unique_ptr<IFileMtime> mtime(CreateFileMtime());
-  bool actual = false;
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(tempdir, &actual));
-  ASSERT_FALSE(actual);
-
+  // Assert that a directory is always untampered with. (We do
+  // not care about directories' mtimes.)
+  ASSERT_TRUE(mtime->IsUntampered(tempdir));
   // Create a new file, assert its mtime is not in the future.
-  string file(JoinPath(tempdir, "foo.txt"));
+  Path file = tempdir.GetRelative("foo.txt");
   ASSERT_TRUE(WriteFile("hello", 5, file));
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(file, &actual));
-  ASSERT_FALSE(actual);
+  ASSERT_FALSE(mtime->IsUntampered(file));
   // Set the file's mtime to the future, assert that it's so.
-  ASSERT_TRUE(mtime.get()->SetToDistantFuture(file));
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(file, &actual));
-  ASSERT_TRUE(actual);
-  // Overwrite the file, resetting its mtime, assert that GetIfInDistantFuture
-  // notices.
+  ASSERT_TRUE(mtime->SetToDistantFuture(file));
+  ASSERT_TRUE(mtime->IsUntampered(file));
+  // Overwrite the file, resetting its mtime, assert that
+  // IsUntampered notices.
   ASSERT_TRUE(WriteFile("world", 5, file));
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(file, &actual));
-  ASSERT_FALSE(actual);
+  ASSERT_FALSE(mtime->IsUntampered(file));
   // Set it to the future again so we can reset it using SetToNow.
-  ASSERT_TRUE(mtime.get()->SetToDistantFuture(file));
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(file, &actual));
-  ASSERT_TRUE(actual);
+  ASSERT_TRUE(mtime->SetToDistantFuture(file));
+  ASSERT_TRUE(mtime->IsUntampered(file));
   // Assert that SetToNow resets the timestamp.
-  ASSERT_TRUE(mtime.get()->SetToNow(file));
-  ASSERT_TRUE(mtime.get()->GetIfInDistantFuture(file, &actual));
-  ASSERT_FALSE(actual);
+  ASSERT_TRUE(mtime->SetToNow(file));
+  ASSERT_FALSE(mtime->IsUntampered(file));
   // Delete the file and assert that we can no longer set or query its mtime.
   ASSERT_TRUE(UnlinkPath(file));
-  ASSERT_FALSE(mtime.get()->SetToNow(file));
-  ASSERT_FALSE(mtime.get()->SetToDistantFuture(file));
-  ASSERT_FALSE(mtime.get()->GetIfInDistantFuture(file, &actual));
+  ASSERT_FALSE(mtime->SetToNow(file));
+  ASSERT_FALSE(mtime->SetToDistantFuture(file));
+  ASSERT_FALSE(mtime->IsUntampered(file));
+}
+
+TEST(FileTest, TestCreateTempDir) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  EXPECT_NE(tempdir_cstr, nullptr);
+  EXPECT_NE(tempdir_cstr[0], 0);
+  string tempdir(tempdir_cstr);
+  string tmpdir(tempdir_cstr);
+
+  string prefix_in_existing_dir(JoinPath(tempdir, "foo."));
+  string result_in_existing_dir(CreateTempDir(prefix_in_existing_dir));
+  ASSERT_NE(result_in_existing_dir, prefix_in_existing_dir);
+  ASSERT_EQ(0, result_in_existing_dir.find(prefix_in_existing_dir));
+  EXPECT_TRUE(PathExists(result_in_existing_dir));
+
+  string base_dir(JoinPath(tempdir, "doesntexistyet"));
+  ASSERT_FALSE(PathExists(base_dir));
+  string prefix_in_new_dir(JoinPath(base_dir, "foo."));
+  string result_in_new_dir(CreateTempDir(prefix_in_new_dir));
+  ASSERT_NE(result_in_new_dir, prefix_in_new_dir);
+  ASSERT_EQ(0, result_in_new_dir.find(prefix_in_new_dir));
+  EXPECT_TRUE(PathExists(result_in_new_dir));
 }
 
 TEST(FileTest, TestRenameDirectory) {
@@ -253,8 +271,40 @@ TEST(FileTest, IsDevNullTest) {
   ASSERT_FALSE(IsDevNull("dev/null"));
   ASSERT_FALSE(IsDevNull("/dev/nul"));
   ASSERT_FALSE(IsDevNull("/dev/nulll"));
-  ASSERT_FALSE(IsDevNull(NULL));
+  ASSERT_FALSE(IsDevNull((char *) nullptr));
   ASSERT_FALSE(IsDevNull(""));
+}
+
+TEST(FileTest, TestRemoveRecursively) {
+  const char* tempdir_cstr = getenv("TEST_TMPDIR");
+  ASSERT_NE(tempdir_cstr, nullptr);
+  string tempdir(tempdir_cstr);
+  ASSERT_TRUE(PathExists(tempdir));
+
+  string non_existent_dir(JoinPath(tempdir, "test_rmr_non_existent"));
+  EXPECT_TRUE(RemoveRecursively(non_existent_dir));
+  EXPECT_FALSE(PathExists(non_existent_dir));
+
+  string empty_dir(JoinPath(tempdir, "test_rmr_empty_dir"));
+  EXPECT_TRUE(MakeDirectories(empty_dir, 0700));
+  EXPECT_TRUE(RemoveRecursively(empty_dir));
+  EXPECT_FALSE(PathExists(empty_dir));
+
+  string dir_with_content(JoinPath(tempdir, "test_rmr_dir_w_content"));
+  EXPECT_TRUE(MakeDirectories(dir_with_content, 0700));
+  EXPECT_TRUE(WriteFile("junkdata", 8, JoinPath(dir_with_content, "file")));
+  string subdir = JoinPath(dir_with_content, "dir");
+  EXPECT_TRUE(MakeDirectories(subdir, 0700));
+  string subsubdir = JoinPath(subdir, "dir");
+  EXPECT_TRUE(MakeDirectories(subsubdir, 0700));
+  EXPECT_TRUE(WriteFile("junkdata", 8, JoinPath(subsubdir, "deep_file")));
+  EXPECT_TRUE(RemoveRecursively(dir_with_content));
+  EXPECT_FALSE(PathExists(dir_with_content));
+
+  string regular_file(JoinPath(tempdir, "test_rmr_regular_file"));
+  EXPECT_TRUE(WriteFile("junkdata", 8, regular_file));
+  EXPECT_TRUE(RemoveRecursively(regular_file));
+  EXPECT_FALSE(PathExists(regular_file));
 }
 
 }  // namespace blaze_util

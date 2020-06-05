@@ -29,9 +29,10 @@ import com.google.testing.junit.runner.model.XmlResultWriter;
 import com.google.testing.junit.runner.sharding.ShardingEnvironment;
 import com.google.testing.junit.runner.sharding.ShardingFilters;
 import com.google.testing.junit.runner.sharding.testing.StubShardingEnvironment;
-import com.google.testing.junit.runner.util.FakeTicker;
-import com.google.testing.junit.runner.util.Ticker;
+import com.google.testing.junit.runner.util.FakeTestClock;
+import com.google.testing.junit.runner.util.TestClock;
 import java.util.List;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.Description;
 import org.junit.runner.Request;
@@ -45,15 +46,18 @@ import org.junit.runners.Suite.SuiteClasses;
  */
 @RunWith(JUnit4.class)
 public class JUnit4TestModelBuilderTest {
-  private final Ticker fakeTicker = new FakeTicker();
+  private final TestClock fakeTestClock = new FakeTestClock();
   private final ShardingEnvironment stubShardingEnvironment = new StubShardingEnvironment();
   private final XmlResultWriter xmlResultWriter = new AntXmlResultWriter();
 
   private JUnit4TestModelBuilder builder(Request request, String suiteName,
       ShardingEnvironment shardingEnvironment, ShardingFilters shardingFilters,
       XmlResultWriter xmlResultWriter) {
-    return new JUnit4TestModelBuilder(request, suiteName, new TestSuiteModel.Builder(
-        fakeTicker, shardingFilters, shardingEnvironment, xmlResultWriter));
+    return new JUnit4TestModelBuilder(
+        request,
+        suiteName,
+        new TestSuiteModel.Builder(
+            fakeTestClock, shardingFilters, shardingEnvironment, xmlResultWriter));
   }
 
   @Test
@@ -89,6 +93,18 @@ public class JUnit4TestModelBuilderTest {
     modelBuilder.get();
 
     verify(mockShardingEnvironment, never()).touchShardFile();
+  }
+
+  @Test
+  public void testCreateModel_topLevelIgnore() throws Exception {
+    Class<?> testClass = SampleTestCaseWithTopLevelIgnore.class;
+    Request request = Request.classWithoutSuiteMethod(testClass);
+    String testClassName = testClass.getCanonicalName();
+    JUnit4TestModelBuilder modelBuilder =
+        builder(request, testClassName, stubShardingEnvironment, null, xmlResultWriter);
+
+    TestSuiteModel testSuiteModel = modelBuilder.get();
+    assertThat(testSuiteModel.getNumTestCases()).isEqualTo(0);
   }
 
   @Test
@@ -140,7 +156,6 @@ public class JUnit4TestModelBuilderTest {
     assertThat(model.getNumTestCases()).isEqualTo(1);
   }
 
-
   /** Sample test case with two tests. */
   @RunWith(JUnit4.class)
   public static class SampleTestCaseWithTwoTests {
@@ -153,6 +168,16 @@ public class JUnit4TestModelBuilderTest {
     }
   }
 
+  /** Sample test case with top level @Ignore */
+  @Ignore
+  @RunWith(JUnit4.class)
+  public static class SampleTestCaseWithTopLevelIgnore {
+    @Test
+    public void testOne() {}
+
+    @Test
+    public void testTwo() {}
+  }
 
   /** Sample test case with one test. */
   @RunWith(JUnit4.class)
@@ -161,7 +186,6 @@ public class JUnit4TestModelBuilderTest {
     public void testOne() {
     }
   }
-
 
   /** Sample suite with one test. */
   @RunWith(Suite.class)

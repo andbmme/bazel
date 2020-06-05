@@ -21,41 +21,71 @@ import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.Depset;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.Provider;
-import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
+import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.syntax.ClassObject;
 import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.syntax.Printer;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import javax.annotation.Nullable;
 
 /**
- * This configured target pretends to be whatever type of target "actual" is, returning its
- * transitive info providers and target, but returning its own label.
+ * This configured target pretends to be whatever type of target "actual" is, returning its label,
+ * transitive info providers and target.
  *
  * <p>Transitive info providers can also be overridden.
  */
+@AutoCodec
 @Immutable
 public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObject {
   private final Label label;
-  private final BuildConfiguration configuration;
+  private final BuildConfigurationValue.Key configurationKey;
   private final ConfiguredTarget actual;
   private final ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider>
       overrides;
+  private final ImmutableMap<Label, ConfigMatchingProvider> configConditions;
 
   public AliasConfiguredTarget(
       RuleContext ruleContext,
       ConfiguredTarget actual,
       ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider> overrides) {
-    this.label = ruleContext.getLabel();
-    this.configuration = Preconditions.checkNotNull(ruleContext.getConfiguration());
-    this.actual = Preconditions.checkNotNull(actual);
-    this.overrides = Preconditions.checkNotNull(overrides);
+    this(
+        ruleContext.getLabel(),
+        Preconditions.checkNotNull(ruleContext.getConfigurationKey()),
+        Preconditions.checkNotNull(actual),
+        Preconditions.checkNotNull(overrides),
+        ruleContext.getConfigConditions());
+  }
+
+  @AutoCodec.Instantiator
+  @VisibleForSerialization
+  AliasConfiguredTarget(
+      Label label,
+      BuildConfigurationValue.Key configurationKey,
+      ConfiguredTarget actual,
+      ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider> overrides,
+      ImmutableMap<Label, ConfigMatchingProvider> configConditions) {
+    this.label = label;
+    this.configurationKey = configurationKey;
+    this.actual = actual;
+    this.overrides = overrides;
+    this.configConditions = configConditions;
+  }
+
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
+  }
+
+  public ImmutableMap<Label, ConfigMatchingProvider> getConfigConditions() {
+    return configConditions;
   }
 
   @Override
@@ -84,26 +114,21 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
   }
 
   @Override
-  public Object getIndex(Object key, Location loc) throws EvalException {
-    return actual.getIndex(key, loc);
+  public Object getIndex(StarlarkSemantics semantics, Object key) throws EvalException {
+    return actual.getIndex(semantics, key);
   }
 
   @Override
-  public boolean containsKey(Object key, Location loc) throws EvalException {
-    return actual.containsKey(key, loc);
+  public boolean containsKey(StarlarkSemantics semantics, Object key) throws EvalException {
+    return actual.containsKey(semantics, key);
   }
 
   @Override
-  public Target getTarget() {
-    return actual.getTarget();
-  }
-
-  @Override
-  public BuildConfiguration getConfiguration() {
-    // This does not return actual.getConfiguration() because actual might be an input file, in
-    // which case its configuration is null and we don't want to have rules that have a null
-    // configuration.
-    return configuration;
+  public BuildConfigurationValue.Key getConfigurationKey() {
+    // This does not return actual.getConfigurationKey() because actual might be an input file, in
+    // which case its configurationKey is null and we don't want to have rules that have a null
+    // configurationKey.
+    return configurationKey;
   }
 
   /* ClassObject methods */
@@ -113,38 +138,38 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
     if (name.equals(LABEL_FIELD)) {
       return getLabel();
     } else if (name.equals(FILES_FIELD)) {
-      // A shortcut for files to build in Skylark. FileConfiguredTarget and RuleConfiguredTarget
+      // A shortcut for files to build in Starlark. FileConfiguredTarget and RuleConfiguredTarget
       // always has FileProvider and Error- and PackageGroupConfiguredTarget-s shouldn't be
-      // accessible in Skylark.
-      return SkylarkNestedSet.of(Artifact.class, getProvider(FileProvider.class).getFilesToBuild());
+      // accessible in Starlark.
+      return Depset.of(Artifact.TYPE, getProvider(FileProvider.class).getFilesToBuild());
     }
     return actual.getValue(name);
   }
 
   @Override
-  public ImmutableCollection<String> getKeys() {
-    return actual.getKeys();
+  public ImmutableCollection<String> getFieldNames() {
+    return actual.getFieldNames();
   }
 
   @Override
-  public String errorMessage(String name) {
+  public String getErrorMessageForUnknownField(String name) {
     // Use the default error message.
     return null;
   }
 
-  /**
-   *  Returns a target this target aliases.
-   */
+  @Override
   public ConfiguredTarget getActual() {
-    return actual;
+    // This will either dereference an alias chain, or return the final ConfiguredTarget.
+    return actual.getActual();
   }
 
+  @Override
   public Label getOriginalLabel() {
     return label;
   }
 
   @Override
-  public void repr(SkylarkPrinter printer) {
+  public void repr(Printer printer) {
     printer.append("<alias target " + label + " of " + actual.getLabel() + ">");
   }
 }

@@ -18,11 +18,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ListMultimap;
+import com.google.devtools.common.options.OptionPriority.PriorityCategory;
 import com.google.devtools.common.options.OptionsParser.ConstructionException;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map.Entry;
+import java.util.Map;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
@@ -98,8 +99,6 @@ public abstract class OptionValueDescription {
       return new RepeatableOptionValueDescription(option);
     } else if (option.hasImplicitRequirements()) {
       return new OptionWithImplicitRequirementsValueDescription(option);
-    } else if (option.isWrapperOption()) {
-      return new WrapperOptionValueDescription(option);
     } else {
       return new SingleOptionValueDescription(option);
     }
@@ -187,17 +186,17 @@ public abstract class OptionValueDescription {
       // log warnings describing the change.
       if (parsedOption.getPriority().compareTo(effectiveOptionInstance.getPriority()) >= 0) {
         // Identify the option that might have led to the current and new value of this option.
-        OptionDefinition implicitDependent = parsedOption.getImplicitDependent();
-        OptionDefinition expandedFrom = parsedOption.getExpandedFrom();
-        OptionDefinition optionThatDependsOnEffectiveValue =
+        ParsedOptionDescription implicitDependent = parsedOption.getImplicitDependent();
+        ParsedOptionDescription expandedFrom = parsedOption.getExpandedFrom();
+        ParsedOptionDescription optionThatDependsOnEffectiveValue =
             effectiveOptionInstance.getImplicitDependent();
-        OptionDefinition optionThatExpandedToEffectiveValue =
+        ParsedOptionDescription optionThatExpandedToEffectiveValue =
             effectiveOptionInstance.getExpandedFrom();
 
         Object newValue = parsedOption.getConvertedValue();
         // Output warnings if there is conflicting options set different values in a way that might
         // not have been obvious to the user, such as through expansions and implicit requirements.
-        if (!effectiveValue.equals(newValue)) {
+        if (effectiveValue != null && !effectiveValue.equals(newValue)) {
           boolean samePriorityCategory =
               parsedOption
                   .getPriority()
@@ -223,11 +222,15 @@ public abstract class OptionValueDescription {
                         + "option by %s",
                     optionDefinition, optionThatDependsOnEffectiveValue));
           } else if (samePriorityCategory
+              && parsedOption
+                  .getPriority()
+                  .getPriorityCategory()
+                  .equals(PriorityCategory.COMMAND_LINE)
               && ((optionThatExpandedToEffectiveValue == null) && (expandedFrom != null))) {
             // Create a warning if an expansion option overrides an explicit option:
             warnings.add(
                 String.format(
-                    "%s was expanded and now overrides a previous explicitly specified %s with %s",
+                    "%s was expanded and now overrides the explicit option %s with %s",
                     expandedFrom,
                     effectiveOptionInstance.getCommandLineForm(),
                     parsedOption.getCommandLineForm()));
@@ -278,8 +281,8 @@ public abstract class OptionValueDescription {
           .asMap()
           .entrySet()
           .stream()
-          .sorted(Comparator.comparing(Entry::getKey))
-          .map(Entry::getValue)
+          .sorted(Comparator.comparing(Map.Entry::getKey))
+          .map(Map.Entry::getValue)
           .flatMap(Collection::stream)
           .map(ParsedOptionDescription::getSource)
           .distinct()
@@ -287,17 +290,14 @@ public abstract class OptionValueDescription {
     }
 
     @Override
-    public List<Object> getValue() {
+    public ImmutableList<Object> getValue() {
       // Sort the results by option priority and return them in a new list. The generic type of
       // the list is not known at runtime, so we can't use it here.
-      return optionValues
-          .asMap()
-          .entrySet()
-          .stream()
-          .sorted(Comparator.comparing(Entry::getKey))
-          .map(Entry::getValue)
+      return optionValues.asMap().entrySet().stream()
+          .sorted(Comparator.comparing(Map.Entry::getKey))
+          .map(Map.Entry::getValue)
           .flatMap(Collection::stream)
-          .collect(Collectors.toList());
+          .collect(ImmutableList.toImmutableList());
     }
 
     @Override
@@ -322,8 +322,8 @@ public abstract class OptionValueDescription {
           .asMap()
           .entrySet()
           .stream()
-          .sorted(Comparator.comparing(Entry::getKey))
-          .map(Entry::getValue)
+          .sorted(Comparator.comparing(Map.Entry::getKey))
+          .map(Map.Entry::getValue)
           .flatMap(Collection::stream)
           // Only provide the options that aren't implied elsewhere.
           .filter(optionDesc -> optionDesc.getImplicitDependent() == null)
@@ -428,50 +428,6 @@ public abstract class OptionValueDescription {
               : String.format(
                   "implicit requirement of %s (source %s)",
                   optionDefinition, parsedOption.getSource()));
-    }
-  }
-
-  /** Form for options that contain other options in the value text to which they expand. */
-  private static final class WrapperOptionValueDescription extends OptionValueDescription {
-
-    WrapperOptionValueDescription(OptionDefinition optionDefinition) {
-      super(optionDefinition);
-    }
-
-    @Override
-    public Object getValue() {
-      return null;
-    }
-
-    @Override
-    public String getSourceString() {
-      return null;
-    }
-
-    @Override
-    ExpansionBundle addOptionInstance(ParsedOptionDescription parsedOption, List<String> warnings)
-        throws OptionsParsingException {
-      if (!parsedOption.getUnconvertedValue().startsWith("-")) {
-        throw new OptionsParsingException(
-            String.format(
-                "Invalid value format for %s. You may have meant --%s=--%s",
-                optionDefinition,
-                optionDefinition.getOptionName(),
-                parsedOption.getUnconvertedValue()));
-      }
-      return new ExpansionBundle(
-          ImmutableList.of(parsedOption.getUnconvertedValue()),
-          (parsedOption.getSource() == null)
-              ? String.format("unwrapped from %s", optionDefinition)
-              : String.format(
-                  "unwrapped from %s (source %s)", optionDefinition, parsedOption.getSource()));
-    }
-
-    @Override
-    public ImmutableList<ParsedOptionDescription> getCanonicalInstances() {
-      // No wrapper options get listed in the canonical form - the options they are wrapping will
-      // be in the right place.
-      return ImmutableList.of();
     }
   }
 }

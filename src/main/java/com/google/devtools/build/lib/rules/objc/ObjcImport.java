@@ -15,14 +15,17 @@
 package com.google.devtools.build.lib.rules.objc;
 
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.TransitionMode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.packages.Type;
+import com.google.devtools.build.lib.rules.cpp.CcCommon;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
-import com.google.devtools.build.lib.syntax.Type;
 
 /**
  * Implementation for {@code objc_import}.
@@ -30,30 +33,29 @@ import com.google.devtools.build.lib.syntax.Type;
 public class ObjcImport implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
-      throws InterruptedException, RuleErrorException {
-    ObjcCommon common =
-        new ObjcCommon.Builder(ruleContext)
-            .setCompilationAttributes(
-                CompilationAttributes.Builder.fromRuleContext(ruleContext).build())
-            .setResourceAttributes(new ResourceAttributes(ruleContext))
-            .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
-            .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
-            .setHasModuleMap()
-            .addExtraImportLibraries(
-                ruleContext.getPrerequisiteArtifacts("archives", Mode.TARGET).list())
-            .addDepObjcProviders(
-                ruleContext.getPrerequisites(
-                    "bundles", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR))
-            .build();
-
-    NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
+      throws InterruptedException, RuleErrorException, ActionConflictException {
+    CcCommon.checkRuleLoadedThroughMacro(ruleContext);
 
     CompilationAttributes compilationAttributes =
         CompilationAttributes.Builder.fromRuleContext(ruleContext).build();
     IntermediateArtifacts intermediateArtifacts =
         ObjcRuleClasses.intermediateArtifacts(ruleContext);
+    CompilationArtifacts compilationArtifacts = new CompilationArtifacts.Builder().build();
 
-    Iterable<Artifact> publicHeaders = compilationAttributes.hdrs();
+    ObjcCommon common =
+        new ObjcCommon.Builder(ObjcCommon.Purpose.LINK_ONLY, ruleContext)
+            .setCompilationArtifacts(compilationArtifacts)
+            .setCompilationAttributes(compilationAttributes)
+            .setIntermediateArtifacts(intermediateArtifacts)
+            .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
+            .setHasModuleMap()
+            .addExtraImportLibraries(
+                ruleContext.getPrerequisiteArtifacts("archives", TransitionMode.TARGET).list())
+            .build();
+
+    NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
+
+    NestedSet<Artifact> publicHeaders = compilationAttributes.hdrs();
     CppModuleMap moduleMap = intermediateArtifacts.moduleMap();
 
     new CompilationSupport.Builder()
@@ -62,10 +64,15 @@ public class ObjcImport implements RuleConfiguredTargetFactory {
         .registerGenerateModuleMapAction(moduleMap, publicHeaders)
         .validateAttributes();
 
-    new ResourceSupport(ruleContext).validateAttributes();
+    ObjcProvider objcProvider = common.getObjcProviderBuilder().build();
 
     return ObjcRuleClasses.ruleConfiguredTarget(ruleContext, filesToBuild.build())
-        .addNativeDeclaredProvider(common.getObjcProvider())
+        .addNativeDeclaredProvider(objcProvider)
+        .addNativeDeclaredProvider(
+            CcInfo.builder()
+                .setCcCompilationContext(objcProvider.getCcCompilationContext())
+                .build())
+        .addStarlarkTransitiveInfo(ObjcProvider.STARLARK_NAME, objcProvider)
         .build();
   }
 }

@@ -16,9 +16,9 @@ package com.google.devtools.build.buildjar;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.buildjar.javac.JavacOptions;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -27,37 +27,52 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import javax.annotation.Nullable;
 
 /**
  * Parses options that the {@link JavaLibraryBuildRequest} needs to construct a build request from
  * command-line flags and options files and provides them via getters.
  */
 public final class OptionsParser {
-  private static final Splitter SPACE_SPLITTER = Splitter.on(' ');
   private final List<String> javacOpts = new ArrayList<>();
 
-  private final Map<String, JarOwner> directJarsToTargets = new HashMap<>();
-  private final Map<String, JarOwner> indirectJarsToTargets = new HashMap<>();
+  private final Set<String> directJars = new LinkedHashSet<>();
 
   private String strictJavaDeps;
+  private String fixDepsTool;
 
   private String outputDepsProtoFile;
-  private final Set<String> depsArtifacts = new HashSet<>();
+  private final Set<String> depsArtifacts = new LinkedHashSet<>();
 
-  private boolean strictClasspathMode;
+  /** This modes controls how a probablistic Java classpath reduction is used. */
+  public enum ReduceClasspathMode {
+    BAZEL_REDUCED,
+    BAZEL_FALLBACK,
+    JAVABUILDER_REDUCED,
+    NONE
+  }
+
+  /**
+   * The flag --reduce_classpath_mode can be passed to JavaBuilder to request a compilation with
+   * reduced classpath, computed from the compilations direct dependencies plus what was actually
+   * required to build those. If this compilation fails with a specific error code, then a fallback
+   * is done using the full (transitive) classpath.
+   */
+  private ReduceClasspathMode reduceClasspathMode = ReduceClasspathMode.NONE;
+
+  private int fullClasspathLength = -1;
+  private int reducedClasspathLength = -1;
 
   private String sourceGenDir;
   private String generatedSourcesOutputJar;
   private String manifestProtoPath;
-  private final Set<String> sourceRoots = new HashSet<>();
 
   private final List<String> sourceFiles = new ArrayList<>();
   private final List<String> sourceJars = new ArrayList<>();
@@ -65,12 +80,14 @@ public final class OptionsParser {
   private final List<String> classPath = new ArrayList<>();
   private final List<String> sourcePath = new ArrayList<>();
   private final List<String> bootClassPath = new ArrayList<>();
-  private final List<String> extClassPath = new ArrayList<>();
+  private String system;
 
   private final List<String> processorPath = new ArrayList<>();
   private final List<String> processorNames = new ArrayList<>();
+  private final List<String> builtinProcessorNames = new ArrayList<>();
 
   private String outputJar;
+  @Nullable private String nativeHeaderOutput;
 
   private String classDir;
   private String tempDir;
@@ -79,10 +96,12 @@ public final class OptionsParser {
 
   private boolean compressJar;
 
-  private String ruleKind;
   private String targetLabel;
-  
-  private boolean testOnly;
+  private String injectingRuleKind;
+
+  @Nullable private String profile;
+
+  @Nullable private final JavacOptions normalizer;
 
   /**
    * Constructs an {@code OptionsParser} from a list of command args. Sets the same JavacRunner for
@@ -92,6 +111,19 @@ public final class OptionsParser {
    * @throws InvalidCommandLineException on any command line error.
    */
   public OptionsParser(List<String> args) throws InvalidCommandLineException, IOException {
+    this(args, null);
+  }
+
+  /**
+   * Constructs an {@code OptionsParser} from a list of command args. Sets the same JavacRunner for
+   * both compilation and annotation processing.
+   *
+   * @param args the list of command line args.
+   * @throws InvalidCommandLineException on any command line error.
+   */
+  public OptionsParser(List<String> args, @Nullable JavacOptions normalizer)
+      throws InvalidCommandLineException, IOException {
+    this.normalizer = normalizer;
     processCommandlineArgs(expandArguments(args));
   }
 
@@ -104,29 +136,17 @@ public final class OptionsParser {
     for (String arg = argQueue.pollFirst(); arg != null; arg = argQueue.pollFirst()) {
       switch (arg) {
         case "--javacopts":
-          // Collect additional arguments to javac.
-          // Assumes that javac options do not start with "--".
-          // otherwise we have to do something like adding a "--"
-          // terminator to the passed arguments.
-          collectFlagArguments(javacOpts, argQueue, "--");
+          readJavacopts(javacOpts, argQueue);
           sourcePathFromJavacOpts();
           break;
-        case "--direct_dependency":
-          {
-            String jar = getArgument(argQueue, arg);
-            JarOwner owner = parseJarOwner(getArgument(argQueue, arg));
-            directJarsToTargets.put(jar, owner);
-            break;
-          }
-        case "--indirect_dependency":
-          {
-            String jar = getArgument(argQueue, arg);
-            JarOwner owner = parseJarOwner(getArgument(argQueue, arg));
-            indirectJarsToTargets.put(jar, owner);
-            break;
-          }
+        case "--direct_dependencies":
+          collectFlagArguments(directJars, argQueue, "--");
+          break;
         case "--strict_java_deps":
           strictJavaDeps = getArgument(argQueue, arg);
+          break;
+        case "--experimental_fix_deps_tool":
+          fixDepsTool = getArgument(argQueue, arg);
           break;
         case "--output_deps_proto":
           outputDepsProtoFile = getArgument(argQueue, arg);
@@ -135,7 +155,16 @@ public final class OptionsParser {
           collectFlagArguments(depsArtifacts, argQueue, "--");
           break;
         case "--reduce_classpath":
-          strictClasspathMode = true;
+          reduceClasspathMode = ReduceClasspathMode.JAVABUILDER_REDUCED;
+          break;
+        case "--reduce_classpath_mode":
+          reduceClasspathMode = ReduceClasspathMode.valueOf(getArgument(argQueue, arg));
+          break;
+        case "--full_classpath_length":
+          fullClasspathLength = Integer.parseInt(getArgument(argQueue, arg));
+          break;
+        case "--reduced_classpath_length":
+          reducedClasspathLength = Integer.parseInt(getArgument(argQueue, arg));
           break;
         case "--sourcegendir":
           sourceGenDir = getArgument(argQueue, arg);
@@ -145,9 +174,6 @@ public final class OptionsParser {
           break;
         case "--output_manifest_proto":
           manifestProtoPath = getArgument(argQueue, arg);
-          break;
-        case "--source_roots":
-          collectFlagArguments(sourceRoots, argQueue, "-");
           break;
         case "--sources":
           collectFlagArguments(sourceFiles, argQueue, "-");
@@ -165,18 +191,28 @@ public final class OptionsParser {
         case "--bootclasspath":
           collectFlagArguments(bootClassPath, argQueue, "-");
           break;
+        case "--system":
+          system = getArgument(argQueue, arg);
+          break;
         case "--processorpath":
           collectFlagArguments(processorPath, argQueue, "-");
           break;
         case "--processors":
           collectProcessorArguments(processorNames, argQueue, "-");
           break;
+        case "--builtin_processors":
+          collectProcessorArguments(builtinProcessorNames, argQueue, "-");
+          break;
         case "--extclasspath":
         case "--extdir":
-          collectFlagArguments(extClassPath, argQueue, "-");
+          // TODO(b/149114743): delete once Blaze stops passing the flag
+          collectFlagArguments(new ArrayList<>(), argQueue, "-");
           break;
         case "--output":
           outputJar = getArgument(argQueue, arg);
+          break;
+        case "--native_header_output":
+          nativeHeaderOutput = getArgument(argQueue, arg);
           break;
         case "--classdir":
           classDir = getArgument(argQueue, arg);
@@ -194,14 +230,14 @@ public final class OptionsParser {
         case "--compress_jar":
           compressJar = true;
           break;
-        case "--rule_kind":
-          ruleKind = getArgument(argQueue, arg);
-          break;
         case "--target_label":
           targetLabel = getArgument(argQueue, arg);
           break;
-        case "--testonly":
-          testOnly = true;
+        case "--injecting_rule_kind":
+          injectingRuleKind = getArgument(argQueue, arg);
+          break;
+        case "--profile":
+          profile = getArgument(argQueue, arg);
           break;
         default:
           throw new InvalidCommandLineException("unknown option : '" + arg + "'");
@@ -219,18 +255,6 @@ public final class OptionsParser {
         it.remove();
       }
     }
-  }
-
-  private JarOwner parseJarOwner(String line) {
-    List<String> ownerStringParts = SPACE_SPLITTER.splitToList(line);
-    JarOwner owner;
-    Preconditions.checkState(ownerStringParts.size() == 1 || ownerStringParts.size() == 2);
-    if (ownerStringParts.size() == 1) {
-      owner = JarOwner.create(ownerStringParts.get(0));
-    } else {
-      owner = JarOwner.create(ownerStringParts.get(0), ownerStringParts.get(1));
-    }
-    return owner;
   }
 
   /**
@@ -290,6 +314,21 @@ public final class OptionsParser {
     }
   }
 
+  /**
+   * Returns a list of javacopts. Reads options until a terminating {@code "--"} is reached, to
+   * support parsing javacopts that start with {@code --} (e.g. --release).
+   */
+  private static void readJavacopts(List<String> javacopts, Deque<String> argumentDeque) {
+    while (!argumentDeque.isEmpty()) {
+      String arg = argumentDeque.pollFirst();
+      if (arg.equals("--")) {
+        return;
+      }
+      javacopts.add(arg);
+    }
+    throw new IllegalArgumentException("javacopts should be terminated by `--`");
+  }
+
   private static final Splitter CLASSPATH_SPLITTER =
       Splitter.on(File.pathSeparatorChar).trimResults().omitEmptyStrings();
 
@@ -321,7 +360,7 @@ public final class OptionsParser {
     try {
       return args.remove();
     } catch (NoSuchElementException e) {
-      throw new InvalidCommandLineException(arg + ": missing argument");
+      throw new InvalidCommandLineException(arg + ": missing argument", e);
     }
   }
 
@@ -334,19 +373,19 @@ public final class OptionsParser {
   }
 
   public List<String> getJavacOpts() {
-    return javacOpts;
+    return normalizer != null ? normalizer.normalize(javacOpts) : javacOpts;
   }
 
-  public Map<String, JarOwner> getDirectMappings() {
-    return directJarsToTargets;
-  }
-
-  public Map<String, JarOwner> getIndirectMappings() {
-    return indirectJarsToTargets;
+  public Set<String> directJars() {
+    return directJars;
   }
 
   public String getStrictJavaDeps() {
     return strictJavaDeps;
+  }
+
+  public String getFixDepsTool() {
+    return fixDepsTool;
   }
 
   public String getOutputDepsProtoFile() {
@@ -357,8 +396,16 @@ public final class OptionsParser {
     return depsArtifacts;
   }
 
-  public boolean reduceClasspath() {
-    return strictClasspathMode;
+  public ReduceClasspathMode reduceClasspathMode() {
+    return reduceClasspathMode;
+  }
+
+  public int fullClasspathLength() {
+    return fullClasspathLength;
+  }
+
+  public int reducedClasspathLength() {
+    return reducedClasspathLength;
   }
 
   public String getSourceGenDir() {
@@ -371,10 +418,6 @@ public final class OptionsParser {
 
   public String getManifestProtoPath() {
     return manifestProtoPath;
-  }
-
-  public Set<String> getSourceRoots() {
-    return sourceRoots;
   }
 
   public List<String> getSourceFiles() {
@@ -393,12 +436,12 @@ public final class OptionsParser {
     return bootClassPath;
   }
 
-  public List<String> getSourcePath() {
-    return sourcePath;
+  public String getSystem() {
+    return system;
   }
 
-  public List<String> getExtClassPath() {
-    return extClassPath;
+  public List<String> getSourcePath() {
+    return sourcePath;
   }
 
   public List<String> getProcessorPath() {
@@ -409,8 +452,17 @@ public final class OptionsParser {
     return processorNames;
   }
 
+  public List<String> getBuiltinProcessorNames() {
+    return builtinProcessorNames;
+  }
+
   public String getOutputJar() {
     return outputJar;
+  }
+
+  @Nullable
+  public String getNativeHeaderOutput() {
+    return nativeHeaderOutput;
   }
 
   public String getClassDir() {
@@ -429,15 +481,15 @@ public final class OptionsParser {
     return compressJar;
   }
 
-  public String getRuleKind() {
-    return ruleKind;
-  }
-
   public String getTargetLabel() {
     return targetLabel;
   }
-  
-  public boolean testOnly() {
-    return testOnly;
+
+  public String getInjectingRuleKind() {
+    return injectingRuleKind;
+  }
+
+  public String getProfile() {
+    return profile;
   }
 }

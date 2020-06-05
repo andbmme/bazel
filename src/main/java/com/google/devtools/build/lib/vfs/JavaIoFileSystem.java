@@ -19,6 +19,7 @@ import com.google.devtools.build.lib.clock.JavaClock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
+import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -52,12 +53,18 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   protected static final String ERR_NO_SUCH_FILE_OR_DIR = " (No such file or directory)";
   protected static final String ERR_NOT_A_DIRECTORY = " (Not a directory)";
 
-  public JavaIoFileSystem() {
-    this(new JavaClock());
+  public JavaIoFileSystem() throws DefaultHashFunctionNotSetException {
+    this.clock = new JavaClock();
+  }
+
+  public JavaIoFileSystem(DigestHashFunction hashFunction) {
+    super(hashFunction);
+    this.clock = new JavaClock();
   }
 
   @VisibleForTesting
-  JavaIoFileSystem(Clock clock) {
+  JavaIoFileSystem(Clock clock, DigestHashFunction hashFunction) {
+    super(hashFunction);
     this.clock = clock;
   }
 
@@ -174,7 +181,7 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   }
 
   @Override
-  protected void setWritable(Path path, boolean writable) throws IOException {
+  public void setWritable(Path path, boolean writable) throws IOException {
     File file = getIoFile(path);
     if (!file.exists()) {
       throw new FileNotFoundException(path + ERR_NO_SUCH_FILE_OR_DIR);
@@ -212,43 +219,43 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   }
 
   @Override
-  protected boolean createDirectory(Path path) throws IOException {
+  public boolean createDirectory(Path path) throws IOException {
+    File file = getIoFile(path);
+    if (file.mkdir()) {
+      return true;
+    }
 
-    // We always synchronize on the current path before doing it on the parent path and file system
-    // path structure ensures that this locking order will never be reversed.
-    // When refactoring, check that subclasses still work as expected and there can be no
-    // deadlocks.
-    synchronized (path) {
-      File file = getIoFile(path);
-      if (file.mkdir()) {
-        return true;
-      }
+    if (fileIsSymbolicLink(file)) {
+      throw new IOException(path + ERR_FILE_EXISTS);
+    }
+    if (file.isDirectory()) {
+      return false; // directory already existed
+    } else if (file.exists()) {
+      throw new IOException(path + ERR_FILE_EXISTS);
+    } else if (!file.getParentFile().exists()) {
+      throw new FileNotFoundException(path.getParentDirectory() + ERR_NO_SUCH_FILE_OR_DIR);
+    }
+    // Parent directory apparently exists - try to create our directory again.
+    if (file.mkdir()) {
+      return true; // Everything is fine finally.
+    } else if (!file.getParentFile().canWrite()) {
+      throw new FileAccessException(path + ERR_PERMISSION_DENIED);
+    } else {
+      // Parent exists, is writable, yet we can't create our directory.
+      throw new FileNotFoundException(path.getParentDirectory() + ERR_NOT_A_DIRECTORY);
+    }
+  }
 
-      // We will be checking the state of the parent path as well. Synchronize on it before
-      // attempting anything.
-      Path parentDirectory = path.getParentDirectory();
-      synchronized (parentDirectory) {
-        if (fileIsSymbolicLink(file)) {
-          throw new IOException(path + ERR_FILE_EXISTS);
-        }
-        if (file.isDirectory()) {
-          return false; // directory already existed
-        } else if (file.exists()) {
-          throw new IOException(path + ERR_FILE_EXISTS);
-        } else if (!file.getParentFile().exists()) {
-          throw new FileNotFoundException(path.getParentDirectory() + ERR_NO_SUCH_FILE_OR_DIR);
-        }
-        // Parent directory apparently exists - try to create our directory again - protecting
-        // against the case where parent directory would be created right before us obtaining
-        // synchronization lock.
-        if (file.mkdir()) {
-          return true; // Everything is fine finally.
-        } else if (!file.getParentFile().canWrite()) {
-          throw new FileAccessException(path + ERR_PERMISSION_DENIED);
-        } else {
-          // Parent exists, is writable, yet we can't create our directory.
-          throw new FileNotFoundException(path.getParentDirectory() + ERR_NOT_A_DIRECTORY);
-        }
+  @Override
+  public void createDirectoryAndParents(Path path) throws IOException {
+    java.nio.file.Path nioPath = getNioPath(path);
+    try {
+      Files.createDirectories(nioPath);
+    } catch (java.nio.file.FileAlreadyExistsException e) {
+      // Files.createDirectories will handle this case normally, but if the existing
+      // file is a symlink to a directory then it still throws. Swallow this.
+      if (!path.isDirectory()) {
+        throw e;
       }
     }
   }
@@ -276,7 +283,7 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
       throws IOException {
     java.nio.file.Path nioPath = getNioPath(linkPath);
     try {
-      Files.createSymbolicLink(nioPath, Paths.get(targetFragment.getPathString()));
+      Files.createSymbolicLink(nioPath, Paths.get(targetFragment.getSafePathString()));
     } catch (java.nio.file.FileAlreadyExistsException e) {
       throw new IOException(linkPath + ERR_FILE_EXISTS);
     } catch (java.nio.file.AccessDeniedException e) {
@@ -298,32 +305,30 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
     } catch (java.nio.file.NoSuchFileException e) {
       throw new FileNotFoundException(path + ERR_NO_SUCH_FILE_OR_DIR);
     } finally {
-      profiler.logSimpleTask(startTime, ProfilerTask.VFS_READLINK, nioPath);
+      profiler.logSimpleTask(startTime, ProfilerTask.VFS_READLINK, path.getPathString());
     }
   }
 
   @Override
-  protected void renameTo(Path sourcePath, Path targetPath) throws IOException {
-    synchronized (sourcePath) {
-      File sourceFile = getIoFile(sourcePath);
-      File targetFile = getIoFile(targetPath);
-      if (!sourceFile.renameTo(targetFile)) {
-        if (!sourceFile.exists()) {
-          throw new FileNotFoundException(sourcePath + ERR_NO_SUCH_FILE_OR_DIR);
-        }
-        if (targetFile.exists()) {
-          if (targetFile.isDirectory() && targetFile.list().length > 0) {
-            throw new IOException(targetPath + ERR_DIRECTORY_NOT_EMPTY);
-          } else if (sourceFile.isDirectory() && targetFile.isFile()) {
-            throw new IOException(sourcePath + " -> " + targetPath + ERR_NOT_A_DIRECTORY);
-          } else if (sourceFile.isFile() && targetFile.isDirectory()) {
-            throw new IOException(sourcePath + " -> " + targetPath + ERR_IS_DIRECTORY);
-          } else {
-            throw new IOException(sourcePath + " -> " + targetPath  + ERR_PERMISSION_DENIED);
-          }
+  public void renameTo(Path sourcePath, Path targetPath) throws IOException {
+    File sourceFile = getIoFile(sourcePath);
+    File targetFile = getIoFile(targetPath);
+    if (!sourceFile.renameTo(targetFile)) {
+      if (!sourceFile.exists()) {
+        throw new FileNotFoundException(sourcePath + ERR_NO_SUCH_FILE_OR_DIR);
+      }
+      if (targetFile.exists()) {
+        if (targetFile.isDirectory() && targetFile.list().length > 0) {
+          throw new IOException(targetPath + ERR_DIRECTORY_NOT_EMPTY);
+        } else if (sourceFile.isDirectory() && targetFile.isFile()) {
+          throw new IOException(sourcePath + " -> " + targetPath + ERR_NOT_A_DIRECTORY);
+        } else if (sourceFile.isFile() && targetFile.isDirectory()) {
+          throw new IOException(sourcePath + " -> " + targetPath + ERR_IS_DIRECTORY);
         } else {
-          throw new FileAccessException(sourcePath + " -> " + targetPath + ERR_PERMISSION_DENIED);
+          throw new IOException(sourcePath + " -> " + targetPath  + ERR_PERMISSION_DENIED);
         }
+      } else {
+        throw new FileAccessException(sourcePath + " -> " + targetPath + ERR_PERMISSION_DENIED);
       }
     }
   }
@@ -334,30 +339,48 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
     try {
       return stat(path, followSymlinks).getSize();
     } finally {
-      profiler.logSimpleTask(startTime, ProfilerTask.VFS_STAT, path);
+      profiler.logSimpleTask(startTime, ProfilerTask.VFS_STAT, path.getPathString());
     }
   }
 
   @Override
-  protected boolean delete(Path path) throws IOException {
-    File file = getIoFile(path);
+  public boolean delete(Path path) throws IOException {
+    java.nio.file.Path nioPath = getNioPath(path);
     long startTime = Profiler.nanoTimeMaybe();
-    synchronized (path) {
-      try {
-        if (file.delete()) {
-          return true;
-        }
-        if (file.exists()) {
-          if (file.isDirectory() && file.list().length > 0) {
-            throw new IOException(path + ERR_DIRECTORY_NOT_EMPTY);
-          } else {
-            throw new IOException(path + ERR_PERMISSION_DENIED);
-          }
-        }
+    try {
+      return Files.deleteIfExists(nioPath);
+    } catch (java.nio.file.DirectoryNotEmptyException e) {
+      throw new IOException(path.getPathString() + ERR_DIRECTORY_NOT_EMPTY);
+    } catch (java.nio.file.AccessDeniedException e) {
+      throw new IOException(path.getPathString() + ERR_PERMISSION_DENIED);
+    } catch (java.nio.file.AtomicMoveNotSupportedException
+        | java.nio.file.FileAlreadyExistsException
+        | java.nio.file.FileSystemLoopException
+        | java.nio.file.NoSuchFileException
+        | java.nio.file.NotDirectoryException
+        | java.nio.file.NotLinkException e) {
+      // All known but unexpected subclasses of FileSystemException.
+      throw new IOException(path.getPathString() + ": unexpected FileSystemException", e);
+    } catch (java.nio.file.FileSystemException e) {
+      // Files.deleteIfExists() throws FileSystemException on Linux if a path component is a file.
+      // We caught all known subclasses of FileSystemException so `e` is either an unknown
+      // subclass or it is indeed a "Not a directory" error. Non-English JDKs may use a different
+      // error message than "Not a directory", so we should not look for that text. Checking the
+      // parent directory if it's indeed a directory is unrealiable, because another process may
+      // modify it concurrently... but we have no better choice.
+      if (e.getClass().equals(java.nio.file.FileSystemException.class)
+          && !nioPath.getParent().toFile().isDirectory()) {
+        // Hopefully the try-block failed because a parent directory was in fact not a directory.
+        // Theoretically it's possible that the try-block failed for some other reason and all
+        // parent directories were indeed directories, but another process changed a parent
+        // directory into a file after the try-block failed but before this catch-block started, and
+        // we return false here losing the real exception in `e`, but we cannot know.
         return false;
-      } finally {
-        profiler.logSimpleTask(startTime, ProfilerTask.VFS_DELETE, file.getPath());
+      } else {
+        throw new IOException(path.getPathString() + ": unexpected FileSystemException", e);
       }
+    } finally {
+      profiler.logSimpleTask(startTime, ProfilerTask.VFS_DELETE, path.getPathString());
     }
   }
 
@@ -377,7 +400,7 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   }
 
   @Override
-  protected void setLastModifiedTime(Path path, long newTime) throws IOException {
+  public void setLastModifiedTime(Path path, long newTime) throws IOException {
     File file = getIoFile(path);
     if (!file.setLastModified(newTime == -1L ? clock.currentTimeMillis() : newTime)) {
       if (!file.exists()) {
@@ -391,11 +414,11 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   }
 
   @Override
-  protected byte[] getDigest(Path path, HashFunction hashFunction) throws IOException {
+  protected byte[] getDigest(Path path) throws IOException {
     String name = path.toString();
     long startTime = Profiler.nanoTimeMaybe();
     try {
-      return super.getDigest(path, hashFunction);
+      return super.getDigest(path);
     } finally {
       profiler.logSimpleTask(startTime, ProfilerTask.VFS_MD5, name);
     }

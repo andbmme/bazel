@@ -15,110 +15,176 @@
 package com.google.devtools.build.lib.actions;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetExpander;
 import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.skyframe.SkyFunction;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsProvider;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Map;
 import javax.annotation.Nullable;
 
-/**
- * A class that groups services in the scope of the action. Like the FileOutErr object.
- */
-public class ActionExecutionContext implements Closeable {
+/** A class that groups services in the scope of the action. Like the FileOutErr object. */
+public class ActionExecutionContext implements Closeable, ActionContext.ActionContextRegistry {
+
+  /** Enum for --subcommands flag */
+  public enum ShowSubcommands {
+    TRUE(true, false), PRETTY_PRINT(true, true), FALSE(false, false);
+
+    private final boolean shouldShowSubcommands;
+    private final boolean prettyPrintArgs;
+
+    ShowSubcommands(boolean shouldShowSubcommands, boolean prettyPrintArgs) {
+      this.shouldShowSubcommands = shouldShowSubcommands;
+      this.prettyPrintArgs = prettyPrintArgs;
+    }
+  }
 
   private final Executor executor;
-  private final ActionInputFileCache actionInputFileCache;
+  private final MetadataProvider actionInputFileCache;
   private final ActionInputPrefetcher actionInputPrefetcher;
   private final ActionKeyContext actionKeyContext;
   private final MetadataHandler metadataHandler;
+  private final boolean rewindingEnabled;
+  private final LostInputsCheck lostInputsCheck;
   private final FileOutErr fileOutErr;
+  private final ExtendedEventHandler eventHandler;
   private final ImmutableMap<String, String> clientEnv;
-  private final ArtifactExpander artifactExpander;
-  @Nullable
-  private final Environment env;
+  private final ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets;
+  @Nullable private final ArtifactExpander artifactExpander;
+  @Nullable private final Environment env;
+
+  @Nullable private final FileSystem actionFileSystem;
+  @Nullable private final Object skyframeDepsResult;
+
+  @Nullable private ImmutableList<FilesetOutputSymlink> outputSymlinks;
+
+  private final ArtifactPathResolver pathResolver;
+  private final NestedSetExpander nestedSetExpander;
 
   private ActionExecutionContext(
       Executor executor,
-      ActionInputFileCache actionInputFileCache,
+      MetadataProvider actionInputFileCache,
       ActionInputPrefetcher actionInputPrefetcher,
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
+      boolean rewindingEnabled,
+      LostInputsCheck lostInputsCheck,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
       @Nullable ArtifactExpander artifactExpander,
-      @Nullable SkyFunction.Environment env) {
+      @Nullable Environment env,
+      @Nullable FileSystem actionFileSystem,
+      @Nullable Object skyframeDepsResult,
+      NestedSetExpander nestedSetExpander) {
     this.actionInputFileCache = actionInputFileCache;
     this.actionInputPrefetcher = actionInputPrefetcher;
     this.actionKeyContext = actionKeyContext;
     this.metadataHandler = metadataHandler;
+    this.rewindingEnabled = rewindingEnabled;
+    this.lostInputsCheck = lostInputsCheck;
     this.fileOutErr = fileOutErr;
+    this.eventHandler = eventHandler;
     this.clientEnv = ImmutableMap.copyOf(clientEnv);
+    this.topLevelFilesets = topLevelFilesets;
     this.executor = executor;
     this.artifactExpander = artifactExpander;
     this.env = env;
+    this.actionFileSystem = actionFileSystem;
+    this.skyframeDepsResult = skyframeDepsResult;
+    this.pathResolver = ArtifactPathResolver.createPathResolver(actionFileSystem,
+        // executor is only ever null in testing.
+        executor == null ? null : executor.getExecRoot());
+    this.nestedSetExpander = nestedSetExpander;
   }
 
   public ActionExecutionContext(
       Executor executor,
-      ActionInputFileCache actionInputFileCache,
+      MetadataProvider actionInputFileCache,
       ActionInputPrefetcher actionInputPrefetcher,
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
+      boolean rewindingEnabled,
+      LostInputsCheck lostInputsCheck,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
-      ArtifactExpander artifactExpander) {
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
+      ArtifactExpander artifactExpander,
+      @Nullable FileSystem actionFileSystem,
+      @Nullable Object skyframeDepsResult,
+      NestedSetExpander nestedSetExpander) {
     this(
         executor,
         actionInputFileCache,
         actionInputPrefetcher,
         actionKeyContext,
         metadataHandler,
+        rewindingEnabled,
+        lostInputsCheck,
         fileOutErr,
+        eventHandler,
         clientEnv,
+        topLevelFilesets,
         artifactExpander,
-        null);
+        /*env=*/ null,
+        actionFileSystem,
+        skyframeDepsResult,
+        nestedSetExpander);
   }
 
   public static ActionExecutionContext forInputDiscovery(
       Executor executor,
-      ActionInputFileCache actionInputFileCache,
+      MetadataProvider actionInputFileCache,
       ActionInputPrefetcher actionInputPrefetcher,
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
+      boolean rewindingEnabled,
+      LostInputsCheck lostInputsCheck,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
-      Environment env) {
+      Environment env,
+      @Nullable FileSystem actionFileSystem,
+      NestedSetExpander nestedSetExpander) {
     return new ActionExecutionContext(
         executor,
         actionInputFileCache,
         actionInputPrefetcher,
         actionKeyContext,
         metadataHandler,
+        rewindingEnabled,
+        lostInputsCheck,
         fileOutErr,
+        eventHandler,
         clientEnv,
-        null,
-        env);
+        ImmutableMap.of(),
+        /*artifactExpander=*/ null,
+        env,
+        actionFileSystem,
+        /*skyframeDepsResult=*/ null,
+        nestedSetExpander);
   }
 
   public ActionInputPrefetcher getActionInputPrefetcher() {
     return actionInputPrefetcher;
   }
 
-  public ActionInputFileCache getActionInputFileCache() {
+  public MetadataProvider getMetadataProvider() {
     return actionInputFileCache;
   }
 
@@ -127,24 +193,61 @@ public class ActionExecutionContext implements Closeable {
   }
 
   public FileSystem getFileSystem() {
+    if (actionFileSystem != null) {
+      return actionFileSystem;
+    }
     return executor.getFileSystem();
   }
 
   public Path getExecRoot() {
-    return executor.getExecRoot();
+    return actionFileSystem != null
+        ? actionFileSystem.getPath(executor.getExecRoot().asFragment())
+        : executor.getExecRoot();
+  }
+
+  @Nullable
+  public FileSystem getActionFileSystem() {
+    return actionFileSystem;
+  }
+
+  public boolean isRewindingEnabled() {
+    return rewindingEnabled;
+  }
+
+  public void checkForLostInputs() throws LostInputsActionExecutionException {
+    lostInputsCheck.checkForLostInputs();
   }
 
   /**
-   * Returns whether failures should have verbose error messages.
+   * Returns the path for an ActionInput.
+   *
+   * <p>Notably, in the future, we want any action-scoped artifacts to resolve paths using this
+   * method instead of {@link Artifact#getPath} because that does not allow filesystem injection.
+   *
+   * <p>TODO(shahan): cleanup {@link Action}-scoped references to {@link Artifact#getPath} and
+   * {@link Artifact#getRoot}.
    */
-  public boolean getVerboseFailures() {
-    return executor.getVerboseFailures();
+  public Path getInputPath(ActionInput input) {
+    return pathResolver.toPath(input);
+  }
+
+  public Root getRoot(Artifact artifact) {
+    return pathResolver.transformRoot(artifact.getRoot().getRoot());
+  }
+
+  public ArtifactPathResolver getPathResolver() {
+    return pathResolver;
+  }
+
+  /** Returns whether failures for {@code failedLabel} should have verbose error messages. */
+  public boolean showVerboseFailures(Label failedLabel) {
+    return executor.getVerboseFailuresPredicate().test(failedLabel);
   }
 
   /**
    * Returns the command line options of the Blaze command being executed.
    */
-  public OptionsClassProvider getOptions() {
+  public OptionsProvider getOptions() {
     return executor.getOptions();
   }
 
@@ -152,51 +255,61 @@ public class ActionExecutionContext implements Closeable {
     return executor.getClock();
   }
 
-  public EventBus getEventBus() {
-    return executor.getEventBus();
+  public ExtendedEventHandler getEventHandler() {
+    return eventHandler;
   }
 
-  public EventHandler getEventHandler() {
-    return executor.getEventHandler();
+  public ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> getTopLevelFilesets() {
+    return topLevelFilesets;
   }
 
-  /**
-   * Looks up and returns an action context implementation of the given interface type.
-   */
-  public <T extends ActionContext> T getContext(Class<? extends T> type) {
+  @Nullable
+  public ImmutableList<FilesetOutputSymlink> getOutputSymlinks() {
+    return outputSymlinks;
+  }
+
+  public void setOutputSymlinks(ImmutableList<FilesetOutputSymlink> outputSymlinks) {
+    Preconditions.checkState(
+        this.outputSymlinks == null,
+        "Unexpected reassignment of the outputSymlinks of a Fileset from\n:%s to:\n%s",
+        this.outputSymlinks,
+        outputSymlinks);
+    this.outputSymlinks = outputSymlinks;
+  }
+
+  @Override
+  @Nullable
+  public <T extends ActionContext> T getContext(Class<T> type) {
     return executor.getContext(type);
-  }
-
-  /**
-   * Returns the action context implementation for spawn actions with a given mnemonic.
-   */
-  public SpawnActionContext getSpawnActionContext(String mnemonic) {
-    return executor.getSpawnActionContext(mnemonic);
-  }
-
-  /**
-   * Whether this Executor reports subcommands. If not, reportSubcommand has no effect.
-   * This is provided so the caller of reportSubcommand can avoid wastefully constructing the
-   * subcommand string.
-   */
-  public boolean reportsSubcommands() {
-    return executor.reportsSubcommands();
   }
 
   /**
    * Report a subcommand event to this Executor's Reporter and, if action
    * logging is enabled, post it on its EventBus.
    */
-  public void reportSubcommand(Spawn spawn) {
-    String reason;
+  public void maybeReportSubcommand(Spawn spawn) {
+    ShowSubcommands showSubcommands = executor.reportsSubcommands();
+    if (!showSubcommands.shouldShowSubcommands) {
+      return;
+    }
+
+    StringBuilder reason = new StringBuilder();
     ActionOwner owner = spawn.getResourceOwner().getOwner();
     if (owner == null) {
-      reason = spawn.getResourceOwner().prettyPrint();
+      reason.append(spawn.getResourceOwner().prettyPrint());
     } else {
-      reason = Label.print(owner.getLabel())
-          + " [" + spawn.getResourceOwner().prettyPrint() + "]";
+      reason.append(Label.print(owner.getLabel()));
+      reason.append(" [");
+      reason.append(spawn.getResourceOwner().prettyPrint());
+      reason.append(", configuration: ");
+      reason.append(owner.getConfigurationChecksum());
+      if (owner.getExecutionPlatform() != null) {
+        reason.append(", execution platform: ");
+        reason.append(owner.getExecutionPlatform().label());
+      }
+      reason.append("]");
     }
-    String message = Spawns.asShellCommand(spawn, getExecRoot());
+    String message = Spawns.asShellCommand(spawn, getExecRoot(), showSubcommands.prettyPrintArgs);
     getEventHandler().handle(Event.of(EventKind.SUBCOMMAND, null, "# " + reason + "\n" + message));
   }
 
@@ -206,6 +319,11 @@ public class ActionExecutionContext implements Closeable {
 
   public ArtifactExpander getArtifactExpander() {
     return artifactExpander;
+  }
+
+  @Nullable
+  public Object getSkyframeDepsResult() {
+    return skyframeDepsResult;
   }
 
   /**
@@ -227,9 +345,16 @@ public class ActionExecutionContext implements Closeable {
     return actionKeyContext;
   }
 
+  public NestedSetExpander getNestedSetExpander() {
+    return nestedSetExpander;
+  }
+
   @Override
   public void close() throws IOException {
     fileOutErr.close();
+    if (actionFileSystem instanceof Closeable) {
+      ((Closeable) actionFileSystem).close();
+    }
   }
 
   /**
@@ -243,9 +368,28 @@ public class ActionExecutionContext implements Closeable {
         actionInputPrefetcher,
         actionKeyContext,
         metadataHandler,
+        rewindingEnabled,
+        lostInputsCheck,
         fileOutErr,
+        eventHandler,
         clientEnv,
+        topLevelFilesets,
         artifactExpander,
-        env);
+        env,
+        actionFileSystem,
+        skyframeDepsResult,
+        nestedSetExpander);
+  }
+
+  /**
+   * A way of checking whether any lost inputs have been detected during the execution of this
+   * action.
+   */
+  public interface LostInputsCheck {
+
+    LostInputsCheck NONE = () -> {};
+
+    /** Throws if inputs have been lost. */
+    void checkForLostInputs() throws LostInputsActionExecutionException;
   }
 }

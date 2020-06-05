@@ -54,26 +54,34 @@ final class WorkerFactory extends BaseKeyedPooledObjectFactory<WorkerKey, Worker
   @Override
   public Worker create(WorkerKey key) throws Exception {
     int workerId = pidCounter.getAndIncrement();
+    String workTypeName = WorkerKey.makeWorkerTypeName(key.getProxied());
     Path logFile =
-        workerBaseDir.getRelative("worker-" + workerId + "-" + key.getMnemonic() + ".log");
+        workerBaseDir.getRelative(workTypeName + "-" + workerId + "-" + key.getMnemonic() + ".log");
 
     Worker worker;
     boolean sandboxed = workerOptions.workerSandboxing || key.mustBeSandboxed();
     if (sandboxed) {
       Path workDir = getSandboxedWorkerPath(key, workerId);
       worker = new SandboxedWorker(key, workerId, workDir, logFile);
+    } else if (key.getProxied()) {
+      worker =
+          new WorkerProxy(
+              key,
+              workerId,
+              key.getExecRoot(),
+              logFile,
+              WorkerMultiplexerManager.getInstance(key.hashCode()));
     } else {
       worker = new Worker(key, workerId, key.getExecRoot(), logFile);
     }
-    worker.prepareExecution(key);
-    worker.createProcess();
     if (workerOptions.workerVerbose) {
       reporter.handle(
           Event.info(
               String.format(
-                  "Created new %s %s worker (id %d), logging to %s",
+                  "Created new %s %s %s (id %d), logging to %s",
                   sandboxed ? "sandboxed" : "non-sandboxed",
                   key.getMnemonic(),
+                  workTypeName,
                   workerId,
                   logFile)));
     }
@@ -83,7 +91,12 @@ final class WorkerFactory extends BaseKeyedPooledObjectFactory<WorkerKey, Worker
   Path getSandboxedWorkerPath(WorkerKey key, int workerId) {
     String workspaceName = key.getExecRoot().getBaseName();
     return workerBaseDir
-        .getRelative("worker-" + workerId + "-" + key.getMnemonic())
+        .getRelative(
+            WorkerKey.makeWorkerTypeName(key.getProxied())
+                + "-"
+                + workerId
+                + "-"
+                + key.getMnemonic())
         .getRelative(workspaceName);
   }
 
@@ -104,7 +117,10 @@ final class WorkerFactory extends BaseKeyedPooledObjectFactory<WorkerKey, Worker
       reporter.handle(
           Event.info(
               String.format(
-                  "Destroying %s worker (id %d)", key.getMnemonic(), p.getObject().getWorkerId())));
+                  "Destroying %s %s (id %d)",
+                  key.getMnemonic(),
+                  WorkerKey.makeWorkerTypeName(key.getProxied()),
+                  p.getObject().getWorkerId())));
     }
     p.getObject().destroy();
   }
@@ -116,18 +132,20 @@ final class WorkerFactory extends BaseKeyedPooledObjectFactory<WorkerKey, Worker
     boolean hashMatches =
         key.getWorkerFilesCombinedHash().equals(worker.getWorkerFilesCombinedHash());
 
-    if (reporter != null && !hashMatches) {
+    if (workerOptions.workerVerbose && reporter != null && !hashMatches) {
       StringBuilder msg = new StringBuilder();
       msg.append(
           String.format(
-              "%s worker (id %d) can no longer be used, because its files have changed on disk:",
-              key.getMnemonic(), worker.getWorkerId()));
+              "%s %s (id %d) can no longer be used, because its files have changed on disk:",
+              key.getMnemonic(),
+              WorkerKey.makeWorkerTypeName(key.getProxied()),
+              worker.getWorkerId()));
       TreeSet<PathFragment> files = new TreeSet<>();
       files.addAll(key.getWorkerFilesWithHashes().keySet());
       files.addAll(worker.getWorkerFilesWithHashes().keySet());
       for (PathFragment file : files) {
-        HashCode oldHash = key.getWorkerFilesWithHashes().get(file);
-        HashCode newHash = worker.getWorkerFilesWithHashes().get(file);
+        HashCode oldHash = worker.getWorkerFilesWithHashes().get(file);
+        HashCode newHash = key.getWorkerFilesWithHashes().get(file);
         if (!oldHash.equals(newHash)) {
           msg.append("\n")
               .append(file.getPathString())

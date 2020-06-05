@@ -15,9 +15,10 @@ package com.google.devtools.build.lib.skyframe;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent;
-import com.google.devtools.build.lib.buildeventstream.BuildEventConverters;
-import com.google.devtools.build.lib.buildeventstream.BuildEventId;
+import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
+import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.GenericBuildEvent;
 import java.util.Collection;
 import java.util.List;
@@ -35,10 +36,24 @@ public final class PatternExpandingError implements BuildEvent {
     this.skipped = skipped;
   }
 
+  public List<String> getPattern() {
+    return pattern;
+  }
+
+  public boolean getSkipped() {
+    return skipped;
+  }
+
   public static PatternExpandingError failed(List<String> pattern, String message) {
     return new PatternExpandingError(pattern, message, false);
   }
 
+  public static PatternExpandingError failed(String term, String message) {
+    return new PatternExpandingError(ImmutableList.of(term), message, false);
+  }
+
+  // This is unused right now - when we generate the error, we don't know if we're in keep_going
+  // mode or not.
   public static PatternExpandingError skipped(String term, String message) {
     return new PatternExpandingError(ImmutableList.of(term), message, true);
   }
@@ -46,19 +61,19 @@ public final class PatternExpandingError implements BuildEvent {
   @Override
   public BuildEventId getEventId() {
     if (skipped) {
-      return BuildEventId.targetPatternSkipped(pattern);
+      return BuildEventIdUtil.targetPatternSkipped(pattern);
     } else {
-      return BuildEventId.targetPatternExpanded(pattern);
+      return BuildEventIdUtil.targetPatternExpanded(pattern);
     }
   }
 
   @Override
   public Collection<BuildEventId> getChildrenEvents() {
-    return ImmutableList.<BuildEventId>of();
+    return ImmutableList.of();
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     BuildEventStreamProtos.Aborted failure =
         BuildEventStreamProtos.Aborted.newBuilder()
             .setReason(BuildEventStreamProtos.Aborted.AbortReason.LOADING_FAILURE)

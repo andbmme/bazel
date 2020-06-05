@@ -14,13 +14,17 @@
 
 package com.google.devtools.build.lib.actions;
 
-import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.util.Fingerprint;
 
 /**
- * FailAction is an Action that always fails to execute.  (Used as scaffolding
- * for rules we haven't yet implemented.  Also useful for testing.)
+ * FailAction is an Action that always fails to execute. (Used as scaffolding for rules we haven't
+ * yet implemented. Also useful for testing.)
  */
+@AutoCodec
 @Immutable
 public final class FailAction extends AbstractAction {
 
@@ -29,13 +33,17 @@ public final class FailAction extends AbstractAction {
   private final String errorMessage;
 
   public FailAction(ActionOwner owner, Iterable<Artifact> outputs, String errorMessage) {
-    super(owner, ImmutableList.<Artifact>of(), outputs);
+    super(owner, NestedSetBuilder.emptySet(Order.STABLE_ORDER), outputs);
     this.errorMessage = errorMessage;
   }
 
   @Override
   public Artifact getPrimaryInput() {
     return null;
+  }
+
+  public String getErrorMessage() {
+    return errorMessage;
   }
 
   @Override
@@ -45,14 +53,16 @@ public final class FailAction extends AbstractAction {
   }
 
   @Override
-  protected String computeKey(ActionKeyContext actionKeyContext) {
-    return GUID;
+  protected void computeKey(ActionKeyContext actionKeyContext, Fingerprint fp) {
+    fp.addString(GUID);
   }
 
   @Override
   protected String getRawProgressMessage() {
-    return "Building unsupported rule " + getOwner().getLabel()
-        + " located at " + getOwner().getLocation();
+    return "Reporting failed target "
+        + getOwner().getLabel()
+        + " located at "
+        + getOwner().getLocation();
   }
 
   @Override

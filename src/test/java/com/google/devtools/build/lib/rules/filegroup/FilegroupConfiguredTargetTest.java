@@ -14,11 +14,12 @@
 package com.google.devtools.build.lib.rules.filegroup;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.OutputGroupProvider;
+import com.google.devtools.build.lib.analysis.MiddlemanProvider;
+import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.configuredtargets.FileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
@@ -176,16 +177,29 @@ public class FilegroupConfiguredTargetTest extends BuildViewTestCase {
         "cc_library(name='lib_a', srcs=['a.cc'])",
         String.format(
             "filegroup(name='group', srcs=[':lib_a'], output_group='%s')",
-            OutputGroupProvider.HIDDEN_TOP_LEVEL));
-    try {
-      getConfiguredTarget("//pkg:group");
-      fail("Should throw AssertionError");
-    } catch (AssertionError e) {
-      assertThat(e)
-          .hasMessageThat()
-          .contains(
-              String.format(
-                  Filegroup.ILLEGAL_OUTPUT_GROUP_ERROR, OutputGroupProvider.HIDDEN_TOP_LEVEL));
-    }
+            OutputGroupInfo.HIDDEN_TOP_LEVEL));
+    AssertionError e = assertThrows(AssertionError.class, () -> getConfiguredTarget("//pkg:group"));
+    assertThat(e)
+        .hasMessageThat()
+        .contains(
+            String.format(Filegroup.ILLEGAL_OUTPUT_GROUP_ERROR, OutputGroupInfo.HIDDEN_TOP_LEVEL));
+  }
+
+  @Test
+  public void create_disableMiddlemanArtifact() throws Exception {
+    useConfiguration("--noexperimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNull();
+  }
+
+  @Test
+  public void create_enableMiddlemanArtifact() throws Exception {
+    useConfiguration("--experimental_enable_aggregating_middleman");
+    scratch.file("foo/BUILD", "filegroup(name = 'foo', srcs = ['foo/spam.txt'])");
+    ConfiguredTarget target = getConfiguredTarget("//foo:foo");
+
+    assertThat(target.getProvider(MiddlemanProvider.class)).isNotNull();
   }
 }

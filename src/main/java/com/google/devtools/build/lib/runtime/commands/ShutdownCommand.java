@@ -14,16 +14,15 @@
 package com.google.devtools.build.lib.runtime.commands;
 
 import com.google.devtools.build.lib.runtime.BlazeCommand;
-import com.google.devtools.build.lib.runtime.BlazeCommandDispatcher.ShutdownBlazeServerException;
+import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 
 /**
  * The 'blaze shutdown' command.
@@ -42,7 +41,6 @@ public final class ShutdownCommand implements BlazeCommand {
     @Option(
       name = "iff_heap_size_greater_than",
       defaultValue = "0",
-      category = "misc",
       documentationCategory = OptionDocumentationCategory.OUTPUT_SELECTION,
       effectTags = {OptionEffectTag.LOSES_INCREMENTAL_STATE, OptionEffectTag.EAGERNESS_TO_EXIT},
       help =
@@ -56,8 +54,7 @@ public final class ShutdownCommand implements BlazeCommand {
   public void editOptions(OptionsParser optionsParser) {}
 
   @Override
-  public ExitCode exec(CommandEnvironment env, OptionsProvider options)
-      throws ShutdownBlazeServerException {
+  public BlazeCommandResult exec(CommandEnvironment env, OptionsParsingResult options) {
     int limit = options.getOptions(Options.class).heapSizeLimit;
 
     // Iff limit is non-zero, shut down the server if total memory exceeds the
@@ -69,9 +66,10 @@ public final class ShutdownCommand implements BlazeCommand {
 
     if (limit == 0 ||
         Runtime.getRuntime().totalMemory() > limit * 1000L * 1000) {
-      throw new ShutdownBlazeServerException(0);
+      return BlazeCommandResult.shutdownOnSuccess();
     }
-    return ExitCode.SUCCESS;
+
+    return BlazeCommandResult.success();
   }
 
 }

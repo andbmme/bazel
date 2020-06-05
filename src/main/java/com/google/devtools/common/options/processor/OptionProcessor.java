@@ -15,11 +15,11 @@ package com.google.devtools.common.options.processor;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableMap.Builder;
 import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.ExpansionFunction;
 import com.google.devtools.common.options.Option;
+import com.google.devtools.common.options.OptionDefinition;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionMetadataTag;
@@ -27,7 +27,7 @@ import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsParsingException;
 import java.util.List;
-import java.util.Map.Entry;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -36,7 +36,6 @@ import javax.annotation.processing.Messager;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
-import javax.annotation.processing.SupportedSourceVersion;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
@@ -58,23 +57,25 @@ import javax.tools.Diagnostic;
  * Annotation processor for {@link Option}.
  *
  * <p>Checks the following invariants about {@link Option}-annotated fields ("options"):
+ *
  * <ul>
- * <li>The {@link OptionsParser} only accepts options in {@link OptionsBase}-inheriting classes
- * <li>All options must be declared publicly and be neither static nor final.
- * <li>All options that must be used on the command line must have sensible names without
+ *   <li>The {@link OptionsParser} only accepts options in {@link OptionsBase}-inheriting classes
+ *   <li>All options must be declared publicly and be neither static nor final.
+ *   <li>All options that must be used on the command line must have sensible names without
  *       whitespace or other confusing characters, such as equal signs.
- * <li>The type of the option must match the converter that will convert the unparsed string value
+ *   <li>The type of the option must match the converter that will convert the unparsed string value
  *       into the option type. For options that do not specify a converter, check that there is a
  *       valid match in the {@link Converters#DEFAULT_CONVERTERS} list.
- * <li>Options must list valid combinations of tags and documentation categories.
- * <li>Expansion options and options with implicit requirements cannot expand in more than one way,
- *       how multiple expansions would interact is not defined and should not be necessary.
+ *   <li>Options must list valid combinations of tags and documentation categories.
+ *   <li>Expansion options and options with implicit requirements cannot expand in more than one
+ *       way, how multiple expansions would interact is not defined and should not be necessary.
+ *   <li>Multiple options must not declare default value (see {@link
+ *       #MULTIPLE_OPTIONS_DEFAULT_VALUE_EXCEPTIONS} for exceptions).
  * </ul>
  *
  * <p>These properties can be relied upon at runtime without additional checks.
  */
 @SupportedAnnotationTypes({"com.google.devtools.common.options.Option"})
-@SupportedSourceVersion(SourceVersion.RELEASE_8)
 public final class OptionProcessor extends AbstractProcessor {
 
   private Types typeUtils;
@@ -82,6 +83,11 @@ public final class OptionProcessor extends AbstractProcessor {
   private Messager messager;
   private ImmutableMap<TypeMirror, Converter<?>> defaultConverters;
   private ImmutableMap<Class<?>, PrimitiveType> primitiveTypeMap;
+
+  @Override
+  public SourceVersion getSupportedSourceVersion() {
+    return SourceVersion.latestSupported();
+  }
 
   @Override
   public synchronized void init(ProcessingEnvironment processingEnv) {
@@ -93,18 +99,19 @@ public final class OptionProcessor extends AbstractProcessor {
     // Because of the discrepancies between the java.lang and javax.lang type models, we can't
     // directly use the get() method for the default converter map. Instead, we'll convert it once,
     // to be more usable, and with the boxed type return values of convert() as the keys.
-    ImmutableMap.Builder<TypeMirror, Converter<?>> converterMapBuilder = new Builder<>();
+    ImmutableMap.Builder<TypeMirror, Converter<?>> converterMapBuilder =
+        new ImmutableMap.Builder<>();
 
     // Create a link from the primitive Classes to their primitive types. This intentionally
     // only contains the types in the DEFAULT_CONVERTERS map.
-    ImmutableMap.Builder<Class<?>, PrimitiveType> builder = new Builder<>();
+    ImmutableMap.Builder<Class<?>, PrimitiveType> builder = new ImmutableMap.Builder<>();
     builder.put(int.class, typeUtils.getPrimitiveType(TypeKind.INT));
     builder.put(double.class, typeUtils.getPrimitiveType(TypeKind.DOUBLE));
     builder.put(boolean.class, typeUtils.getPrimitiveType(TypeKind.BOOLEAN));
     builder.put(long.class, typeUtils.getPrimitiveType(TypeKind.LONG));
     primitiveTypeMap = builder.build();
 
-    for (Entry<Class<?>, Converter<?>> entry : Converters.DEFAULT_CONVERTERS.entrySet()) {
+    for (Map.Entry<Class<?>, Converter<?>> entry : Converters.DEFAULT_CONVERTERS.entrySet()) {
       Class<?> converterClass = entry.getKey();
       String typeName = converterClass.getCanonicalName();
       TypeElement typeElement = elementUtils.getTypeElement(typeName);
@@ -275,9 +282,7 @@ public final class OptionProcessor extends AbstractProcessor {
     // instead check that T of Converter<T> matches the option's type, but this is all we can
     // do.
     List<ExecutableElement> methodList =
-        elementUtils
-            .getAllMembers(converterElement)
-            .stream()
+        elementUtils.getAllMembers(converterElement).stream()
             .filter(element -> element.getKind() == ElementKind.METHOD)
             .map(methodElement -> (ExecutableElement) methodElement)
             .filter(methodElement -> methodElement.getSimpleName().contentEquals("convert"))
@@ -476,10 +481,6 @@ public final class OptionProcessor extends AbstractProcessor {
     }
 
     if (isExpansion || hasImplicitRequirements) {
-      if (annotation.wrapperOption()) {
-        throw new OptionProcessorException(
-            optionField, "Wrapper options cannot have expansions or implicit requirements.");
-      }
       if (annotation.allowMultiple()) {
         throw new OptionProcessorException(
             optionField,
@@ -488,27 +489,43 @@ public final class OptionProcessor extends AbstractProcessor {
     }
   }
 
+  private boolean hasSpecialNullDefaultValue(Option annotation) {
+    return OptionDefinition.SPECIAL_NULL_DEFAULT_VALUE.equals(annotation.defaultValue());
+  }
+
   /**
-   * Some flags wrap other flags. They are objectively useless, as there is no difference between
-   * passing --wrapper=--foo and --foo other than the "source" information tracked. This
-   * functionality comes from requiring compatibility at some past point in time, but is actively
-   * being deprecated. No non-deprecated flag can use this feature.
+   * Options that are allowed to have default values.
+   *
+   * <p>DO NOT ADD new (especially production) options here - the long-term goal is to prohibit
+   * multiple options to have default values.
    */
-  private void checkWrapperOptions(VariableElement optionField) throws OptionProcessorException {
+  private static final ImmutableList<String> MULTIPLE_OPTIONS_DEFAULT_VALUE_EXCEPTIONS =
+      ImmutableList.of(
+          // Multiple options used in OptionDefinitionTest
+          "non_empty_string_multiple_option",
+          "empty_string_multiple_option",
+          // Production multiple options that still have default value.
+          // Mostly due to backward compatibility reasons.
+          "runs_per_test",
+          "flaky_test_attempts",
+          "worker_max_instances");
+
+  private boolean isMultipleOptionDefaultValueException(Option annotation) {
+    return MULTIPLE_OPTIONS_DEFAULT_VALUE_EXCEPTIONS.contains(annotation.name());
+  }
+
+  private void checkNoDefaultValueForMultipleOption(VariableElement optionField)
+      throws OptionProcessorException {
     Option annotation = optionField.getAnnotation(Option.class);
-    if (annotation.wrapperOption()) {
-      if (annotation.deprecationWarning().isEmpty()) {
-        throw new OptionProcessorException(
-            optionField,
-            "Can't have non deprecated wrapper options, this feature is deprecated. "
-                + "Please add a deprecationWarning.");
-      }
-      if (!ImmutableList.copyOf(annotation.metadataTags()).contains(OptionMetadataTag.DEPRECATED)) {
-        throw new OptionProcessorException(
-            optionField,
-            "Can't have non deprecated wrapper options, this feature is deprecated. "
-                + "Please add the metadata tag DEPRECATED.");
-      }
+
+    if (annotation.allowMultiple()
+        && !hasSpecialNullDefaultValue(annotation)
+        && !isMultipleOptionDefaultValueException(annotation)) {
+      String message =
+          String.format(
+              "Default values for multiple options are not allowed - use \"%s\" special value",
+              "null");
+      throw new OptionProcessorException(optionField, message);
     }
   }
 
@@ -528,7 +545,7 @@ public final class OptionProcessor extends AbstractProcessor {
         checkConverter(optionField);
         checkEffectTagRationality(optionField);
         checkMetadataTagAndCategoryRationality(optionField);
-        checkWrapperOptions(optionField);
+        checkNoDefaultValueForMultipleOption(optionField);
       } catch (OptionProcessorException e) {
         error(e.getElementInError(), e.getMessage());
       }

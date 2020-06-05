@@ -1,3 +1,5 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
 package(default_visibility = ["//visibility:private"])
 
 package_group(
@@ -29,12 +31,6 @@ filegroup(
 java_library(
     name = "junctions",
     srcs = glob(["*.java"]),
-    data = select({
-        "//src:windows": ["//src/main/native/windows:windows_jni.dll"],
-        "//src:windows_msvc": ["//src/main/native/windows:windows_jni.dll"],
-        "//src:windows_msys": ["//src/main/native/windows:windows_jni.dll"],
-        "//conditions:default": [],
-    }),
     visibility = [
         ":android-prod",
         ":android-tests",

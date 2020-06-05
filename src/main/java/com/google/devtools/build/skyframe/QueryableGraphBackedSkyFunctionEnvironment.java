@@ -14,7 +14,6 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.skyframe.QueryableGraph.Reason;
@@ -35,28 +34,29 @@ public class QueryableGraphBackedSkyFunctionEnvironment extends AbstractSkyFunct
     this.eventHandler = eventHandler;
   }
 
-  private static ValueOrUntypedException toUntypedValue(NodeEntry nodeEntry)
-      throws InterruptedException {
+  private ValueOrUntypedException toUntypedValue(NodeEntry nodeEntry) throws InterruptedException {
     if (nodeEntry == null || !nodeEntry.isDone()) {
-      return ValueOrExceptionUtils.ofNull();
+      valuesMissing = true;
+      return ValueOrUntypedException.ofNull();
     }
     SkyValue maybeWrappedValue = nodeEntry.getValueMaybeWithMetadata();
     SkyValue justValue = ValueWithMetadata.justValue(maybeWrappedValue);
     if (justValue != null) {
-      return ValueOrExceptionUtils.ofValueUntyped(justValue);
+      return ValueOrUntypedException.ofValueUntyped(justValue);
     }
+    errorMightHaveBeenFound = true;
     ErrorInfo errorInfo =
         Preconditions.checkNotNull(ValueWithMetadata.getMaybeErrorInfo(maybeWrappedValue));
     Exception exception = errorInfo.getException();
 
     if (exception != null) {
       // Give SkyFunction#compute a chance to handle this exception.
-      return ValueOrExceptionUtils.ofExn(exception);
+      return ValueOrUntypedException.ofExn(exception);
     }
     // In a cycle.
     Preconditions.checkState(
-        !Iterables.isEmpty(errorInfo.getCycleInfo()), "%s %s", errorInfo, maybeWrappedValue);
-    return ValueOrExceptionUtils.ofNull();
+        !errorInfo.getCycleInfo().isEmpty(), "%s %s", errorInfo, maybeWrappedValue);
+    return ValueOrUntypedException.ofNull();
   }
 
   @Override
@@ -81,6 +81,11 @@ public class QueryableGraphBackedSkyFunctionEnvironment extends AbstractSkyFunct
 
   @Override
   public boolean inErrorBubblingForTesting() {
+    return false;
+  }
+
+  @Override
+  public boolean restartPermitted() {
     return false;
   }
 }

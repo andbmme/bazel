@@ -174,12 +174,20 @@ void SetTimeout(double timeout_secs) {
   }
 }
 
-int WaitChild(pid_t pid) {
+int WaitChild(pid_t pid, bool wait_fix) {
   int err, status;
 
-  do {
-    err = waitpid(pid, &status, 0);
-  } while (err == -1 && errno == EINTR);
+  if (wait_fix) {
+    // Discard any zombies that we may get when Linux's child subreaper feature
+    // is enabled.
+    do {
+      err = wait(&status);
+    } while (err != pid || (err == -1 && errno == EINTR));
+  } else {
+    do {
+      err = waitpid(pid, &status, 0);
+    } while (err == -1 && errno == EINTR);
+  }
 
   if (err == -1) {
     DIE("waitpid");
@@ -188,12 +196,20 @@ int WaitChild(pid_t pid) {
   return status;
 }
 
-int WaitChildWithRusage(pid_t pid, struct rusage *rusage) {
+int WaitChildWithRusage(pid_t pid, struct rusage *rusage, bool wait_fix) {
   int err, status;
 
-  do {
-    err = wait4(pid, &status, 0, rusage);
-  } while (err == -1 && errno == EINTR);
+  if (wait_fix) {
+    // Discard any zombies that we may get when Linux's child subreaper feature
+    // is enabled.
+    do {
+      err = wait3(&status, 0, rusage);
+    } while (err != pid || (err == -1 && errno == EINTR));
+  } else {
+    do {
+      err = wait4(pid, &status, 0, rusage);
+    } while (err == -1 && errno == EINTR);
+  }
 
   if (err == -1) {
     DIE("wait4");
@@ -242,9 +258,24 @@ void WriteStatsToFile(struct rusage *rusage, const std::string &stats_path) {
 
   std::unique_ptr<tools::protos::ExecutionStatistics> execution_statistics =
       CreateExecutionStatisticsProto(rusage);
+  std::string serialized = execution_statistics->SerializeAsString();
 
-  if (!execution_statistics->SerializeToFileDescriptor(fd_out)) {
-    DIE("could not write resource usage to file: %s", stats_path.c_str());
+  if (serialized.empty()) {
+    DIE("invalid execution statistics message");
+  }
+
+  const char *remaining = serialized.c_str();
+  ssize_t remaining_size = serialized.size();
+
+  while (remaining_size > 0) {
+    ssize_t written = write(fd_out, remaining, remaining_size);
+    if (written < 0 && errno != EINTR && errno != EAGAIN) {
+      DIE("could not write resource usage to file '%s': %s",
+          stats_path.c_str(), strerror(errno));
+    }
+
+    remaining_size -= written;
+    remaining += written;
   }
 
   close(fd_out);

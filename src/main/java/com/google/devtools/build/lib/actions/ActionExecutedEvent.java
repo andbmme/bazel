@@ -17,43 +17,61 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.flogger.GoogleLogger;
+import com.google.devtools.build.lib.actions.SpawnResult.MetadataLog;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent;
-import com.google.devtools.build.lib.buildeventstream.BuildEventConverters;
-import com.google.devtools.build.lib.buildeventstream.BuildEventId;
+import com.google.devtools.build.lib.buildeventstream.BuildEvent.LocalFile.LocalFileType;
+import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
+import com.google.devtools.build.lib.buildeventstream.BuildEventIdUtil;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventWithConfiguration;
 import com.google.devtools.build.lib.buildeventstream.GenericBuildEvent;
 import com.google.devtools.build.lib.buildeventstream.NullConfiguration;
 import com.google.devtools.build.lib.buildeventstream.PathConverter;
+import com.google.devtools.build.lib.events.ExtendedEventHandler.ProgressLike;
+import com.google.devtools.build.lib.server.FailureDetails;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * This event is fired during the build, when an action is executed. It contains information about
  * the action: the Action itself, and the output file names its stdout and stderr are recorded in.
  */
-public class ActionExecutedEvent implements BuildEventWithConfiguration {
-  private static final Logger logger = Logger.getLogger(ActionExecutedEvent.class.getName());
+public class ActionExecutedEvent implements BuildEventWithConfiguration, ProgressLike {
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
+  private final PathFragment actionId;
   private final Action action;
   private final ActionExecutionException exception;
+  private final Path primaryOutput;
   private final Path stdout;
   private final Path stderr;
+  private final ImmutableList<MetadataLog> actionMetadataLogs;
+  private final boolean isInMemoryFs;
   private final ErrorTiming timing;
 
   public ActionExecutedEvent(
+      PathFragment actionId,
       Action action,
       ActionExecutionException exception,
+      Path primaryOutput,
       Path stdout,
       Path stderr,
-      ErrorTiming timing) {
+      ImmutableList<MetadataLog> actionMetadataLogs,
+      ErrorTiming timing,
+      boolean isInMemoryFs) {
+    this.actionId = actionId;
     this.action = action;
     this.exception = exception;
+    this.primaryOutput = primaryOutput;
     this.stdout = stdout;
     this.stderr = stderr;
     this.timing = timing;
+    this.actionMetadataLogs = actionMetadataLogs;
+    this.isInMemoryFs = isInMemoryFs;
+    Preconditions.checkNotNull(this.actionMetadataLogs, this);
     Preconditions.checkState(
         (this.exception == null) == (this.timing == ErrorTiming.NO_ERROR), this);
   }
@@ -71,6 +89,10 @@ public class ActionExecutedEvent implements BuildEventWithConfiguration {
     return timing;
   }
 
+  public boolean hasInMemoryFs() {
+    return isInMemoryFs;
+  }
+
   public String getStdout() {
     if (stdout == null) {
       return null;
@@ -85,15 +107,17 @@ public class ActionExecutedEvent implements BuildEventWithConfiguration {
     return stderr.toString();
   }
 
+  public ImmutableList<MetadataLog> getActionMetadataLogs() {
+    return actionMetadataLogs;
+  }
+
   @Override
   public BuildEventId getEventId() {
     if (action.getOwner() == null) {
-      return BuildEventId.actionCompleted(action.getPrimaryOutput().getPath());
+      return BuildEventIdUtil.actionCompleted(actionId);
     } else {
-      return BuildEventId.actionCompleted(
-          action.getPrimaryOutput().getPath(),
-          action.getOwner().getLabel(),
-          action.getOwner().getConfigurationChecksum());
+      return BuildEventIdUtil.actionCompleted(
+          actionId, action.getOwner().getLabel(), action.getOwner().getConfigurationChecksum());
     }
   }
 
@@ -116,29 +140,56 @@ public class ActionExecutedEvent implements BuildEventWithConfiguration {
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public Collection<LocalFile> referencedLocalFiles() {
+    ImmutableList.Builder<LocalFile> localFiles = ImmutableList.builder();
+    if (stdout != null) {
+      localFiles.add(new LocalFile(stdout, LocalFileType.STDOUT));
+    }
+    if (stderr != null) {
+      localFiles.add(new LocalFile(stderr, LocalFileType.STDERR));
+    }
+    for (MetadataLog actionMetadataLog : actionMetadataLogs) {
+      localFiles.add(new LocalFile(actionMetadataLog.getFilePath(), LocalFileType.LOG));
+    }
+    if (exception == null) {
+      localFiles.add(new LocalFile(primaryOutput, LocalFileType.OUTPUT));
+    }
+    return localFiles.build();
+  }
+
+  @Override
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     PathConverter pathConverter = converters.pathConverter();
     BuildEventStreamProtos.ActionExecuted.Builder actionBuilder =
         BuildEventStreamProtos.ActionExecuted.newBuilder()
             .setSuccess(getException() == null)
             .setType(action.getMnemonic());
 
-    if (exception != null && exception.getExitCode() != null) {
+    if (exception != null) {
+      // TODO(b/150405553): This statement seems to be confused. The exit_code field of
+      //  ActionExecuted is documented as "The exit code of the action, if it is available."
+      //  However, the value returned by exception.getExitCode().getNumericExitCode() is intended as
+      //  an exit code that this Bazel invocation might return to the user.
       actionBuilder.setExitCode(exception.getExitCode().getNumericExitCode());
+      FailureDetails.FailureDetail failureDetail =
+          exception.getDetailedExitCode().getFailureDetail();
+      if (failureDetail != null) {
+        actionBuilder.setFailureDetail(failureDetail);
+      }
     }
     if (stdout != null) {
-      actionBuilder.setStdout(
-          BuildEventStreamProtos.File.newBuilder()
-          .setName("stdout")
-          .setUri(pathConverter.apply(stdout))
-          .build());
+      String uri = pathConverter.apply(stdout);
+      if (uri != null) {
+        actionBuilder.setStdout(
+            BuildEventStreamProtos.File.newBuilder().setName("stdout").setUri(uri).build());
+      }
     }
     if (stderr != null) {
-      actionBuilder.setStderr(
-          BuildEventStreamProtos.File.newBuilder()
-          .setName("stderr")
-          .setUri(pathConverter.apply(stderr))
-          .build());
+      String uri = pathConverter.apply(stderr);
+      if (uri != null) {
+        actionBuilder.setStderr(
+            BuildEventStreamProtos.File.newBuilder().setName("stderr").setUri(uri).build());
+      }
     }
     if (action.getOwner() != null && action.getOwner().getLabel() != null) {
       actionBuilder.setLabel(action.getOwner().getLabel().toString());
@@ -148,21 +199,32 @@ public class ActionExecutedEvent implements BuildEventWithConfiguration {
       if (configuration == null) {
         configuration = new NullConfiguration();
       }
-      actionBuilder.setConfiguration(configuration.getEventId().asStreamProto().getConfiguration());
+      actionBuilder.setConfiguration(configuration.getEventId().getConfiguration());
+    }
+    for (MetadataLog actionMetadataLog : actionMetadataLogs) {
+      String uri = pathConverter.apply(actionMetadataLog.getFilePath());
+      if (uri != null) {
+        actionBuilder.addActionMetadataLogs(
+            BuildEventStreamProtos.File.newBuilder()
+                .setName(actionMetadataLog.getName())
+                .setUri(uri)
+                .build());
+      }
     }
     if (exception == null) {
-      actionBuilder.setPrimaryOutput(
-          BuildEventStreamProtos.File.newBuilder()
-              .setUri(pathConverter.apply(action.getPrimaryOutput().getPath()))
-              .build());
+      String uri = pathConverter.apply(primaryOutput);
+      if (uri != null) {
+        actionBuilder.setPrimaryOutput(
+            BuildEventStreamProtos.File.newBuilder().setUri(uri).build());
+      }
     }
     try {
       if (action instanceof CommandAction) {
         actionBuilder.addAllCommandLine(((CommandAction) action).getArguments());
       }
     } catch (CommandLineExpansionException e) {
-      // Command-line not avaiable, so just not report it
-      logger.log(Level.INFO, "Could no compute commandline of reported action", e);
+      // Command-line not available, so just not report it
+      logger.atInfo().withCause(e).log("Could not compute commandline of reported action");
     }
     return GenericBuildEvent.protoChaining(this).setAction(actionBuilder.build()).build();
   }

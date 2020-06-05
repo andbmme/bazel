@@ -110,7 +110,7 @@ function get_real_path() {
 function md5_file() {
   if [ $# -gt 0 ]; then
     local result=""
-    if [[ ${PLATFORM} == "darwin" ]] || [[ ${PLATFORM} == "freebsd" ]]; then
+    if [[ ${PLATFORM} == "darwin" ]] || [[ ${PLATFORM} == "freebsd" ]] || [[ ${PLATFORM} == "openbsd" ]]; then
       result=$(md5 -q $@ || echo)
     else
       result=$(md5sum $@ | awk '{print $1}' || echo)
@@ -124,4 +124,40 @@ function md5_file() {
   else
     false
   fi
+}
+
+# Usage: expect_query_targets <arguments>
+# Checks that log file contains exactly the targets in the argument list.
+function expect_query_targets() {
+  for arg in $@; do
+    expect_log_once "^$arg$"
+  done
+
+# Checks that the number of lines started with '//' or '@' equals to the number of
+# arguments provided.
+  expect_log_n "^(//|@)\S*$" $#
+}
+
+# Usage: expect_log_once <regexp> [error-message]
+# Asserts that $TEST_log contains one line matching <regexp>.
+# Prints the contents of $TEST_log and the specified (optional)
+# error message otherwise, and returns non-zero.
+function expect_log_once() {
+    local pattern=$1
+    local message=${2:-Expected regexp "$pattern" not found exactly once}
+    expect_log_n "$pattern" 1 "$message"
+}
+
+# Usage: expect_log_n <regexp> <count> [error-message]
+# Asserts that $TEST_log contains <count> lines matching <regexp>.
+# Prints the contents of $TEST_log and the specified (optional)
+# error message otherwise, and returns non-zero.
+function expect_log_n() {
+    local pattern=$1
+    local expectednum=${2:-1}
+    local message=${3:-Expected regexp "$pattern" not found exactly $expectednum times}
+    local count=$(grep -sc -E "$pattern" $TEST_log)
+    [[ $count = $expectednum ]] && return 0
+    fail "$message"
+    return 1
 }

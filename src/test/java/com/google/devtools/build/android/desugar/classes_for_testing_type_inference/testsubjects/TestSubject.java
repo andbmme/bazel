@@ -56,9 +56,7 @@ public class TestSubject {
     }
   }
 
-  /**
-   * A simple resource implementation which implements Closeable.
-   */
+  /** A simple resource implementation which implements Closeable. */
   public static class SimpleResource implements Closeable {
 
     public void call(boolean throwException) {
@@ -192,5 +190,23 @@ public class TestSubject {
     } catch (IOException e) {
       e.printStackTrace();
     }
+  }
+
+  public double testWithDoubleTypes() {
+    double result = 1;
+    for (double i = 1; i < 22; i = i + 1) {
+      System.out.println(i);
+      result += i;
+    }
+    return result;
+  }
+
+  public float testWithFloatAndDoubleTypes() {
+    float result = 1;
+    for (double i = 1; i < 22; i = i + 1) {
+      System.out.println(i);
+      result += (float) i;
+    }
+    return result;
   }
 }

@@ -13,92 +13,144 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.actions.ActionLookupData;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.Artifact.DerivedArtifact;
+import com.google.devtools.build.lib.actions.Artifact.OwnerlessArtifactWrapper;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
+import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.skyframe.LegacySkyKey;
-import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.util.Map;
+import java.util.function.BiFunction;
 import javax.annotation.Nullable;
 
-/**
- * A value representing an executed action.
- */
+/** A value representing an executed action. */
 @Immutable
 @ThreadSafe
 public class ActionExecutionValue implements SkyValue {
-  /*
-  Concerning the data in this class:
 
-  We want to track all output data from an ActionExecutionValue. However, we want to separate
-  quickly-accessible Filesystem data from other kinds of data. We use FileValues
-  to represent data that may be quickly accessed, TreeArtifactValues to give us directory contents,
-  and FileArtifactValues inside TreeArtifactValues or the additionalOutputData map
-  to give us full mtime/digest information on all output files.
-
-  The reason for this separation is so that FileSystemValueChecker remains fast. When it checks
-  the validity of an ActionExecutionValue, it only checks the quickly-accessible data stored
-  in FileValues and TreeArtifactValues.
-   */
-
-  /**
-   * The FileValues of all files for this ActionExecutionValue. These FileValues can be
-   * read and checked quickly from the filesystem, unlike FileArtifactValues.
-   */
-  private final ImmutableMap<Artifact, FileValue> artifactData;
+  /** A map from each output artifact of this action to their {@link FileArtifactValue}s. */
+  private final ImmutableMap<Artifact, FileArtifactValue> artifactData;
 
   /** The TreeArtifactValue of all TreeArtifacts output by this Action. */
   private final ImmutableMap<Artifact, TreeArtifactValue> treeArtifactData;
 
-  /**
-   * Contains all remaining data that weren't in the above maps. See
-   * {@link ActionMetadataHandler#getAdditionalOutputData}.
-   */
-  private final ImmutableMap<Artifact, FileArtifactValue> additionalOutputData;
+  @Nullable private final ImmutableList<FilesetOutputSymlink> outputSymlinks;
+
+  @Nullable private final NestedSet<Artifact> discoveredModules;
 
   /**
-   * @param artifactData Map from Artifacts to corresponding FileValues.
+   * @param artifactData Map from Artifacts to corresponding {@link FileArtifactValue}.
    * @param treeArtifactData All tree artifact data.
-   * @param additionalOutputData Map from Artifacts to values if the FileArtifactValue for this
-   *     artifact cannot be derived from the corresponding FileValue (see {@link
-   *     ActionMetadataHandler#getAdditionalOutputData} for when this is necessary).
-   *     These output data are not used by the {@link FilesystemValueChecker}
-   *     to invalidate ActionExecutionValues.
+   * @param outputSymlinks This represents the SymlinkTree which is the output of a fileset action.
+   * @param discoveredModules cpp modules discovered
    */
-  ActionExecutionValue(
-      Map<Artifact, FileValue> artifactData,
+  private ActionExecutionValue(
+      Map<Artifact, FileArtifactValue> artifactData,
       Map<Artifact, TreeArtifactValue> treeArtifactData,
-      Map<Artifact, FileArtifactValue> additionalOutputData) {
-    this.artifactData = ImmutableMap.<Artifact, FileValue>copyOf(artifactData);
-    this.additionalOutputData = ImmutableMap.copyOf(additionalOutputData);
+      @Nullable ImmutableList<FilesetOutputSymlink> outputSymlinks,
+      @Nullable NestedSet<Artifact> discoveredModules) {
+    for (Map.Entry<Artifact, FileArtifactValue> entry : artifactData.entrySet()) {
+      Preconditions.checkArgument(
+          !entry.getKey().isChildOfDeclaredDirectory(),
+          "%s should only be stored in a TreeArtifactValue",
+          entry.getKey());
+      if (entry.getValue().getType().isFile()) {
+        Preconditions.checkNotNull(
+            entry.getValue().getDigest(), "missing digest for %s", entry.getKey());
+      }
+    }
+
+    for (Map.Entry<Artifact, TreeArtifactValue> tree : treeArtifactData.entrySet()) {
+      TreeArtifactValue treeArtifact = tree.getValue();
+      if (TreeArtifactValue.OMITTED_TREE_MARKER.equals(treeArtifact)) {
+        continue;
+      }
+      for (Map.Entry<TreeFileArtifact, FileArtifactValue> file :
+          treeArtifact.getChildValues().entrySet()) {
+        // We should only have RegularFileValue instances in here, but apparently tree artifacts
+        // sometimes store their own root directory in here. Sad.
+        // https://github.com/bazelbuild/bazel/issues/9058
+        if (file.getValue().getType().isFile()) {
+          Preconditions.checkNotNull(
+              file.getValue().getDigest(),
+              "missing digest for file %s in tree artifact %s",
+              file.getKey(),
+              tree.getKey());
+        }
+      }
+    }
+
+    this.artifactData = ImmutableMap.copyOf(artifactData);
     this.treeArtifactData = ImmutableMap.copyOf(treeArtifactData);
+    this.outputSymlinks = outputSymlinks;
+    this.discoveredModules = discoveredModules;
+  }
+
+  static ActionExecutionValue createFromOutputStore(
+      OutputStore outputStore,
+      @Nullable ImmutableList<FilesetOutputSymlink> outputSymlinks,
+      @Nullable NestedSet<Artifact> discoveredModules,
+      boolean actionDependsOnBuildId) {
+    return create(
+        outputStore.getAllArtifactData(),
+        outputStore.getAllTreeArtifactData(),
+        outputSymlinks,
+        discoveredModules,
+        actionDependsOnBuildId);
+  }
+
+  static ActionExecutionValue create(
+      Map<Artifact, FileArtifactValue> artifactData,
+      Map<Artifact, TreeArtifactValue> treeArtifactData,
+      @Nullable ImmutableList<FilesetOutputSymlink> outputSymlinks,
+      @Nullable NestedSet<Artifact> discoveredModules,
+      boolean actionDependsOnBuildId) {
+    return actionDependsOnBuildId
+        ? new CrossServerUnshareableActionExecutionValue(
+            artifactData, treeArtifactData, outputSymlinks, discoveredModules)
+        : new ActionExecutionValue(
+            artifactData, treeArtifactData, outputSymlinks, discoveredModules);
   }
 
   /**
-   * Returns metadata for a given artifact, if that metadata cannot be inferred from the
-   * corresponding {@link #getData} call for that Artifact. See {@link
-   * ActionMetadataHandler#getAdditionalOutputData} for when that can happen.
+   * Retrieves a {@link FileArtifactValue} for a regular (non-tree) derived artifact.
+   *
+   * <p>The value for the given artifact must be present, or else {@link NullPointerException} will
+   * be thrown.
    */
-  @Nullable
-  FileArtifactValue getArtifactValue(Artifact artifact) {
-    return additionalOutputData.get(artifact);
-  }
+  public FileArtifactValue getExistingFileArtifactValue(Artifact artifact) {
+    Preconditions.checkArgument(
+        artifact instanceof DerivedArtifact && !artifact.isTreeArtifact(),
+        "Cannot request %s from %s",
+        artifact,
+        this);
 
-  /**
-   * @return The data for each non-middleman output of this action, in the form of the {@link
-   * FileValue} that would be created for the file if it were to be read from disk.
-   */
-  FileValue getData(Artifact artifact) {
-    Preconditions.checkState(!additionalOutputData.containsKey(artifact),
-        "Should not be requesting data for already-constructed FileArtifactValue: %s", artifact);
-    return artifactData.get(artifact);
+    FileArtifactValue result;
+    if (artifact.isChildOfDeclaredDirectory()) {
+      TreeArtifactValue tree = treeArtifactData.get(artifact.getParent());
+      result = tree == null ? null : tree.getChildValues().get(artifact);
+    } else {
+      result = artifactData.get(artifact);
+    }
+
+    return Preconditions.checkNotNull(
+        result,
+        "Missing artifact %s (generating action key %s) in %s",
+        artifact,
+        ((DerivedArtifact) artifact).getGeneratingActionKey(),
+        this);
   }
 
   TreeArtifactValue getTreeArtifactValue(Artifact artifact) {
@@ -107,34 +159,33 @@ public class ActionExecutionValue implements SkyValue {
   }
 
   /**
-   * @return The map from {@link Artifact}s to the corresponding {@link FileValue}s that would be
-   *     returned by {@link #getData}. Primarily needed by {@link FilesystemValueChecker}, also
-   *     called by {@link ArtifactFunction} when aggregating a {@link TreeArtifactValue}.
+   * Returns a map containing all artifacts output by the action, except for tree artifacts which
+   * are accesible via {@link #getAllTreeArtifactValues}.
+   *
+   * <p>Primarily needed by {@link FilesystemValueChecker}. Also called by {@link ArtifactFunction}
+   * when aggregating a {@link TreeArtifactValue} out of action template expansion outputs.
    */
-  ImmutableMap<Artifact, FileValue> getAllFileValues() {
+  ImmutableMap<Artifact, FileArtifactValue> getAllFileValues() {
     return artifactData;
   }
 
   /**
-   * @return The map from {@link Artifact}s to the corresponding {@link TreeArtifactValue}s that
-   *     would be returned by {@link #getTreeArtifactValue}. Should only be needed by {@link
-   *     FilesystemValueChecker}.
+   * Returns a map containing all tree artifacts output by the action.
+   *
+   * <p>Should only be needed by {@link FilesystemValueChecker}.
    */
   ImmutableMap<Artifact, TreeArtifactValue> getAllTreeArtifactValues() {
     return treeArtifactData;
   }
 
-  /**
-   * @param lookupKey A {@link SkyKey} whose argument is an {@code ActionLookupKey}, whose
-   *     corresponding {@code ActionLookupValue} contains the action to be executed.
-   * @param index the index of the action to be executed in the {@code ActionLookupValue}, to be
-   *     passed to {@code ActionLookupValue#getAction}.
-   */
-  @ThreadSafe
-  @VisibleForTesting
-  public static SkyKey key(SkyKey lookupKey, int index) {
-    return LegacySkyKey.create(
-        SkyFunctions.ACTION_EXECUTION, new ActionLookupData(lookupKey, index));
+  @Nullable
+  public ImmutableList<FilesetOutputSymlink> getOutputSymlinks() {
+    return outputSymlinks;
+  }
+
+  @Nullable
+  public NestedSet<Artifact> getDiscoveredModules() {
+    return discoveredModules;
   }
 
   @Override
@@ -142,7 +193,6 @@ public class ActionExecutionValue implements SkyValue {
     return MoreObjects.toStringHelper(this)
         .add("artifactData", artifactData)
         .add("treeArtifactData", treeArtifactData)
-        .add("additionalOutputData", additionalOutputData)
         .toString();
   }
 
@@ -151,17 +201,94 @@ public class ActionExecutionValue implements SkyValue {
     if (this == obj) {
       return true;
     }
-    if (!(obj instanceof ActionExecutionValue)) {
+    if (obj == null) {
+      return false;
+    }
+    if (!obj.getClass().equals(getClass())) {
       return false;
     }
     ActionExecutionValue o = (ActionExecutionValue) obj;
     return artifactData.equals(o.artifactData)
         && treeArtifactData.equals(o.treeArtifactData)
-        && additionalOutputData.equals(o.additionalOutputData);
+        && (outputSymlinks == null || outputSymlinks.equals(o.outputSymlinks));
   }
 
   @Override
   public int hashCode() {
-    return Objects.hashCode(artifactData, treeArtifactData, additionalOutputData);
+    return Objects.hashCode(artifactData, treeArtifactData);
+  }
+
+  /**
+   * Subclass that reports this value cannot be shared across servers. Note that this is unrelated
+   * to the concept of shared actions.
+   */
+  private static final class CrossServerUnshareableActionExecutionValue
+      extends ActionExecutionValue {
+    CrossServerUnshareableActionExecutionValue(
+        Map<Artifact, FileArtifactValue> artifactData,
+        Map<Artifact, TreeArtifactValue> treeArtifactData,
+        @Nullable ImmutableList<FilesetOutputSymlink> outputSymlinks,
+        @Nullable NestedSet<Artifact> discoveredModules) {
+      super(artifactData, treeArtifactData, outputSymlinks, discoveredModules);
+    }
+
+    @Override
+    public boolean dataIsShareable() {
+      return false;
+    }
+  }
+
+  private static <V> ImmutableMap<Artifact, V> transformMap(
+      ImmutableMap<Artifact, V> data,
+      Map<OwnerlessArtifactWrapper, Artifact> newArtifactMap,
+      BiFunction<Artifact, V, V> transform) {
+    if (data.isEmpty()) {
+      return data;
+    }
+
+    ImmutableMap.Builder<Artifact, V> result = ImmutableMap.builderWithExpectedSize(data.size());
+    for (Map.Entry<Artifact, V> entry : data.entrySet()) {
+      Artifact artifact = entry.getKey();
+      Artifact newArtifact =
+          Preconditions.checkNotNull(
+              newArtifactMap.get(new OwnerlessArtifactWrapper(artifact)),
+              "Output artifact %s from one shared action not present in another's outputs (%s)",
+              artifact,
+              newArtifactMap);
+      result.put(newArtifact, transform.apply(newArtifact, entry.getValue()));
+    }
+    return result.build();
+  }
+
+  /** Transforms the children of a {@link TreeArtifactValue} so that owners are consistent. */
+  private static TreeArtifactValue transformSharedTree(
+      Artifact newArtifact, TreeArtifactValue tree) {
+    Preconditions.checkState(
+        newArtifact.isTreeArtifact(), "Expected tree artifact, got %s", newArtifact);
+    SpecialArtifact newParent = (SpecialArtifact) newArtifact;
+
+    Map<TreeFileArtifact, FileArtifactValue> newChildren =
+        Maps.newHashMapWithExpectedSize(tree.getChildValues().size());
+    for (Map.Entry<TreeFileArtifact, FileArtifactValue> child : tree.getChildValues().entrySet()) {
+      newChildren.put(
+          TreeFileArtifact.createTreeOutput(newParent, child.getKey().getParentRelativePath()),
+          child.getValue());
+    }
+
+    return TreeArtifactValue.create(newChildren);
+  }
+
+  ActionExecutionValue transformForSharedAction(ImmutableSet<Artifact> outputs) {
+    Map<OwnerlessArtifactWrapper, Artifact> newArtifactMap =
+        Maps.uniqueIndex(outputs, OwnerlessArtifactWrapper::new);
+    // This is only called for shared actions, so we'll almost certainly have to transform all keys
+    // in all sets.
+    // Discovered modules come from the action's inputs, and so don't need to be transformed.
+    return create(
+        transformMap(artifactData, newArtifactMap, (newArtifact, value) -> value),
+        transformMap(treeArtifactData, newArtifactMap, ActionExecutionValue::transformSharedTree),
+        outputSymlinks,
+        discoveredModules,
+        this instanceof CrossServerUnshareableActionExecutionValue);
   }
 }

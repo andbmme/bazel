@@ -22,7 +22,6 @@ import com.google.devtools.build.android.desugar.proto.DesugarDeps.Dependency;
 import com.google.devtools.build.android.desugar.proto.DesugarDeps.DesugarDepsInfo;
 import com.google.devtools.build.android.desugar.proto.DesugarDeps.InterfaceDetails;
 import com.google.devtools.build.android.desugar.proto.DesugarDeps.InterfaceWithCompanion;
-import com.google.devtools.build.android.desugar.proto.DesugarDeps.Type;
 import javax.annotation.Nullable;
 
 /** Dependency collector that emits collected metadata as a {@link DesugarDepsInfo} proto. */
@@ -35,20 +34,31 @@ public final class MetadataCollector implements DependencyCollector {
     this.tolerateMissingDeps = tolerateMissingDeps;
   }
 
+  private static boolean isInterfaceCompanionClass(String name) {
+    return name.endsWith(INTERFACE_COMPANION_SUFFIX)
+        || name.endsWith(D8_INTERFACE_COMPANION_SUFFIX);
+  }
+
   @Override
   public void assumeCompanionClass(String origin, String target) {
-    checkArgument(target.endsWith(INTERFACE_COMPANION_SUFFIX),
-        "target not a companion: %s -> %s", origin, target);
+    checkArgument(
+        isInterfaceCompanionClass(target), "target not a companion: %s -> %s", origin, target);
     info.addAssumePresent(
         Dependency.newBuilder().setOrigin(wrapType(origin)).setTarget(wrapType(target)));
   }
 
   @Override
   public void missingImplementedInterface(String origin, String target) {
-    checkArgument(!target.endsWith(INTERFACE_COMPANION_SUFFIX),
-        "target seems to be a companion: %s -> %s", origin, target);
-    checkState(tolerateMissingDeps,
-        "Couldn't find interface %s on the classpath for desugaring %s", target, origin);
+    checkArgument(
+        !isInterfaceCompanionClass(target),
+        "target seems to be a companion: %s -> %s",
+        origin,
+        target);
+    checkState(
+        tolerateMissingDeps,
+        "Couldn't find interface %s on the classpath for desugaring %s",
+        target,
+        origin);
     info.addMissingInterface(
         Dependency.newBuilder().setOrigin(wrapType(origin)).setTarget(wrapType(target)));
   }
@@ -56,8 +66,7 @@ public final class MetadataCollector implements DependencyCollector {
   @Override
   public void recordExtendedInterfaces(String origin, String... targets) {
     if (targets.length > 0) {
-      InterfaceDetails.Builder details =
-          InterfaceDetails.newBuilder().setOrigin(wrapType(origin));
+      InterfaceDetails.Builder details = InterfaceDetails.newBuilder().setOrigin(wrapType(origin));
       for (String target : targets) {
         details.addExtendedInterface(wrapType(target));
       }
@@ -67,8 +76,7 @@ public final class MetadataCollector implements DependencyCollector {
 
   @Override
   public void recordDefaultMethods(String origin, int count) {
-    checkArgument(!origin.endsWith(INTERFACE_COMPANION_SUFFIX),
-        "seems to be a companion: %s", origin);
+    checkArgument(!isInterfaceCompanionClass(origin), "seems to be a companion: %s", origin);
     info.addInterfaceWithCompanion(
         InterfaceWithCompanion.newBuilder()
             .setOrigin(wrapType(origin))
@@ -82,7 +90,7 @@ public final class MetadataCollector implements DependencyCollector {
     return DesugarDepsInfo.getDefaultInstance().equals(result) ? null : result.toByteArray();
   }
 
-  private static Type wrapType(String internalName) {
-    return Type.newBuilder().setBinaryName(internalName).build();
+  private static DesugarDeps.Type wrapType(String internalName) {
+    return DesugarDeps.Type.newBuilder().setBinaryName(internalName).build();
   }
 }

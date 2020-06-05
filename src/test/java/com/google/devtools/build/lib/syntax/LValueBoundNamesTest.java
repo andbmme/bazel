@@ -51,10 +51,16 @@ public class LValueBoundNamesTest {
   }
 
   private static void assertBoundNames(String assignment, String... expectedBoundNames) {
-    BuildFileAST buildFileAST = BuildFileAST.parseString(Environment.FAIL_FAST_HANDLER, assignment);
-    LValue lValue = ((AssignmentStatement) buildFileAST.getStatements().get(0)).getLValue();
+    ParserInput input = ParserInput.fromLines(assignment);
+    StarlarkFile file = StarlarkFile.parse(input);
+    if (!file.ok()) {
+      throw new AssertionError(new SyntaxError.Exception(file.errors()));
+    }
+    Expression lhs = ((AssignmentStatement) file.getStatements().get(0)).getLHS();
     Set<String> boundNames =
-        lValue.boundIdentifiers().stream().map(Identifier::getName).collect(Collectors.toSet());
+        Identifier.boundIdentifiers(lhs).stream()
+            .map(Identifier::getName)
+            .collect(Collectors.toSet());
     Truth.assertThat(boundNames).containsExactlyElementsIn(Arrays.asList(expectedBoundNames));
   }
 }

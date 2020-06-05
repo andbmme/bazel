@@ -21,8 +21,9 @@ import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleClass.Builder;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.util.FileType;
 
 /**
@@ -30,18 +31,20 @@ import com.google.devtools.build.lib.util.FileType;
  */
 public class ObjcImportRule implements RuleDefinition {
   @Override
-  public RuleClass build(Builder builder, RuleDefinitionEnvironment environment) {
+  public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment environment) {
     return builder
-        .requiresConfigurationFragments(ObjcConfiguration.class, AppleConfiguration.class,
-            AppleConfiguration.class)
+        .requiresConfigurationFragments(
+            ObjcConfiguration.class,
+            AppleConfiguration.class,
+            AppleConfiguration.class,
+            CppConfiguration.class)
         /* <!-- #BLAZE_RULE(objc_import).ATTRIBUTE(archives) -->
         The list of <code>.a</code> files provided to Objective-C targets that
         depend on this target.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr("archives", LABEL_LIST)
-            .mandatory()
-            .nonEmpty()
-            .allowedFileTypes(FileType.of(".a")))
+        .add(
+            attr("archives", LABEL_LIST).mandatory().nonEmpty().allowedFileTypes(FileType.of(".a")))
+        .addRequiredToolchains(CppRuleClasses.ccToolchainTypeAttribute(environment))
         .build();
   }
 

@@ -13,17 +13,17 @@
 // limitations under the License.
 package com.google.devtools.build.lib.actions.cache;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheStats;
-import com.google.common.io.BaseEncoding;
 import com.google.common.primitives.Longs;
+import com.google.devtools.build.lib.actions.FileArtifactValue;
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.util.Fingerprint;
-import com.google.devtools.build.lib.util.LoggingUtil;
 import com.google.devtools.build.lib.util.VarInt;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.Path;
@@ -33,10 +33,9 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.logging.Level;
 
 /**
- * Utility class for getting md5 digests of files.
+ * Utility class for getting digests of files.
  *
  * <p>This class implements an optional cache of file digests when the computation of the digests is
  * costly (i.e. when {@link Path#getFastDigest()} is not available). The cache can be enabled via
@@ -57,6 +56,21 @@ public class DigestUtils {
   // Object to synchronize on when serializing large file reads.
   private static final Object DIGEST_LOCK = new Object();
   private static final AtomicBoolean MULTI_THREADED_DIGEST = new AtomicBoolean(false);
+
+  // Typical size for a digest byte array.
+  public static final int ESTIMATED_SIZE = 32;
+
+  // Files of this size or less are assumed to be readable in one seek.
+  // (This is the default readahead window on Linux.)
+  @VisibleForTesting // the unittest is in a different package!
+  public static final int MULTI_THREADED_DIGEST_MAX_FILE_SIZE = 128 * 1024;
+
+  // The time that a digest computation has to take at least in order to be considered a slow-read.
+  private static final long SLOW_READ_MILLIS = 5000L;
+
+  // The average bytes-per-millisecond throughput that a digest computation has to go below in order
+  // to be considered a slow-read.
+  private static final long SLOW_READ_THROUGHPUT = (10 * 1024 * 1024) / 1000;
 
   /**
    * Keys used to cache the values of the digests for files where we don't have fast digests.
@@ -126,19 +140,17 @@ public class DigestUtils {
    * represent the paths as strings, not as {@link Path} instances. As a result, the loading
    * function cannot actually compute the digests of the files so we have to handle this externally.
    */
-  private static volatile Cache<CacheKey, byte[]> globalCache = null;
+  private static Cache<CacheKey, byte[]> globalCache = null;
 
   /** Private constructor to prevent instantiation of utility class. */
   private DigestUtils() {}
 
   /**
-   * Obtain file's MD5 metadata using synchronized method, ensuring that system
-   * is not overloaded in case when multiple threads are requesting MD5
-   * calculations and underlying file system cannot provide it via extended
-   * attribute.
+   * Obtain file's digset using synchronized method, ensuring that system is not overloaded in case
+   * when multiple threads are requesting digest calculations and underlying file system cannot
+   * provide it via extended attribute.
    */
-  private static byte[] getDigestInExclusiveMode(Path path)
-      throws IOException {
+  private static byte[] getDigestInExclusiveMode(Path path) throws IOException {
     long startTime = BlazeClock.nanoTime();
     synchronized (DIGEST_LOCK) {
       Profiler.instance().logSimpleTask(startTime, ProfilerTask.WAIT, path.getPathString());
@@ -150,11 +162,17 @@ public class DigestUtils {
     long startTime = BlazeClock.nanoTime();
     byte[] digest = path.getDigest();
 
-    long millis = (BlazeClock.nanoTime() - startTime) / 1000000;
-    if (millis > 5000L) {
-      System.err.println("Slow read: a " + path.getFileSize() + "-byte read from " + path
-          + " took " +  millis + "ms.");
+    // When using multi-threaded digesting, it makes no sense to use the throughput of a single
+    // digest operation to determine whether a read was abnormally slow (as the scheduler might just
+    // have preferred other reads).
+    if (!MULTI_THREADED_DIGEST.get()) {
+      long millis = (BlazeClock.nanoTime() - startTime) / 1000000;
+      if (millis > SLOW_READ_MILLIS && (path.getFileSize() / millis) < SLOW_READ_THROUGHPUT) {
+        System.err.printf(
+            "Slow read: a %d-byte read from %s took %d ms.%n", path.getFileSize(), path, millis);
+      }
     }
+
     return digest;
   }
 
@@ -206,52 +224,34 @@ public class DigestUtils {
   public static byte[] getDigestOrFail(Path path, long fileSize)
       throws IOException {
     byte[] digest = path.getFastDigest();
-
-    if (digest != null && !path.isValidDigest(digest)) {
-      // Fail-soft in cases where md5bin is non-null, but not a valid digest.
-      String msg = String.format("Malformed digest '%s' for file %s",
-                                 BaseEncoding.base16().lowerCase().encode(digest),
-                                 path);
-      LoggingUtil.logToRemote(Level.SEVERE, msg, new IllegalStateException(msg));
-      digest = null;
-    }
-
-    // At this point, either we could not get a fast digest or the fast digest we got is corrupt.
-    // Attempt a cache lookup if the cache is enabled and return the cached digest if found.
-    Cache<CacheKey, byte[]> cache = globalCache;
-    CacheKey key = null;
-    if (cache != null && digest == null) {
-      key = new CacheKey(path, path.stat());
-      digest = cache.getIfPresent(key);
-    }
     if (digest != null) {
       return digest;
     }
 
-    // All right, we have neither a fast nor a cached digest. Let's go through the costly process of
-    // computing it from the file contents.
-    if (fileSize > 4096 && !MULTI_THREADED_DIGEST.get()) {
-      // We'll have to read file content in order to calculate the digest. In that case
-      // it would be beneficial to serialize those calculations since there is a high
-      // probability that MD5 will be requested for multiple output files simultaneously.
-      // Exception is made for small (<=4K) files since they will not likely to introduce
-      // significant delays (at worst they will result in two extra disk seeks by
-      // interrupting other reads).
+    // Attempt a cache lookup if the cache is enabled.
+    Cache<CacheKey, byte[]> cache = globalCache;
+    CacheKey key = null;
+    if (cache != null) {
+      key = new CacheKey(path, path.stat());
+      digest = cache.getIfPresent(key);
+      if (digest != null) {
+        return digest;
+      }
+    }
+
+    // Compute digest from the file contents.
+    if (fileSize > MULTI_THREADED_DIGEST_MAX_FILE_SIZE && !MULTI_THREADED_DIGEST.get()) {
+      // We'll have to read file content in order to calculate the digest.
+      // We avoid overlapping this process for multiple large files, as
+      // seeking back and forth between them will result in an overall loss of
+      // throughput.
       digest = getDigestInExclusiveMode(path);
     } else {
       digest = getDigestInternal(path);
     }
 
-    Preconditions.checkNotNull(
-        digest,
-        "We should have gotten a digest for %s at this point but we still don't have one",
-        path);
+    Preconditions.checkNotNull(digest);
     if (cache != null) {
-      Preconditions.checkNotNull(
-          key,
-          "We should have computed a cache key earlier for %s because the cache is enabled and we"
-              + " did not get a fast digest for this file, but we don't have a key here",
-          path);
       cache.put(key, digest);
     }
     return digest;
@@ -262,58 +262,55 @@ public class DigestUtils {
    * @return the digest from the given buffer.
    * @throws IOException if the byte buffer is incorrectly formatted.
    */
-  public static Md5Digest read(ByteBuffer source) throws IOException {
+  public static byte[] read(ByteBuffer source) throws IOException {
     int size = VarInt.getVarInt(source);
-    if (size != Md5Digest.MD5_SIZE) {
-      throw new IOException("Unexpected digest length: " + size);
-    }
     byte[] bytes = new byte[size];
     source.get(bytes);
-    return new Md5Digest(bytes);
+    return bytes;
   }
 
   /** Write the digest to the output stream. */
-  public static void write(Md5Digest digest, OutputStream sink) throws IOException {
-    VarInt.putVarInt(digest.getDigestBytesUnsafe().length, sink);
-    sink.write(digest.getDigestBytesUnsafe());
+  public static void write(byte[] digest, OutputStream sink) throws IOException {
+    VarInt.putVarInt(digest.length, sink);
+    sink.write(digest);
   }
 
   /**
-   * @param mdMap A collection of (execPath, Metadata) pairs. Values may be null.
+   * @param mdMap A collection of (execPath, FileArtifactValue) pairs. Values may be null.
    * @return an <b>order-independent</b> digest from the given "set" of (path, metadata) pairs.
    */
-  public static Md5Digest fromMetadata(Map<String, Metadata> mdMap) {
-    byte[] result = new byte[Md5Digest.MD5_SIZE];
-    // Profiling showed that MD5 engine instantiation was a hotspot, so create one instance for
-    // this computation to amortize its cost.
+  public static byte[] fromMetadata(Map<String, FileArtifactValue> mdMap) {
+    byte[] result = new byte[1]; // reserve the empty string
+    // Profiling showed that MessageDigest engine instantiation was a hotspot, so create one
+    // instance for this computation to amortize its cost.
     Fingerprint fp = new Fingerprint();
-    for (Map.Entry<String, Metadata> entry : mdMap.entrySet()) {
-      xorWith(result, getDigest(fp, entry.getKey(), entry.getValue()));
+    for (Map.Entry<String, FileArtifactValue> entry : mdMap.entrySet()) {
+      result = xor(result, getDigest(fp, entry.getKey(), entry.getValue()));
     }
-    return new Md5Digest(result);
+    return result;
   }
 
   /**
    * @param env A collection of (String, String) pairs.
    * @return an order-independent digest of the given set of pairs.
    */
-  public static Md5Digest fromEnv(Map<String, String> env) {
-    byte[] result = new byte[Md5Digest.MD5_SIZE];
+  public static byte[] fromEnv(Map<String, String> env) {
+    byte[] result = new byte[0];
     Fingerprint fp = new Fingerprint();
     for (Map.Entry<String, String> entry : env.entrySet()) {
       fp.addString(entry.getKey());
       fp.addString(entry.getValue());
-      xorWith(result, fp.digestAndReset());
+      result = xor(result, fp.digestAndReset());
     }
-    return new Md5Digest(result);
+    return result;
   }
 
-  private static byte[] getDigest(Fingerprint fp, String execPath, Metadata md) {
+  private static byte[] getDigest(Fingerprint fp, String execPath, FileArtifactValue md) {
     fp.addString(execPath);
 
     if (md == null) {
       // Move along, nothing to see here.
-    } else if (md.isFile()) {
+    } else if (md.getDigest() != null) {
       fp.addBytes(md.getDigest());
     } else {
       // Use the timestamp if the digest is not present, but not both. Modifying a timestamp while
@@ -323,10 +320,15 @@ public class DigestUtils {
     return fp.digestAndReset();
   }
 
-  /** Compute lhs ^= rhs bitwise operation of the arrays. */
-  private static void xorWith(byte[] lhs, byte[] rhs) {
-    for (int i = 0; i < lhs.length; i++) {
-      lhs[i] ^= rhs[i];
+  /** Compute lhs ^= rhs bitwise operation of the arrays. May clobber either argument. */
+  private static byte[] xor(byte[] lhs, byte[] rhs) {
+    int n = rhs.length;
+    if (lhs.length >= n) {
+      for (int i = 0; i < n; i++) {
+        lhs[i] ^= rhs[i];
+      }
+      return lhs;
     }
+    return xor(rhs, lhs);
   }
 }

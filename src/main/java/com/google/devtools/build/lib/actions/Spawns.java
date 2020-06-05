@@ -29,31 +29,92 @@ public final class Spawns {
    * Returns {@code true} if the result of {@code spawn} may be cached.
    */
   public static boolean mayBeCached(Spawn spawn) {
-    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_CACHE);
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_CACHE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL);
   }
 
+  /** Returns {@code true} if the result of {@code spawn} may be cached remotely. */
+  public static boolean mayBeCachedRemotely(Spawn spawn) {
+    return mayBeCached(spawn)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE_CACHE);
+  }
+
+  /** Returns {@code true} if {@code spawn} may be executed remotely. */
+  public static boolean mayBeExecutedRemotely(Spawn spawn) {
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE)
+        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE_EXEC);
+  }
+
+  /** Returns {@code true} if {@code spawn} may be executed locally. */
+  public static boolean mayBeExecutedLocally(Spawn spawn) {
+    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_LOCAL);
+  }
+
+  /** Returns whether a Spawn can be executed in a sandbox environment. */
   public static boolean mayBeSandboxed(Spawn spawn) {
     return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LEGACY_NOSANDBOX)
         && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_SANDBOX)
         && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL);
   }
 
-  public static boolean requiresNetwork(Spawn spawn) {
-    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.BLOCK_NETWORK);
-  }
+  /** Returns whether a Spawn needs network access in order to run successfully. */
+  public static boolean requiresNetwork(Spawn spawn, boolean defaultSandboxDisallowNetwork) {
+    if (spawn.getExecutionInfo().containsKey(ExecutionRequirements.BLOCK_NETWORK)) {
+      return false;
+    }
+    if (spawn.getExecutionInfo().containsKey(ExecutionRequirements.REQUIRES_NETWORK)) {
+      return true;
+    }
 
-  public static boolean mayBeExecutedRemotely(Spawn spawn) {
-    return !spawn.getExecutionInfo().containsKey(ExecutionRequirements.LOCAL)
-        && !spawn.getExecutionInfo().containsKey(ExecutionRequirements.NO_REMOTE);
+    return defaultSandboxDisallowNetwork;
   }
 
   /**
-   * Parse the timeout key in the spawn execution info, if it exists. Otherwise, return -1.
+   * Returns whether a Spawn claims to support being executed with the persistent worker strategy
+   * according to its execution info tags.
    */
+  public static boolean supportsWorkers(Spawn spawn) {
+    return "1".equals(spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_WORKERS));
+  }
+
+  /**
+   * Returns whether a Spawn claims to support being executed with the persistent multiplex worker
+   * strategy according to its execution info tags.
+   */
+  public static boolean supportsMultiplexWorkers(Spawn spawn) {
+    return "1"
+        .equals(spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_MULTIPLEX_WORKERS));
+  }
+
+  /** Returns the mnemonic that should be used in the worker's key. */
+  public static String getWorkerKeyMnemonic(Spawn spawn) {
+    String customValue = spawn.getExecutionInfo().get(ExecutionRequirements.WORKER_KEY_MNEMONIC);
+    return customValue != null ? customValue : spawn.getMnemonic();
+  }
+
+  /** Parse the timeout key in the spawn execution info, if it exists. Otherwise, return -1. */
   public static Duration getTimeout(Spawn spawn) throws ExecException {
-    String timeoutStr = spawn.getExecutionInfo().get("timeout");
+    String timeoutStr = spawn.getExecutionInfo().get(ExecutionRequirements.TIMEOUT);
     if (timeoutStr == null) {
       return Duration.ZERO;
+    }
+    try {
+      return Duration.ofSeconds(Integer.parseInt(timeoutStr));
+    } catch (NumberFormatException e) {
+      throw new UserExecException("could not parse timeout: ", e);
+    }
+  }
+
+  /**
+   * Parse the timeout key in the spawn execution info, if it exists. Otherwise, return
+   * defaultTimeout, or 0 if that is null.
+   */
+  public static Duration getTimeout(Spawn spawn, Duration defaultTimeout) throws ExecException {
+    String timeoutStr = spawn.getExecutionInfo().get(ExecutionRequirements.TIMEOUT);
+    if (timeoutStr == null) {
+      return defaultTimeout == null ? Duration.ZERO : defaultTimeout;
     }
     try {
       return Duration.ofSeconds(Integer.parseInt(timeoutStr));
@@ -73,17 +134,29 @@ public final class Spawns {
   }
 
   /** Convert a spawn into a Bourne shell command. */
-  public static String asShellCommand(Spawn spawn, Path workingDirectory) {
-    return asShellCommand(spawn.getArguments(), workingDirectory, spawn.getEnvironment());
+  public static String asShellCommand(Spawn spawn, Path workingDirectory, boolean prettyPrintArgs) {
+    return asShellCommand(
+        spawn.getArguments(),
+        workingDirectory,
+        spawn.getEnvironment(),
+        prettyPrintArgs);
   }
 
   /** Convert a working dir + environment map + arg list into a Bourne shell command. */
   public static String asShellCommand(
-      Collection<String> arguments, Path workingDirectory, Map<String, String> environment) {
+      Collection<String> arguments,
+      Path workingDirectory,
+      Map<String, String> environment,
+      boolean prettyPrintArgs) {
+
     // We print this command out in such a way that it can safely be
     // copied+pasted as a Bourne shell command.  This is extremely valuable for
     // debugging.
     return CommandFailureUtils.describeCommand(
-        CommandDescriptionForm.COMPLETE, arguments, environment, workingDirectory.getPathString());
+        CommandDescriptionForm.COMPLETE,
+        prettyPrintArgs,
+        arguments,
+        environment,
+        workingDirectory.getPathString());
   }
 }

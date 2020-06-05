@@ -14,14 +14,16 @@
 package com.google.devtools.build.lib.runtime;
 
 import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableList;
+import com.google.common.eventbus.AllowConcurrentEvents;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
+import com.google.common.flogger.GoogleLogger;
 import com.google.devtools.build.lib.actions.ActionKeyContext;
-import com.google.devtools.build.lib.buildeventstream.BuildToolLogs;
+import com.google.devtools.build.lib.actions.ActionResultReceivedEvent;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
 import com.google.devtools.build.lib.buildtool.buildevent.ExecutionStartingEvent;
+import com.google.devtools.build.lib.buildtool.buildevent.ProfilerStartedEvent;
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
@@ -29,31 +31,41 @@ import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.ExecutorBuilder;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
-import com.google.devtools.build.lib.util.Pair;
-import com.google.protobuf.ByteString;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
+import com.google.devtools.build.lib.skyframe.ExecutionFinishedEvent;
+import com.google.devtools.build.lib.vfs.Path;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.logging.Logger;
 
 /**
  * Blaze module for the build summary message that reports various stats to the user.
  */
 public class BuildSummaryStatsModule extends BlazeModule {
 
-  private static final Logger logger = Logger.getLogger(BuildSummaryStatsModule.class.getName());
+  private static final GoogleLogger logger = GoogleLogger.forEnclosingClass();
 
   private ActionKeyContext actionKeyContext;
-  private SimpleCriticalPathComputer criticalPathComputer;
+  private CriticalPathComputer criticalPathComputer;
   private EventBus eventBus;
   private Reporter reporter;
   private boolean enabled;
-  private boolean discardActions;
+
+  private boolean statsSummary;
+  private long commandStartMillis;
+  private long executionStartMillis;
+  private long executionEndMillis;
+  private SpawnStats spawnStats;
+  private Path profilePath;
 
   @Override
   public void beforeCommand(CommandEnvironment env) {
     this.reporter = env.getReporter();
     this.eventBus = env.getEventBus();
     this.actionKeyContext = env.getSkyframeExecutor().getActionKeyContext();
+    commandStartMillis = env.getCommandStartTime();
+    this.spawnStats = new SpawnStats();
     eventBus.register(this);
   }
 
@@ -62,61 +74,126 @@ public class BuildSummaryStatsModule extends BlazeModule {
     this.criticalPathComputer = null;
     this.eventBus = null;
     this.reporter = null;
+    this.spawnStats = null;
   }
 
   @Override
   public void executorInit(CommandEnvironment env, BuildRequest request, ExecutorBuilder builder) {
     enabled = env.getOptions().getOptions(ExecutionOptions.class).enableCriticalPathProfiling;
-    discardActions = !env.getSkyframeExecutor().hasIncrementalState();
   }
 
   @Subscribe
   public void executionPhaseStarting(ExecutionStartingEvent event) {
+    // TODO(ulfjack): Make sure to use the same clock as for commandStartMillis.
+    executionStartMillis = BlazeClock.instance().currentTimeMillis();
     if (enabled) {
-      criticalPathComputer =
-          new SimpleCriticalPathComputer(actionKeyContext, BlazeClock.instance(), discardActions);
+      criticalPathComputer = new CriticalPathComputer(actionKeyContext, BlazeClock.instance());
       eventBus.register(criticalPathComputer);
     }
+  }
+
+  @Subscribe
+  public void profileStarting(ProfilerStartedEvent event) {
+    this.profilePath = event.getProfilePath();
+  }
+
+  @Subscribe
+  public void executionPhaseFinish(@SuppressWarnings("unused") ExecutionFinishedEvent event) {
+    executionEndMillis = BlazeClock.instance().currentTimeMillis();
+  }
+
+  @Subscribe
+  @AllowConcurrentEvents
+  public void actionResultReceived(ActionResultReceivedEvent event) {
+    spawnStats.countActionResult(event.getActionResult());
   }
 
   @Subscribe
   public void buildComplete(BuildCompleteEvent event) {
     try {
       // We might want to make this conditional on a flag; it can sometimes be a bit of a nuisance.
-      List<Pair<String, ByteString>> statistics = new ArrayList<>();
       List<String> items = new ArrayList<>();
       items.add(String.format("Elapsed time: %.3fs", event.getResult().getElapsedSeconds()));
-      statistics.add(Pair.of("elapsed time", ByteString.copyFromUtf8(
-          String.format("%f", event.getResult().getElapsedSeconds()))));
+      event.getResult().getBuildToolLogCollection()
+          .addDirectValue(
+              "elapsed time",
+              String.format(
+                  "%f", event.getResult().getElapsedSeconds()).getBytes(StandardCharsets.UTF_8));
 
+      AggregatedCriticalPath criticalPath = AggregatedCriticalPath.EMPTY;
       if (criticalPathComputer != null) {
-        Profiler.instance().startTask(ProfilerTask.CRITICAL_PATH, "Critical path");
-        AggregatedCriticalPath<SimpleCriticalPathComponent> criticalPath =
-            criticalPathComputer.aggregate();
-        items.add(criticalPath.toStringSummary());
-        statistics.add(Pair.of("critical path", ByteString.copyFromUtf8(criticalPath.toString())));
-        logger.info(criticalPath.toString());
-        logger.info(
-            "Slowest actions:\n  "
-                + Joiner.on("\n  ").join(criticalPathComputer.getSlowestComponents()));
-        // We reverse the critical path because the profiler expect events ordered by the time
-        // when the actions were executed while critical path computation is stored in the reverse
-        // way.
-        for (SimpleCriticalPathComponent stat : criticalPath.components().reverse()) {
-          Profiler.instance()
-              .logSimpleTaskDuration(
-                  stat.getStartNanos(),
-                  stat.getElapsedTimeNanos(),
-                  ProfilerTask.CRITICAL_PATH_COMPONENT,
-                  stat.prettyPrintAction());
+        try (SilentCloseable c =
+            Profiler.instance().profile(ProfilerTask.CRITICAL_PATH, "Critical path")) {
+          criticalPath = criticalPathComputer.aggregate();
+          items.add(criticalPath.toStringSummaryNoRemote());
+          event.getResult().getBuildToolLogCollection()
+              .addDirectValue(
+                  "critical path", criticalPath.toString().getBytes(StandardCharsets.UTF_8));
+          logger.atInfo().log(criticalPath.toString());
+          logger.atInfo().log(
+              "Slowest actions:\n  %s",
+              Joiner.on("\n  ").join(criticalPathComputer.getSlowestComponents()));
+          // We reverse the critical path because the profiler expect events ordered by the time
+          // when the actions were executed while critical path computation is stored in the reverse
+          // way.
+          for (CriticalPathComponent stat : criticalPath.components().reverse()) {
+            Profiler.instance()
+                .logSimpleTaskDuration(
+                    stat.getStartTimeNanos(),
+                    stat.getElapsedTime(),
+                    ProfilerTask.CRITICAL_PATH_COMPONENT,
+                    stat.prettyPrintAction());
+          }
         }
-        Profiler.instance().completeTask(ProfilerTask.CRITICAL_PATH);
+      }
+      if (profilePath != null) {
+        // This leads to missing the afterCommand profiles of the other modules in the profile.
+        // Since the BEP currently shuts down at the BuildCompleteEvent, we cannot just move posting
+        // the BuildToolLogs to afterCommand of this module.
+        try {
+          Profiler.instance().stop();
+          event
+              .getResult()
+              .getBuildToolLogCollection()
+              .addLocalFile(profilePath.getBaseName(), profilePath);
+        } catch (IOException e) {
+          reporter.handle(Event.error("Error while writing profile file: " + e.getMessage()));
+        }
       }
 
-      reporter.handle(Event.info(Joiner.on(", ").join(items)));
-      reporter.post(new BuildToolLogs(statistics, ImmutableList.of()));
+      String spawnSummary = spawnStats.getSummary();
+      if (statsSummary) {
+        reporter.handle(Event.info(spawnSummary));
+        reporter.handle(
+            Event.info(
+                String.format(
+                    "Total action wall time %.2fs", spawnStats.getTotalWallTimeMillis() / 1000.0)));
+        if (criticalPath != AggregatedCriticalPath.EMPTY) {
+          reporter.handle(Event.info(criticalPath.getNewStringSummary()));
+        }
+        long now = event.getResult().getStopTime();
+        long executionTime = executionEndMillis - executionStartMillis;
+        long overheadTime = now - commandStartMillis - executionTime;
+        reporter.handle(
+            Event.info(
+                String.format(
+                    "Elapsed time %.2fs (preparation %.2fs, execution %.2fs)",
+                    (now - commandStartMillis) / 1000.0,
+                    overheadTime / 1000.0,
+                    executionTime / 1000.0)));
+      } else {
+        reporter.handle(Event.info(Joiner.on(", ").join(items)));
+        reporter.handle(Event.info(spawnSummary));
+      }
+
+      event.getResult().getBuildToolLogCollection()
+          .addDirectValue("process stats", spawnSummary.getBytes(StandardCharsets.UTF_8));
     } finally {
-      criticalPathComputer = null;
+      if (criticalPathComputer != null) {
+        eventBus.unregister(criticalPathComputer);
+        criticalPathComputer = null;
+      }
+      profilePath = null;
     }
   }
 }

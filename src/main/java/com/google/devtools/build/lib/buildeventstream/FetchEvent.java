@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.buildeventstream;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import java.util.Collection;
 
@@ -36,16 +37,16 @@ public final class FetchEvent implements BuildEvent, ExtendedEventHandler.Progre
 
   @Override
   public BuildEventId getEventId() {
-    return BuildEventId.fetchId(url);
+    return BuildEventIdUtil.fetchId(url);
   }
 
   @Override
   public Collection<BuildEventId> getChildrenEvents() {
-    return ImmutableList.<BuildEventId>of();
+    return ImmutableList.of();
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     BuildEventStreamProtos.Fetch fetch =
         BuildEventStreamProtos.Fetch.newBuilder().setSuccess(success).build();
     return GenericBuildEvent.protoChaining(this).setFetch(fetch).build();

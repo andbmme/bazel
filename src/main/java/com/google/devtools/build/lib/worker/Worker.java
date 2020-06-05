@@ -13,17 +13,21 @@
 // limitations under the License.
 package com.google.devtools.build.lib.worker;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.hash.HashCode;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxInputs;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.shell.Subprocess;
 import com.google.devtools.build.lib.shell.SubprocessBuilder;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkRequest;
+import com.google.devtools.build.lib.worker.WorkerProtocol.WorkResponse;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.SortedMap;
 
 /**
@@ -38,10 +42,16 @@ import java.util.SortedMap;
  * class.
  */
 class Worker {
-  private final WorkerKey workerKey;
-  private final int workerId;
-  private final Path workDir;
-  private final Path logFile;
+  /** An unique identifier of the work process. */
+  protected final WorkerKey workerKey;
+  /** An unique ID of the worker. It will be used in WorkRequest and WorkResponse as well. */
+  protected final int workerId;
+  /** The execution root of the worker. */
+  protected final Path workDir;
+  /** The path of the log file. */
+  protected final Path logFile;
+  /** Stream for reading the WorkResponse. */
+  protected RecordingInputStream recordingStream;
 
   private Subprocess process;
   private Thread shutdownHook;
@@ -54,33 +64,31 @@ class Worker {
 
     final Worker self = this;
     this.shutdownHook =
-        new Thread() {
-          @Override
-          public void run() {
-            try {
-              self.shutdownHook = null;
-              self.destroy();
-            } catch (IOException e) {
-              // We can't do anything here.
-            }
-          }
-        };
+        new Thread(
+            () -> {
+              try {
+                self.shutdownHook = null;
+                self.destroy();
+              } catch (IOException e) {
+                // We can't do anything here.
+              }
+            });
     Runtime.getRuntime().addShutdownHook(shutdownHook);
   }
 
   void createProcess() throws IOException {
-    List<String> args = workerKey.getArgs();
+    ImmutableList<String> args = workerKey.getArgs();
     File executable = new File(args.get(0));
     if (!executable.isAbsolute() && executable.getParent() != null) {
-      args = new ArrayList<>(args);
-      args.set(0, new File(workDir.getPathFile(), args.get(0)).getAbsolutePath());
+      List<String> newArgs = new ArrayList<>(args);
+      newArgs.set(0, new File(workDir.getPathFile(), newArgs.get(0)).getAbsolutePath());
+      args = ImmutableList.copyOf(newArgs);
     }
     SubprocessBuilder processBuilder = new SubprocessBuilder();
     processBuilder.setArgv(args);
     processBuilder.setWorkingDirectory(workDir.getPathFile());
     processBuilder.setStderr(logFile.getPathFile());
     processBuilder.setEnv(workerKey.getEnv());
-
     this.process = processBuilder.start();
   }
 
@@ -89,33 +97,7 @@ class Worker {
       Runtime.getRuntime().removeShutdownHook(shutdownHook);
     }
     if (process != null) {
-      destroyProcess(process);
-    }
-  }
-
-  /**
-   * Destroys a process and waits for it to exit. This is necessary for the child to not become a
-   * zombie.
-   *
-   * @param process the process to destroy.
-   */
-  private static void destroyProcess(Subprocess process) {
-    boolean wasInterrupted = false;
-    try {
-      process.destroy();
-      while (true) {
-        try {
-          process.waitFor();
-          return;
-        } catch (InterruptedException ie) {
-          wasInterrupted = true;
-        }
-      }
-    } finally {
-      // Read this for detailed explanation: http://www.ibm.com/developerworks/library/j-jtp05236/
-      if (wasInterrupted) {
-        Thread.currentThread().interrupt(); // preserve interrupted status
-      }
+      process.destroyAndWait();
     }
   }
 
@@ -138,25 +120,36 @@ class Worker {
   boolean isAlive() {
     // This is horrible, but Process.isAlive() is only available from Java 8 on and this is the
     // best we can do prior to that.
-    try {
-      process.exitValue();
-      return false;
-    } catch (IllegalThreadStateException e) {
-      return true;
+    return !process.finished();
+  }
+
+  void putRequest(WorkRequest request) throws IOException {
+    request.writeDelimitedTo(process.getOutputStream());
+    process.getOutputStream().flush();
+  }
+
+  WorkResponse getResponse() throws IOException {
+    recordingStream = new RecordingInputStream(process.getInputStream());
+    recordingStream.startRecording(4096);
+    // response can be null when the worker has already closed stdout at this point and thus
+    // the InputStream is at EOF.
+    return WorkResponse.parseDelimitedFrom(recordingStream);
+  }
+
+  String getRecordingStreamMessage() {
+    recordingStream.readRemaining();
+    return recordingStream.getRecordedDataAsString();
+  }
+
+  public void prepareExecution(
+      SandboxInputs inputFiles, SandboxOutputs outputs, Set<PathFragment> workerFiles)
+      throws IOException {
+    if (process == null) {
+      createProcess();
     }
   }
 
-  InputStream getInputStream() {
-    return process.getInputStream();
-  }
-
-  OutputStream getOutputStream() {
-    return process.getOutputStream();
-  }
-
-  public void prepareExecution(WorkerKey key) throws IOException {}
-
-  public void finishExecution(WorkerKey key) throws IOException {}
+  public void finishExecution(Path execRoot) throws IOException {}
 
   public Path getLogFile() {
     return logFile;

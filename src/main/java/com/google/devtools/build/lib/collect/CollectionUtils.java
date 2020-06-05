@@ -13,15 +13,16 @@
 // limitations under the License.
 package com.google.devtools.build.lib.collect;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.stream.Collectors.toCollection;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
+import com.google.devtools.build.lib.collect.compacthashset.CompactHashSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -94,23 +95,28 @@ public final class CollectionUtils {
    * @return the set of repeated elements.  May return an empty set, but never null.
    */
   public static <T> Set<T> duplicatedElementsOf(Iterable<T> input) {
-    Set<T> duplicates = new HashSet<>();
-    Set<T> elementSet = new HashSet<>();
+    int count = Iterables.size(input);
+    if (count < 2) {
+      return ImmutableSet.of();
+    }
+    Set<T> duplicates = null;
+    Set<T> elementSet = CompactHashSet.createWithExpectedSize(count);
     for (T el : input) {
       if (!elementSet.add(el)) {
+        if (duplicates == null) {
+          duplicates = new HashSet<>();
+        }
         duplicates.add(el);
       }
     }
-    return duplicates;
+    return duplicates == null ? ImmutableSet.of() : duplicates;
   }
 
   /**
-   * Returns an immutable list of all non-null parameters in the order in which
-   * they are specified.
+   * Returns an immutable set of all non-null parameters in the order in which they are specified.
    */
-  @SuppressWarnings("unchecked")
-  public static <T> ImmutableList<T> asListWithoutNulls(T... elements) {
-    return Arrays.stream(elements).filter(Objects::nonNull).collect(toImmutableList());
+  public static <T> ImmutableSet<T> asSetWithoutNulls(T... elements) {
+    return Arrays.stream(elements).filter(Objects::nonNull).collect(toImmutableSet());
   }
 
   /**
@@ -122,7 +128,6 @@ public final class CollectionUtils {
     return iterable instanceof ImmutableList<?>
         || iterable instanceof ImmutableSet<?>
         || iterable instanceof IterablesChain<?>
-        || iterable instanceof NestedSet<?>
         || iterable instanceof ImmutableIterable<?>;
   }
 
@@ -160,7 +165,6 @@ public final class CollectionUtils {
    * Converts a set of enum values to a bit field. Requires that the enum contains at most 32
    * elements.
    */
-  @SuppressWarnings("unchecked")
   public static <T extends Enum<T>> int toBits(T... values) {
     return toBits(ImmutableSet.copyOf(values));
   }
@@ -198,5 +202,14 @@ public final class CollectionUtils {
   public static <KEY_1, KEY_2, VALUE> Map<KEY_1, Map<KEY_2, VALUE>> copyOf(
       Map<KEY_1, ? extends Map<KEY_2, VALUE>> map) {
     return new HashMap<>(Maps.transformValues(map, HashMap::new));
+  }
+
+  /**
+   * A variant of {@link com.google.common.collect.Iterables#isEmpty} that avoids expanding nested
+   * sets.
+   */
+  public static <T> boolean isEmpty(Iterable<T> iterable) {
+    // Only caller is IterablesChain.
+    return Iterables.isEmpty(iterable);
   }
 }

@@ -15,17 +15,15 @@
 package com.google.devtools.build.lib.analysis.config;
 
 import com.google.common.collect.ImmutableList;
-import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import java.util.HashMap;
-import java.util.List;
 
 /**
  * Convenience container for top-level target and host configurations.
  *
  * <p>The target configuration is used for all targets specified on the command line. Multiple
  * target configurations are possible because of settings like {@link
- * BuildRequestOptions#multiCpus}.
+ * com.google.devtools.build.lib.buildtool.BuildRequestOptions#multiCpus}.
  *
  * <p>The host configuration is used for tools that are executed during the build, e. g, compilers.
  */
@@ -34,22 +32,21 @@ public final class BuildConfigurationCollection {
   private final ImmutableList<BuildConfiguration> targetConfigurations;
   private final BuildConfiguration hostConfiguration;
 
-  public BuildConfigurationCollection(List<BuildConfiguration> targetConfigurations,
-      BuildConfiguration hostConfiguration)
+  public BuildConfigurationCollection(
+      ImmutableList<BuildConfiguration> targetConfigurations, BuildConfiguration hostConfiguration)
       throws InvalidConfigurationException {
-    this.targetConfigurations = ImmutableList.copyOf(targetConfigurations);
+    this.targetConfigurations = targetConfigurations;
     this.hostConfiguration = hostConfiguration;
 
     // Except for the host configuration (which may be identical across target configs), the other
     // configurations must all have different cache keys or we will end up with problems.
     HashMap<String, BuildConfiguration> cacheKeyConflictDetector = new HashMap<>();
     for (BuildConfiguration config : targetConfigurations) {
-      String cacheKey = config.checksum();
-      if (cacheKeyConflictDetector.containsKey(cacheKey)) {
-        throw new InvalidConfigurationException("Conflicting configurations: " + config + " & "
-            + cacheKeyConflictDetector.get(cacheKey));
+      BuildConfiguration old = cacheKeyConflictDetector.put(config.checksum(), config);
+      if (old != null) {
+        throw new InvalidConfigurationException(
+            "Conflicting configurations: " + config + " & " + old);
       }
-      cacheKeyConflictDetector.put(cacheKey, config);
     }
   }
 

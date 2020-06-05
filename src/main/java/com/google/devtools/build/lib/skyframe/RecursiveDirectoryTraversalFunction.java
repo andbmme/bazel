@@ -23,41 +23,37 @@ import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.packages.NoSuchPackageException;
-import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.skyframe.RecursivePkgValue.RecursivePkgKey;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
-import com.google.devtools.build.skyframe.ValueOrException;
 import java.util.Map;
+import javax.annotation.Nullable;
 
 /**
- * RecursiveDirectoryTraversalFunction traverses the subdirectories of a directory, looking for and
- * loading packages, and builds up a value from the packages and package loading errors in a manner
- * customized by classes that derive from it.
+ * RecursiveDirectoryTraversalFunction allows for a custom recursive traversal of the subdirectories
+ * of a directory, building up a value based on package existence and results of the recursive
+ * traversal.
  */
-abstract class RecursiveDirectoryTraversalFunction<
+public abstract class RecursiveDirectoryTraversalFunction<
     TConsumer extends RecursiveDirectoryTraversalFunction.PackageDirectoryConsumer, TReturn> {
-
-  private final ProcessPackageDirectory processPackageDirectory;
+  private final BlazeDirectories directories;
 
   protected RecursiveDirectoryTraversalFunction(BlazeDirectories directories) {
-    this.processPackageDirectory =
-        new ProcessPackageDirectory(
-            directories,
-            new ProcessPackageDirectory.SkyKeyTransformer() {
-              @Override
-              public SkyKey makeSkyKey(
-                  RepositoryName repository,
-                  RootedPath subdirectory,
-                  ImmutableSet<PathFragment> excludedSubdirectoriesBeneathSubdirectory) {
-                return getSkyKeyForSubdirectory(
-                    repository, subdirectory, excludedSubdirectoriesBeneathSubdirectory);
-              }
-            });
+    this.directories = directories;
+  }
+
+  /** Called by {@link #visitDirectory}, which will then recursive traverse the directory. */
+  @Nullable
+  protected ProcessPackageDirectoryResult getProcessPackageDirectoryResult(
+      RecursivePkgKey recursivePkgKey, Environment env) throws InterruptedException {
+    return new ProcessPackageDirectory(directories, this::getSkyKeyForSubdirectory)
+        .getPackageExistenceAndSubdirDeps(
+            recursivePkgKey.getRootedPath(),
+            recursivePkgKey.getRepositoryName(),
+            recursivePkgKey.getExcludedPaths(),
+            env);
   }
 
   /**
@@ -70,12 +66,13 @@ abstract class RecursiveDirectoryTraversalFunction<
 
   /**
    * Called by {@link #visitDirectory} to get the {@link SkyKey}s associated with recursive
-   * computation in subdirectories of {@code subdirectory}, excluding directories in
-   * {@code excludedSubdirectoriesBeneathSubdirectory}, all of which must be proper subdirectories
-   * of {@code subdirectory}.
+   * computation in subdirectories of {@code subdirectory}, excluding directories in {@code
+   * excludedSubdirectoriesBeneathSubdirectory}, all of which must be proper subdirectories of
+   * {@code subdirectory}.
    */
   protected abstract SkyKey getSkyKeyForSubdirectory(
-      RepositoryName repository, RootedPath subdirectory,
+      RepositoryName repository,
+      RootedPath subdirectory,
       ImmutableSet<PathFragment> excludedSubdirectoriesBeneathSubdirectory);
 
   /**
@@ -93,7 +90,7 @@ abstract class RecursiveDirectoryTraversalFunction<
    * <p>The consumer is then provided to {@link #aggregateWithSubdirectorySkyValues} to compute the
    * value returned by {@link #visitDirectory}.
    */
-  interface PackageDirectoryConsumer {
+  public interface PackageDirectoryConsumer {
     /** Called iff the directory contains a package. */
     void notePackage(PathFragment pkgPath) throws InterruptedException;
 
@@ -102,89 +99,95 @@ abstract class RecursiveDirectoryTraversalFunction<
      * the following circumstances:
      *
      * <ol>
-     *   <li>The BUILD file contains a Skylark load statement that is in error
+     *   <li>The BUILD file contains a Starlark load statement that is in error
      *   <li>TODO(mschaller), not yet implemented: The BUILD file is a symlink that points into a
      *       cycle
      * </ol>
      */
-    void notePackageError(NoSuchPackageException e);
+    void notePackageError(String noSuchPackageExceptionErrorMessage);
   }
 
   /**
-   * Looks in the directory specified by {@code recursivePkgKey} for a package, does some work as
-   * specified by {@link PackageDirectoryConsumer} if such a package exists, then recursively does
-   * work in each non-excluded subdirectory as specified by {@link #getSkyKeyForSubdirectory}, and
-   * finally aggregates the {@link PackageDirectoryConsumer} value along with values from each
-   * subdirectory as specified by {@link #aggregateWithSubdirectorySkyValues}, and returns that
-   * aggregation.
+   * Uses {@link #getProcessPackageDirectoryResult} to look for a package in the directory specified
+   * by {@code recursivePkgKey}, does some work as specified by {@link PackageDirectoryConsumer} if
+   * such a package exists, then recursively does work in each non-excluded subdirectory as
+   * specified by {@link #getSkyKeyForSubdirectory}, and finally aggregates the {@link
+   * PackageDirectoryConsumer} value along with values from each subdirectory as specified by {@link
+   * #aggregateWithSubdirectorySkyValues}, and returns that aggregation.
    *
    * <p>Returns null if {@code env.valuesMissing()} is true, checked after each call to one of
    * {@link RecursiveDirectoryTraversalFunction}'s abstract methods that were given {@code env}.
    */
-  TReturn visitDirectory(RecursivePkgKey recursivePkgKey, Environment env)
+  @Nullable
+  public final TReturn visitDirectory(RecursivePkgKey recursivePkgKey, Environment env)
       throws InterruptedException {
-    RootedPath rootedPath = recursivePkgKey.getRootedPath();
-    ProcessPackageDirectoryResult packageExistenceAndSubdirDeps =
-        processPackageDirectory.getPackageExistenceAndSubdirDeps(
-            rootedPath, recursivePkgKey.getRepository(), env, recursivePkgKey.getExcludedPaths());
+    ProcessPackageDirectoryResult processPackageDirectoryResult =
+        getProcessPackageDirectoryResult(recursivePkgKey, env);
     if (env.valuesMissing()) {
       return null;
     }
 
-    Iterable<SkyKey> childDeps = packageExistenceAndSubdirDeps.getChildDeps();
-
+    Iterable<SkyKey> childDeps = processPackageDirectoryResult.getChildDeps();
     TConsumer consumer = getInitialConsumer();
 
-    Map<SkyKey, SkyValue> subdirectorySkyValues;
-    if (packageExistenceAndSubdirDeps.packageExists()) {
-      PathFragment rootRelativePath = rootedPath.getRelativePath();
-      SkyKey packageKey =
-          PackageValue.key(
-              PackageIdentifier.create(recursivePkgKey.getRepository(), rootRelativePath));
-      Map<SkyKey, ValueOrException<NoSuchPackageException>> dependentSkyValues =
-          env.getValuesOrThrow(
-              Iterables.concat(childDeps, ImmutableList.of(packageKey)),
-              NoSuchPackageException.class);
+    Map<SkyKey, SkyValue> subdirectorySkyValuesFromDeps;
+    if (processPackageDirectoryResult.packageExists()) {
+      PathFragment rootRelativePath = recursivePkgKey.getRootedPath().getRootRelativePath();
+      SkyKey packageErrorMessageKey =
+          PackageErrorMessageValue.key(
+              PackageIdentifier.create(recursivePkgKey.getRepositoryName(), rootRelativePath));
+      Map<SkyKey, SkyValue> dependentSkyValues =
+          env.getValues(Iterables.concat(childDeps, ImmutableList.of(packageErrorMessageKey)));
       if (env.valuesMissing()) {
         return null;
       }
-      try {
-        PackageValue pkgValue = (PackageValue) dependentSkyValues.get(packageKey).get();
-        if (pkgValue == null) {
-          return null;
-        }
-        Package pkg = pkgValue.getPackage();
-        if (pkg.containsErrors()) {
+      PackageErrorMessageValue pkgErrorMessageValue =
+          (PackageErrorMessageValue) dependentSkyValues.get(packageErrorMessageKey);
+      switch (pkgErrorMessageValue.getResult()) {
+        case NO_ERROR:
+          consumer.notePackage(rootRelativePath);
+          break;
+        case ERROR:
           env.getListener()
               .handle(Event.error("package contains errors: " + rootRelativePath.getPathString()));
-        }
-        consumer.notePackage(rootRelativePath);
-      } catch (NoSuchPackageException e) {
-        // The package had errors, but don't fail-fast as there might be subpackages below the
-        // current directory.
-        env.getListener().handle(Event.error(e.getMessage()));
-        consumer.notePackageError(e);
-        if (env.valuesMissing()) {
-          return null;
-        }
+          consumer.notePackage(rootRelativePath);
+          break;
+        case NO_SUCH_PACKAGE_EXCEPTION:
+          // The package had errors, but don't fail-fast as there might be subpackages below the
+          // current directory.
+          String msg = pkgErrorMessageValue.getNoSuchPackageExceptionMessage();
+          env.getListener().handle(Event.error(msg));
+          consumer.notePackageError(msg);
+          break;
+        default:
+          throw new IllegalStateException(pkgErrorMessageValue.getResult().toString());
       }
-      ImmutableMap.Builder<SkyKey, SkyValue> subdirectoryBuilder = ImmutableMap.builder();
-      for (Map.Entry<SkyKey, ValueOrException<NoSuchPackageException>> entry :
-          Maps.filterKeys(dependentSkyValues, Predicates.not(Predicates.equalTo(packageKey)))
-              .entrySet()) {
-        try {
-          subdirectoryBuilder.put(entry.getKey(), entry.getValue().get());
-        } catch (NoSuchPackageException e) {
-          // ignored.
-        }
-      }
-      subdirectorySkyValues = subdirectoryBuilder.build();
+      subdirectorySkyValuesFromDeps =
+          ImmutableMap.copyOf(
+              Maps.filterKeys(
+                  dependentSkyValues, Predicates.not(Predicates.equalTo(packageErrorMessageKey))));
     } else {
-      subdirectorySkyValues = env.getValues(childDeps);
+      subdirectorySkyValuesFromDeps = env.getValues(childDeps);
     }
     if (env.valuesMissing()) {
       return null;
     }
-    return aggregateWithSubdirectorySkyValues(consumer, subdirectorySkyValues);
+    return aggregateWithSubdirectorySkyValues(
+        consumer,
+        union(
+            subdirectorySkyValuesFromDeps,
+            processPackageDirectoryResult.getAdditionalValuesToAggregate()));
+  }
+
+  private static Map<SkyKey, SkyValue> union(
+      Map<SkyKey, SkyValue> subdirectorySkyValuesFromDeps,
+      Map<SkyKey, SkyValue> additionalValuesToAggregate) {
+    if (additionalValuesToAggregate.isEmpty()) {
+      return subdirectorySkyValuesFromDeps;
+    }
+    return ImmutableMap.<SkyKey, SkyValue>builder()
+        .putAll(subdirectorySkyValuesFromDeps)
+        .putAll(additionalValuesToAggregate)
+        .build();
   }
 }

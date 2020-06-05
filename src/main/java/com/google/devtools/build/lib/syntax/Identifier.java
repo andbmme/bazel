@@ -14,35 +14,38 @@
 
 package com.google.devtools.build.lib.syntax;
 
-import com.google.devtools.build.lib.util.SpellChecker;
-import java.io.IOException;
-import java.util.Set;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import javax.annotation.Nullable;
 
-// TODO(bazel-team): for extra performance:
-// (1) intern the strings, so we can use == to compare, and have .equals use the assumption.
-// Then have Argument and Parameter use Identifier again instead of String as keys.
-// (2) Use Identifier, not String, as keys in the Environment, which will be cleaner.
-// (3) For performance, avoid doing HashMap lookups at runtime, and compile local variable access
-// into array reference with a constant index. Variable lookups are currently a speed bottleneck,
-// as previously measured in an experiment.
-/**
- * Syntax node for an identifier.
- *
- * Unlike most {@link ASTNode} subclasses, this one supports {@link Object#equals} and {@link
- * Object#hashCode} (but note that these methods ignore location information). They are needed
- * because {@code Identifier}s are stored in maps when constructing {@link LoadStatement}.
- */
+/** Syntax node for an identifier. */
 public final class Identifier extends Expression {
 
   private final String name;
+  private final int nameOffset;
 
-  public Identifier(String name) {
+  // set by Resolver
+  @Nullable private Resolver.Binding binding;
+
+  Identifier(FileLocations locs, String name, int nameOffset) {
+    super(locs);
     this.name = name;
+    this.nameOffset = nameOffset;
+  }
+
+  @Override
+  public int getStartOffset() {
+    return nameOffset;
+  }
+
+  @Override
+  public int getEndOffset() {
+    return nameOffset + name.length();
   }
 
   /**
-   *  Returns the name of the Identifier.
+   * Returns the name of the Identifier. If there were parse errors, misparsed regions may be
+   * represented as an Identifier for which {@code !isValid(getName())}.
    */
   public String getName() {
     return name;
@@ -52,36 +55,17 @@ public final class Identifier extends Expression {
     return name.startsWith("_");
   }
 
-  @Override
-  public void prettyPrint(Appendable buffer) throws IOException {
-    buffer.append(name);
+  Resolver.Binding getBinding() {
+    return binding;
+  }
+
+  void setBinding(Resolver.Binding bind) {
+    Preconditions.checkState(this.binding == null);
+    this.binding = bind;
   }
 
   @Override
-  public boolean equals(@Nullable Object object) {
-    if (object instanceof Identifier) {
-      Identifier that = (Identifier) object;
-      return this.name.equals(that.name);
-    }
-    return false;
-  }
-
-  @Override
-  public int hashCode() {
-    return name.hashCode();
-  }
-
-  @Override
-  Object doEval(Environment env) throws EvalException {
-    Object value = env.lookup(name);
-    if (value == null) {
-      throw createInvalidIdentifierException(env.getVariableNames());
-    }
-    return value;
-  }
-
-  @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 
@@ -90,18 +74,54 @@ public final class Identifier extends Expression {
     return Kind.IDENTIFIER;
   }
 
-  EvalException createInvalidIdentifierException(Set<String> symbols) {
-    if (name.equals("$error$")) {
-      return new EvalException(getLocation(), "contains syntax error(s)", true);
+  /** Reports whether the string is a valid identifier. */
+  public static boolean isValid(String name) {
+    // Keep consistent with Lexer.scanIdentifier.
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (!(('a' <= c && c <= 'z')
+          || ('A' <= c && c <= 'Z')
+          || (i > 0 && '0' <= c && c <= '9')
+          || (c == '_'))) {
+        return false;
+      }
     }
-    if (name.equals("set")) {
-      //TODO(vladmos): Remove as soon as the flag is removed
-      return new EvalException(getLocation(),
-          "The function 'set' has been removed in favor of 'depset', please use the latter. "
-              + "You can temporarily refer to the old 'set' constructor from unexecuted code "
-              + "by using --incompatible_disallow_uncalled_set_constructor=false");
+    return !name.isEmpty();
+  }
+
+  /**
+   * Returns all names bound by an LHS expression.
+   *
+   * <p>Examples:
+   *
+   * <ul>
+   *   <li><{@code x = ...} binds x.
+   *   <li><{@code x, [y,z] = ..} binds x, y, z.
+   *   <li><{@code x[5] = ..} does not bind any names.
+   * </ul>
+   */
+  static ImmutableSet<Identifier> boundIdentifiers(Expression expr) {
+    if (expr instanceof Identifier) {
+      // Common case/fast path - skip the builder.
+      return ImmutableSet.of((Identifier) expr);
+    } else {
+      ImmutableSet.Builder<Identifier> result = ImmutableSet.builder();
+      collectBoundIdentifiers(expr, result);
+      return result.build();
     }
-    String suggestion = SpellChecker.didYouMean(name, symbols);
-    return new EvalException(getLocation(), "name '" + name + "' is not defined" + suggestion);
+  }
+
+  private static void collectBoundIdentifiers(
+      Expression lhs, ImmutableSet.Builder<Identifier> result) {
+    if (lhs instanceof Identifier) {
+      result.add((Identifier) lhs);
+      return;
+    }
+    if (lhs instanceof ListExpression) {
+      ListExpression variables = (ListExpression) lhs;
+      for (Expression expression : variables.getElements()) {
+        collectBoundIdentifiers(expression, result);
+      }
+    }
   }
 }

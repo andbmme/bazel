@@ -13,109 +13,70 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import com.google.devtools.build.lib.events.Location;
-import java.io.IOException;
-import java.util.List;
+import javax.annotation.Nullable;
 
-/** Syntax node for a slice expression, e.g. obj[:len(obj):2]. */
+/** Syntax node for a slice expression, {@code object[start:stop:step]}. */
 public final class SliceExpression extends Expression {
 
   private final Expression object;
-  private final Expression start;
-  private final Expression end;
-  private final Expression step;
+  private final int lbracketOffset;
+  @Nullable private final Expression start;
+  @Nullable private final Expression stop;
+  @Nullable private final Expression step;
+  private final int rbracketOffset;
 
-  public SliceExpression(Expression object, Expression start, Expression end, Expression step) {
+  SliceExpression(
+      FileLocations locs,
+      Expression object,
+      int lbracketOffset,
+      Expression start,
+      Expression stop,
+      Expression step,
+      int rbracketOffset) {
+    super(locs);
     this.object = object;
+    this.lbracketOffset = lbracketOffset;
     this.start = start;
-    this.end = end;
+    this.stop = stop;
     this.step = step;
+    this.rbracketOffset = rbracketOffset;
   }
 
   public Expression getObject() {
     return object;
   }
 
+  @Nullable
   public Expression getStart() {
     return start;
   }
 
-  public Expression getEnd() {
-    return end;
+  @Nullable
+  public Expression getStop() {
+    return stop;
   }
 
+  @Nullable
   public Expression getStep() {
     return step;
   }
 
   @Override
-  public void prettyPrint(Appendable buffer) throws IOException {
-    boolean startIsDefault =
-        (start instanceof Identifier) && ((Identifier) start).getName().equals("None");
-    boolean endIsDefault =
-        (end instanceof Identifier) && ((Identifier) end).getName().equals("None");
-    boolean stepIsDefault =
-        (step instanceof IntegerLiteral) && ((IntegerLiteral) step).getValue() == 1;
-
-    object.prettyPrint(buffer);
-    buffer.append('[');
-    // Start and end are omitted if they are the literal identifier None, which is the default value
-    // inserted by the parser if no bound is given. Likewise, step is omitted if it is the literal
-    // integer 1.
-    //
-    // The first separator colon is unconditional. The second separator appears only if step is
-    // printed.
-    if (!startIsDefault) {
-      start.prettyPrint(buffer);
-    }
-    buffer.append(':');
-    if (!endIsDefault) {
-      end.prettyPrint(buffer);
-    }
-    if (!stepIsDefault) {
-      buffer.append(':');
-      step.prettyPrint(buffer);
-    }
-    buffer.append(']');
+  public int getStartOffset() {
+    return object.getStartOffset();
   }
 
   @Override
-  Object doEval(Environment env) throws EvalException, InterruptedException {
-    Object objValue = object.eval(env);
-    Object startValue = start.eval(env);
-    Object endValue = end.eval(env);
-    Object stepValue = step.eval(env);
-    Location loc = getLocation();
+  public int getEndOffset() {
+    return rbracketOffset + 1;
+  }
 
-    if (objValue instanceof SkylarkList) {
-      return ((SkylarkList<?>) objValue).getSlice(
-          startValue, endValue, stepValue, loc, env.mutability());
-    } else if (objValue instanceof String) {
-      String string = (String) objValue;
-      List<Integer> indices = EvalUtils.getSliceIndices(startValue, endValue, stepValue,
-          string.length(), loc);
-      char[] result = new char[indices.size()];
-      char[] original = ((String) objValue).toCharArray();
-      int resultIndex = 0;
-      for (int originalIndex : indices) {
-        result[resultIndex] = original[originalIndex];
-        ++resultIndex;
-      }
-      return new String(result);
-    }
-
-    throw new EvalException(
-        loc,
-        String.format(
-            "type '%s' has no operator [:](%s, %s, %s)",
-            EvalUtils.getDataTypeName(objValue),
-            EvalUtils.getDataTypeName(startValue),
-            EvalUtils.getDataTypeName(endValue),
-            EvalUtils.getDataTypeName(stepValue)));
+  public Location getLbracketLocation() {
+    return locs.getLocation(lbracketOffset);
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

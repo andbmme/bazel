@@ -14,66 +14,72 @@
 package com.google.devtools.build.lib.syntax;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import java.io.IOException;
-import java.util.Map;
 
-/**
- * Syntax node for an import statement.
- */
+/** Syntax node for an import statement. */
 public final class LoadStatement extends Statement {
 
-  private final ImmutableMap<Identifier, String> symbolMap;
-  private final StringLiteral imp;
-
   /**
-   * Constructs an import statement.
+   * Binding represents a binding in a load statement. load("...", local = "orig")
    *
-   * <p>{@code symbols} maps a symbol to the original name under which it was defined in
-   * the bzl file that should be loaded. If aliasing is used, the value differs from its key's
-   * {@code symbol.getName()}. Otherwise, both values are identical.
+   * <p>If there's no alias, a single Identifier can be used for both local and orig.
+   * TODO(adonovan): don't do that; be faithful to source.
    */
-  public LoadStatement(StringLiteral imp, Map<Identifier, String> symbolMap) {
-    this.imp = imp;
-    this.symbolMap = ImmutableMap.copyOf(symbolMap);
+  public static final class Binding {
+    private final Identifier local;
+    private final Identifier orig;
+
+    public Identifier getLocalName() {
+      return local;
+    }
+
+    public Identifier getOriginalName() {
+      return orig;
+    }
+
+    Binding(Identifier localName, Identifier originalName) {
+      this.local = localName;
+      this.orig = originalName;
+    }
   }
 
-  public ImmutableMap<Identifier, String> getSymbolMap() {
-    return symbolMap;
+  private final int loadOffset;
+  private final StringLiteral module;
+  private final ImmutableList<Binding> bindings;
+  private final int rparenOffset;
+
+  LoadStatement(
+      FileLocations locs,
+      int loadOffset,
+      StringLiteral module,
+      ImmutableList<Binding> bindings,
+      int rparenOffset) {
+    super(locs);
+    this.loadOffset = loadOffset;
+    this.module = module;
+    this.bindings = bindings;
+    this.rparenOffset = rparenOffset;
   }
 
-  public ImmutableList<Identifier> getSymbols() {
-    return ImmutableList.copyOf(symbolMap.keySet());
+  public ImmutableList<Binding> getBindings() {
+    return bindings;
   }
 
   public StringLiteral getImport() {
-    return imp;
+    return module;
   }
 
   @Override
-  public void prettyPrint(Appendable buffer, int indentLevel) throws IOException {
-    printIndent(buffer, indentLevel);
-    buffer.append("load(");
-    imp.prettyPrint(buffer);
-    for (Identifier symbol : symbolMap.keySet()) {
-      buffer.append(", ");
-      String origName = symbolMap.get(symbol);
-      if (origName.equals(symbol.getName())) {
-        buffer.append('"');
-        symbol.prettyPrint(buffer);
-        buffer.append('"');
-      } else {
-        symbol.prettyPrint(buffer);
-        buffer.append("=\"");
-        buffer.append(origName);
-        buffer.append('"');
-      }
-    }
-    buffer.append(")\n");
+  public int getStartOffset() {
+    return loadOffset;
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getEndOffset() {
+    return rparenOffset + 1;
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

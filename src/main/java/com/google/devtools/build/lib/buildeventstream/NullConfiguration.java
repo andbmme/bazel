@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.buildeventstream;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId;
 import java.util.Collection;
 
 /**
@@ -22,10 +23,11 @@ import java.util.Collection;
  * that internally is just a null pointer.
  */
 public class NullConfiguration implements BuildEvent {
+  public static final NullConfiguration INSTANCE = new NullConfiguration();
 
   @Override
   public BuildEventId getEventId() {
-    return BuildEventId.nullConfigurationId();
+    return BuildEventIdUtil.nullConfigurationId();
   }
 
   @Override
@@ -34,7 +36,7 @@ public class NullConfiguration implements BuildEvent {
   }
 
   @Override
-  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventConverters converters) {
+  public BuildEventStreamProtos.BuildEvent asStreamProto(BuildEventContext converters) {
     return GenericBuildEvent.protoChaining(this)
         .setConfiguration(BuildEventStreamProtos.Configuration.getDefaultInstance())
         .build();

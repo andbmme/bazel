@@ -17,13 +17,19 @@
 # Test sandboxing spawn strategy
 #
 
+# Set to a host:port address that is outside of the local machine to
+# test remote network sandboxing features.
+#
+# Can be passed in via --test_env=REMOTE_NETWORK_ADDRESS=host:port.
+: "${REMOTE_NETWORK_ADDRESS:=}"
+
 # Load test environment
 # Load the test setup defined in the parent directory
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CURRENT_DIR}/../integration_test_setup.sh" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
-source ${CURRENT_DIR}/bazel_sandboxing_test_utils.sh \
-  || { echo "bazel_sandboxing_test_utils.sh not found!" >&2; exit 1; }
+source ${CURRENT_DIR}/../sandboxing_test_utils.sh \
+  || { echo "sandboxing_test_utils.sh not found!" >&2; exit 1; }
 source ${CURRENT_DIR}/remote_helpers.sh \
   || { echo "remote_helpers.sh not found!" >&2; exit 1; }
 
@@ -35,6 +41,11 @@ build --spawn_strategy=sandboxed --genrule_strategy=sandboxed
 EOF
 
 function set_up {
+  export BAZEL_GENFILES_DIR=$(bazel info bazel-genfiles 2>/dev/null)
+  export BAZEL_BIN_DIR=$(bazel info bazel-bin 2>/dev/null)
+
+  sed -i.bak '/sandbox_tmpfs_path/d' $TEST_TMPDIR/bazelrc
+
   mkdir -p examples/genrule
   cat << 'EOF' > examples/genrule/a.txt
 foo bar bz
@@ -115,7 +126,7 @@ genrule(
   tags = [ "local" ],
 )
 
-load('/examples/genrule/skylark', 'skylark_breaks1')
+load('//examples/genrule:skylark.bzl', 'skylark_breaks1')
 
 skylark_breaks1(
   name = "skylark_breaks1",
@@ -128,19 +139,6 @@ skylark_breaks1(
   input = "a.txt",
   output = "skylark_breaks1_works_with_local_tag.txt",
   action_tags = [ "local" ],
-)
-
-genrule(
-  name = "breaks2",
-  srcs = [ "a.txt" ],
-  outs = [ "breaks2.txt" ],
-  # The point of this test is to attempt to read something from the filesystem
-  # that is blocked via --sandbox_block_path= and thus should't be accessible.
-  #
-  # /var/log is an arbitrary choice of directory that should exist on all Linux
-  # systems.
-  #
-  cmd = "ls /var/log &> $@",
 )
 
 genrule(
@@ -165,11 +163,14 @@ EOF
   cat << 'EOF' >> examples/genrule/datafile
 this is a datafile
 EOF
-  cat << 'EOF' >> examples/genrule/tool.sh
+  # The workspace name is initialized in testenv.sh; use that var rather than
+  # hardcoding it here. The extra sed pass is so we can selectively expand that
+  # one var while keeping the rest of the heredoc literal.
+  cat | sed "s/{{WORKSPACE_NAME}}/$WORKSPACE_NAME/" >> examples/genrule/tool.sh << 'EOF'
 #!/bin/sh
 
 set -e
-cp $(dirname $0)/tool.runfiles/__main__/examples/genrule/datafile $1
+cp $(dirname $0)/tool.runfiles/{{WORKSPACE_NAME}}/examples/genrule/datafile $1
 echo "Tools work!"
 EOF
   chmod +x examples/genrule/tool.sh
@@ -188,7 +189,7 @@ def _skylark_breaks1_impl(ctx):
 skylark_breaks1 = rule(
   _skylark_breaks1_impl,
   attrs = {
-    "input": attr.label(mandatory=True, allow_files=True, single_file=True),
+    "input": attr.label(mandatory=True, allow_single_file=True),
     "output": attr.output(mandatory=True),
     "action_tags": attr.string_list(),
   },
@@ -217,19 +218,6 @@ function test_sandboxed_genrule_with_tools() {
     || fail "Hermetic genrule failed: examples/genrule:tools_work"
   [ -f "${BAZEL_GENFILES_DIR}/examples/genrule/tools.txt" ] \
     || fail "Genrule did not produce output: examples/genrule:tools_work"
-}
-
-# Make sure that sandboxed execution doesn't accumulate files in the
-# sandbox directory.
-function test_sandbox_cleanup() {
-  bazel --batch clean &> $TEST_log \
-    || fail "bazel clean failed"
-  bazel build examples/genrule:tools_work &> $TEST_log \
-    || fail "Hermetic genrule failed: examples/genrule:tools_work"
-  bazel shutdown &> $TEST_log || fail "bazel shutdown failed"
-  if [[ -n "$(ls -A "$(bazel info output_base)/bazel-sandbox")" ]]; then
-    fail "Build left files around afterwards"
-  fi
 }
 
 # Test for #400: Linux sandboxing and relative symbolic links.
@@ -303,19 +291,50 @@ function test_sandbox_undeclared_deps_skylark_with_local_tag() {
 }
 
 function test_sandbox_block_filesystem() {
-  output_file="${BAZEL_GENFILES_DIR}/examples/genrule/breaks2.txt"
+  # The point of this test is to attempt to read something from the filesystem
+  # that is blocked via --sandbox_block_path= and thus should't be accessible.
+  #
+  # /var/log is an arbitrary choice of directory that should exist on all
+  # Unix-like systems.
+  local block_path
+  case "$(uname -s)" in
+    Darwin)
+      # TODO(jmmv): sandbox-exec does not resolve symlinks, so attempting
+      # to block /var/log does not work. Unsure if we should make this work
+      # by resolving symlinks or documenting the expected behavior.
+      block_path=/private/var/log
+      ;;
+    *)
+      block_path=/var/log
+      ;;
+  esac
 
-  bazel build --sandbox_block_path=/var/log examples/genrule:breaks2 &> $TEST_log \
-    && fail "Non-hermetic genrule succeeded: examples/genrule:breaks2" || true
+  mkdir pkg
+  cat >pkg/BUILD <<EOF
+genrule(
+  name = "breaks",
+  srcs = [ "a.txt" ],
+  outs = [ "breaks.txt" ],
+  cmd = "ls ${block_path} &> \$@",
+)
+EOF
+  touch pkg/a.txt
+
+  local output_file="${BAZEL_GENFILES_DIR}/pkg/breaks.txt"
+
+  bazel build --sandbox_block_path="${block_path}" pkg:breaks \
+    &> $TEST_log \
+    && fail "Non-hermetic genrule succeeded: examples/genrule:breaks" || true
 
   [ -f "$output_file" ] ||
     fail "Action did not produce output: $output_file"
+  cat "${output_file}" >$TEST_log
 
-  if [ $(wc -l $output_file) -gt 1 ]; then
+  if [ "$(wc -l $output_file | awk '{print $1}')" -gt 1 ]; then
     fail "Output contained more than one line: $output_file"
   fi
 
-  fgrep "Permission denied" $output_file ||
+  grep -E "(Operation not permitted|Permission denied)" $output_file ||
     fail "Output did not contain expected error message: $output_file"
 }
 
@@ -328,57 +347,196 @@ function test_sandbox_cyclic_symlink_in_inputs() {
   }
 }
 
-function test_sandbox_network_access() {
+# Prepares common targets and services to be used by all network-related
+# tests.  The tests for remote network access are only enabled if the
+# user has requested them by setting REMOTE_NETWORK_ADDRESS in the
+# environment.
+function setup_network_tests() {
+  local tags="${1}"; shift
+
   serve_file file_to_serve
-  cat << EOF >> examples/genrule/BUILD
+
+  local socket_dir
+  socket_dir="$(mktemp -d /tmp/test.XXXXXX)" || fail "mktemp failed"
+  local socket="${socket_dir}/socket"
+  python $python_server --unix_socket="${socket}" always file_to_serve &
+  local pid="${!}"
+
+  trap "kill_nc || true; kill '${pid}' || true; rm -f '${socket}'; rmdir '${socket_dir}'" EXIT
+
+  mkdir pkg
+  cat <<EOF >pkg/BUILD
+genrule(
+  name = "localhost",
+  outs = [ "localhost.txt" ],
+  cmd = "curl -o \$@ localhost:${nc_port}",
+  tags = [ ${tags} ],
+)
 
 genrule(
-  name = "sandbox_network_access",
-  outs = [ "sandbox_network_access.txt" ],
-  cmd = "curl -o \$@ localhost:${nc_port}",
+  name = "unix-socket",
+  outs = [ "unix-socket.txt" ],
+  cmd = "curl --unix-socket ${socket} -o \$@ irrelevant-url",
+  tags = [ ${tags} ],
+)
+
+genrule(
+  name = "loopback",
+  outs = [ "loopback.txt" ],
+  cmd = "python $python_server always $(pwd)/file_to_serve >port.txt & "
+      + "pid=\$\$!; "
+      + "while ! grep started port.txt; do sleep 1; done; "
+      + "port=\$\$(head -n 1 port.txt); "
+      + "curl -o \$@ localhost:\$\$port; "
+      + "kill \$\$pid",
 )
 EOF
-  bazel build examples/genrule:sandbox_network_access &> $TEST_log \
-    || fail "genrule 'sandbox_network_access' trying to use network failed, but should have succeeded"
-  [ -f "${BAZEL_GENFILES_DIR}/examples/genrule/sandbox_network_access.txt" ] \
-    || fail "genrule 'sandbox_network_access' did not produce output"
-  kill_nc
+
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    local hostname="${REMOTE_NETWORK_ADDRESS%:*}"
+    local remote_ip
+    if which host 2>/dev/null; then
+      remote_ip="$(host -t A "${hostname}" | head -n 1 | awk '{print $4}')"
+    elif which dig 2>/dev/null; then
+      remote_ip="$(dig -t A "${hostname}" | grep "^${hostname}" | awk '{print $5}')"
+    else
+      fail "Don't know how to query IP of remote host ${hostname}"
+    fi
+    if [[ -z "${remote_ip}" ]]; then
+      fail "No IPv4 connectivity within unsandboxed test"
+    fi
+
+    cat <<EOF >>pkg/BUILD
+genrule(
+  name = "remote-ip",
+  outs = [ "remote-ip.txt" ],
+  cmd = "curl -o \$@ ${remote_ip}:80",
+  tags = [ ${tags} ],
+)
+
+genrule(
+  name = "remote-name",
+  outs = [ "remote-name.txt" ],
+  cmd = "curl -o \$@ '${REMOTE_NETWORK_ADDRESS}'",
+  tags = [ ${tags} ],
+)
+EOF
+  else
+    echo "Not registering tests for remote network sandboxing;" \
+      "REMOTE_NETWORK_ADDRESS has not been set"
+  fi
+}
+
+# Checks that the given target name, which must have been created by
+# a previous call to setup_network_tests, can access the network.
+function check_network_ok() {
+  local target="${1}"; shift
+
+  (
+    # macOS's /bin/bash is ancient and cannot reference $@ when -u is set.
+    # https://unix.stackexchange.com/questions/16560/bash-su-unbound-variable-with-set-u
+    set +u
+
+    bazel build "${@}" "pkg:${target}" &>$TEST_log \
+      || fail "'${target}' could not access the network"
+  )
+}
+
+# Checks that the given target name, which must have been created by
+# a previous call to setup_network_tests, cannot access the network.
+function check_network_not_ok() {
+  local target="${1}"; shift
+
+  (
+    # macOS's /bin/bash is ancient and cannot reference $@ when -u is set.
+    # https://unix.stackexchange.com/questions/16560/bash-su-unbound-variable-with-set-u
+    set +u
+
+    bazel build "${@}" "pkg:${target}" &> $TEST_log \
+      && fail "'${target}' trying to use network succeeded but should have failed" || true
+  )
+  [[ ! -f "${BAZEL_GENFILES_DIR}/pkg/${target}.txt" ]] \
+    || fail "'${target}' produced output but was expected to fail"
+}
+
+function test_sandbox_network_access() {
+  setup_network_tests '"some-tag"'
+
+  check_network_ok localhost
+  check_network_ok unix-socket
+  check_network_ok loopback
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    check_network_ok remote-ip
+    check_network_ok remote-name
+  fi
+}
+
+function test_sandbox_block_network_access() {
+  setup_network_tests '"some-tag"'
+
+  case "$(uname -s)" in
+    Linux)
+      # TODO(jmmv): The linux-sandbox claims to allow localhost connectivity
+      # within the network namespace... but that doesn't seem to be the case.
+      check_network_not_ok localhost --experimental_sandbox_default_allow_network=false
+      ;;
+
+    *)
+      check_network_ok localhost --experimental_sandbox_default_allow_network=false
+      ;;
+  esac
+  check_network_ok unix-socket --experimental_sandbox_default_allow_network=false
+  check_network_ok loopback --experimental_sandbox_default_allow_network=false
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    check_network_not_ok remote-ip --experimental_sandbox_default_allow_network=false
+    check_network_not_ok remote-name --experimental_sandbox_default_allow_network=false
+  fi
 }
 
 function test_sandbox_network_access_with_local() {
-  serve_file file_to_serve
-  cat << EOF >> examples/genrule/BUILD
+  setup_network_tests '"local"'
 
-genrule(
-  name = "sandbox_network_access_with_local",
-  outs = [ "sandbox_network_access_with_local.txt" ],
-  cmd = "curl -o \$@ localhost:${nc_port}",
-  tags = [ "local" ],
-)
-EOF
-  bazel build examples/genrule:sandbox_network_access_with_local &> $TEST_log \
-    || fail "genrule 'sandbox_network_access_with_local' trying to use network failed, but should have succeeded"
-  [ -f "${BAZEL_GENFILES_DIR}/examples/genrule/sandbox_network_access_with_local.txt" ] \
-    || fail "genrule 'sandbox_network_access_with_local' did not produce output"
-  kill_nc
+  check_network_ok localhost
+  check_network_ok unix-socket
+  check_network_ok loopback
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    check_network_ok remote-ip
+    check_network_ok remote-name
+  fi
+}
+
+function test_sandbox_network_access_with_requires_network() {
+  setup_network_tests '"requires-network"'
+
+  check_network_ok localhost --experimental_sandbox_default_allow_network=false
+  check_network_ok unix-socket --experimental_sandbox_default_allow_network=false
+  check_network_ok loopback --experimental_sandbox_default_allow_network=false
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    check_network_ok remote-ip --experimental_sandbox_default_allow_network=false
+    check_network_ok remote-name --experimental_sandbox_default_allow_network=false
+  fi
 }
 
 function test_sandbox_network_access_with_block_network() {
-  serve_file file_to_serve
-  cat << EOF >> examples/genrule/BUILD
+  setup_network_tests '"block-network"'
 
-genrule(
-  name = "sandbox_network_access_with_block_network",
-  outs = [ "sandbox_network_access_with_block_network.txt" ],
-  cmd = "curl -o \$@ localhost:${nc_port}",
-  tags = [ "block-network" ],
-)
-EOF
-  bazel build examples/genrule:sandbox_network_access_with_block_network &> $TEST_log \
-    && fail "genrule 'sandbox_network_access_with_block_network' trying to use network succeeded, but should have failed" || true
-  [ ! -f "${BAZEL_GENFILES_DIR}/examples/genrule/breaks4_works_with_requires_network.txt" ] \
-    || fail "genrule 'sandbox_network_access_with_block_network' produced output, but was expected to fail"
-  kill_nc
+  case "$(uname -s)" in
+    Linux)
+      # TODO(jmmv): The linux-sandbox claims to allow localhost connectivity
+      # within the network namespace... but that doesn't seem to be the case.
+      check_network_not_ok localhost --experimental_sandbox_default_allow_network=true
+      ;;
+
+    *)
+      check_network_ok localhost --experimental_sandbox_default_allow_network=true
+      ;;
+  esac
+  check_network_ok unix-socket --experimental_sandbox_default_allow_network=true
+  check_network_ok loopback --experimental_sandbox_default_allow_network=true
+  if [[ -n "${REMOTE_NETWORK_ADDRESS}" ]]; then
+    check_network_not_ok remote-ip --experimental_sandbox_default_allow_network=true
+    check_network_not_ok remote-name --experimental_sandbox_default_allow_network=true
+  fi
 }
 
 function test_sandbox_can_resolve_own_hostname() {
@@ -414,6 +572,11 @@ EOF
 }
 
 function test_hostname_inside_sandbox_is_localhost_when_using_sandbox_fake_hostname_flag() {
+  if [[ "$(uname -s)" != Linux ]]; then
+    echo "Skipping test: fake hostnames not supported in this system" 1>&2
+    return 0
+  fi
+
   setup_javatest_support
   mkdir -p src/test/java/com/example
   cat > src/test/java/com/example/HostNameIsLocalhostTest.java <<'EOF'
@@ -429,7 +592,7 @@ public class HostNameIsLocalhostTest {
   @Test
   public void testHostNameIsLocalhost() throws Exception {
     // This will throw an exception, if the local hostname cannot be resolved via DNS.
-    assertEquals(InetAddress.getLocalHost().getHostName(), "localhost");
+    assertEquals("localhost", InetAddress.getLocalHost().getHostName());
   }
 }
 EOF
@@ -461,6 +624,11 @@ EOF
 }
 
 function test_requires_root() {
+  if [[ "$(uname -s)" != Linux ]]; then
+    echo "Skipping test: fake usernames not supported in this system" 1>&2
+    return 0
+  fi
+
   cat > test.sh <<'EOF'
 #!/bin/sh
 ([ $(id -u) = "0" ] && [ $(id -g) = "0" ]) || exit 1
@@ -479,6 +647,11 @@ EOF
 
 # Tests that /proc/self == /proc/$$. This should always be true unless the PID namespace is active without /proc being remounted correctly.
 function test_sandbox_proc_self() {
+  if [[ ! -d /proc/self ]]; then
+    echo "Skipping tests: requires /proc" 1>&2
+    return 0
+  fi
+
   bazel build examples/genrule:check_proc_works >& $TEST_log || fail "build should have succeeded"
 
   (
@@ -513,7 +686,7 @@ EOF
   expect_not_log "Executing genrule //:test failed: linux-sandbox failed: error executing command"
 
   # This is the error message telling us that some output artifacts couldn't be copied.
-  expect_log "Could not move output artifacts from sandboxed execution."
+  expect_log "Could not move output artifacts from sandboxed execution"
 
   # The build fails, because the action didn't generate its output artifact.
   expect_log "ERROR:.*Executing genrule //:test failed"
@@ -544,105 +717,111 @@ EOF
   expect_log "Executing genrule //:test failed:"
 }
 
-function test_sandbox_mount_customized_path () {
-
-  if ! [ "${PLATFORM-}" = "linux" -a \
-    "$(cat /dev/null /etc/*release | grep 'DISTRIB_CODENAME=' | sed 's/^.*=//')" = "trusty" ]; then
-    echo "Skipping test: the toolchain used in this test is only supported on trusty."
-    return 0
-  fi
-
-  # Create BUILD file
+function test_sandbox_debug() {
   cat > BUILD <<'EOF'
-package(default_visibility = ["//visibility:public"])
-
-cc_binary(
-    name = "hello-world",
-    srcs = ["hello-world.cc"],
+genrule(
+  name = "broken",
+  outs = ["bla.txt"],
+  cmd = "exit 1",
 )
 EOF
+  bazel build --verbose_failures :broken &> $TEST_log \
+    && fail "build should have failed" || true
+  expect_log "Use --sandbox_debug to see verbose messages from the sandbox"
+  expect_log "Executing genrule //:broken failed"
 
-  # Create cc file
-  cat > hello-world.cc << 'EOF'
-#include <iostream>
-int main(int argc, char** argv) {
-  std::cout << "Hello, world!" << std::endl;
-  return 0;
+  bazel build --verbose_failures --sandbox_debug :broken &> $TEST_log \
+    && fail "build should have failed" || true
+  expect_log "Executing genrule //:broken failed"
+  expect_not_log "Use --sandbox_debug to see verbose messages from the sandbox"
+  # This will appear a lot in the sandbox failure details.
+  expect_log "/sandbox/"  # Part of the path to the sandbox location.
 }
-EOF
 
-  # Create WORKSPACE file
-  cat > WORKSPACE <<'EOF'
-local_repository(
-  name = 'x86_64_unknown_linux_gnu',
-  path = './downloaded_toolchain',
+function test_experimental_symlinked_sandbox_uses_expanded_tree_artifacts_in_runfiles_tree() {
+  create_workspace_with_default_repos WORKSPACE
+
+  cat > def.bzl <<'EOF'
+def _mkdata_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name + ".d")
+    script = "mkdir -p {out}; touch {out}/file; ln -s file {out}/link".format(out = out.path)
+    ctx.actions.run_shell(
+        outputs = [out],
+        command = script,
+    )
+    runfiles = ctx.runfiles(files = [out])
+    return [DefaultInfo(
+        files = depset([out]),
+        runfiles = runfiles,
+    )]
+
+mkdata = rule(
+    _mkdata_impl,
 )
 EOF
 
-  # Define the mount source and target.
-  source="${TEST_TMPDIR}/workspace/downloaded_toolchain/x86_64-unknown-linux-gnu/sysroot/lib64/ld-2.19.so"
-  target_root="${TEST_SRCDIR}/mount_targets"
-  target_folder="${target_root}/x86_64-unknown-linux-gnu/sysroot/lib64"
-  target="${target_folder}/ld-2.19.so"
+  cat > mkdata_test.sh <<'EOF'
+#!/bin/bash
 
-  # Unpack the toolchain.
-  mkdir downloaded_toolchain
-  tar -xf ${TEST_SRCDIR}/mount_path_toolchain/file/mount_path_toolchain.tar.gz -C ./downloaded_toolchain
-  chmod -R 0755 downloaded_toolchain
+set -euo pipefail
 
-  # Create an empty WORKSPACE file for the local repository.
-  touch downloaded_toolchain/WORKSPACE
+test_dir="$1"
+cd "$test_dir"
+ls -l | cut -f1,9 -d' ' >&2
 
-  # Replace the target_root_placeholder with the actual target_root
-  sed -i "s|target_root_placeholder|$target_root|g" downloaded_toolchain/CROSSTOOL
+if [ ! -f file -o -L file ]; then
+  echo "'file' is not a regular file" >&2
+  exit 1
+fi
+EOF
+  chmod +x mkdata_test.sh
 
-  # Prepare the bazel command flags
-  flags="--crosstool_top=@x86_64_unknown_linux_gnu//:toolchain --verbose_failures --spawn_strategy=sandboxed"
-  flags="${flags} --sandbox_add_mount_pair=${source}:${target}"
+  cat > BUILD <<'EOF'
+load("//:def.bzl", "mkdata")
 
-  # Execute the bazel build command without creating the target. Should fail.
-  bazel clean --expunge &> $TEST_log
-  bazel build $flags //:hello-world &> $TEST_log && fail "Should fail"
-  expect_log "Bazel only supports bind mounting on top of existing files/directories."
+mkdata(name = "mkdata")
 
-  # Create the mount target manually as Bazel does not create target paths
-  mkdir -p ${target_folder}
-  touch ${target}
+sh_test(
+    name = "mkdata_test",
+    srcs = ["mkdata_test.sh"],
+    args = ["$(location :mkdata)"],
+    data = [":mkdata"],
+)
+EOF
 
-  # Execute bazel build command again. Should build.
-  bazel clean --expunge &> $TEST_log
-  bazel build $flags //:hello-world &> $TEST_log || fail "Should build"
+  bazel test --incompatible_symlinked_sandbox_expands_tree_artifacts_in_runfiles_tree \
+      --test_output=streamed :mkdata_test &>$TEST_log && fail "expected test to fail" || true
 
-  # Remove the mount target folder as Bazel does not do the cleanup
-  rm -rf ${target_root}/x86_64-unknown-linux-gnu
+  bazel test --noincompatible_symlinked_sandbox_expands_tree_artifacts_in_runfiles_tree \
+      --test_output=streamed :mkdata_test &>$TEST_log || fail "expected test to pass"
+}
 
-  # Assert that output binary exists
-  test -f bazel-bin/hello-world || fail "output not found"
+# regression test for https://github.com/bazelbuild/bazel/issues/6262
+function test_create_tree_artifact_inputs() {
+  create_workspace_with_default_repos WORKSPACE
 
-  # Use linux_sandbox binary to run bazel-bin/hello-world binary in the sandbox environment
-  # First, no path mounting. The execution should fail.
-  echo "Run the binary bazel-bin/hello-world without mounting the path"
-  $linux_sandbox -D -- bazel-bin/hello-world &> $TEST_log || code=$?
-  expect_log "child exited normally with exitcode 1"
+  cat > def.bzl <<'EOF'
+def _r(ctx):
+    d = ctx.actions.declare_directory("%s_dir" % ctx.label.name)
+    ctx.actions.run_shell(
+        outputs = [d],
+        command = "cd %s && pwd" % d.path,
+    )
+    return [DefaultInfo(files = depset([d]))]
 
-  # Second, with path mounting. The execution should succeed.
-  echo "Run the binary bazel-bin/hello-world with mounting the path"
-  # Create the mount target manually as sandbox binary does not create target paths
-  mkdir -p ${target_folder}
-  touch ${target}
-  $linux_sandbox -D \
-  -M ${source} \
-  -m ${target} \
-  -- bazel-bin/hello-world &> $TEST_log || code=$?
-  expect_log "Hello, world!"
-  expect_log "child exited normally with exitcode 0"
+r = rule(implementation = _r)
+EOF
 
-  # Remove the mount target folder as sandbox binary does not do the cleanup
-  rm -rf ${target_root}/x86_64-unknown-linux-gnu
+cat > BUILD <<'EOF'
+load(":def.bzl", "r")
+
+r(name = "a")
+EOF
+
+  bazel build --test_output=streamed :a &>$TEST_log || fail "expected build to succeed"
 }
 
 # The test shouldn't fail if the environment doesn't support running it.
-check_supported_platform || exit 0
 check_sandbox_allowed || exit 0
 
 run_suite "sandbox"

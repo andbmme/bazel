@@ -13,68 +13,58 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.android;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.getFirstArtifactEndingWith;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.MoreCollectors;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
-import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.configuredtargets.OutputFileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.rules.android.deployinfo.AndroidDeployInfoOuterClass.AndroidDeployInfo;
 import com.google.devtools.build.lib.rules.java.JavaCompileAction;
+import com.google.devtools.build.lib.rules.java.JavaCompileActionTestHelper;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
-import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
+import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
 
 /** Common methods shared between Android related {@link BuildViewTestCase}s. */
 public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
 
-  @Override
-  protected ConfiguredRuleClassProvider getRuleClassProvider() {
-    ConfiguredRuleClassProvider.Builder builder = new ConfiguredRuleClassProvider.Builder();
-    TestRuleClassProvider.addStandardRules(builder);
-    return builder
-        // TODO(b/35097211): Remove this once the new testing rules are released.
-        .addRuleDefinition(new AndroidDeviceScriptFixtureRule())
-        .addRuleDefinition(new AndroidHostServiceFixtureRule())
-        .addRuleDefinition(new AndroidInstrumentationTestRule())
-        .build();
-  }
-
   protected Iterable<Artifact> getNativeLibrariesInApk(ConfiguredTarget target) {
     return Iterables.filter(
-        getGeneratingAction(getCompressedUnsignedApk(target)).getInputs(),
+        getGeneratingAction(getCompressedUnsignedApk(target)).getInputs().toList(),
         a -> a.getFilename().endsWith(".so"));
   }
 
   protected Label getGeneratingLabelForArtifact(Artifact artifact) {
     Action generatingAction = getGeneratingAction(artifact);
-    return generatingAction != null
-        ? getGeneratingAction(artifact).getOwner().getLabel()
-        : null;
+    return generatingAction != null ? getGeneratingAction(artifact).getOwner().getLabel() : null;
   }
 
   protected void assertNativeLibrariesCopiedNotLinked(
@@ -86,7 +76,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
           .isNotEqualTo(target.getLabel());
     }
     assertThat(artifactsToStrings(copiedLibs))
-        .containsAllIn(ImmutableSet.copyOf(Arrays.asList(expectedLibNames)));
+        .containsAtLeastElementsIn(ImmutableSet.copyOf(Arrays.asList(expectedLibNames)));
   }
 
   protected String flagValue(String flag, List<String> args) {
@@ -127,34 +117,32 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
         .isNotNull();
   }
 
-  protected List<String> resourceArguments(ResourceContainer resource)
+  protected List<String> resourceArguments(ValidatedAndroidResources resource)
       throws CommandLineExpansionException {
     return getGeneratingSpawnActionArgs(resource.getApk());
   }
 
-  protected SpawnAction resourceGeneratingAction(ResourceContainer resource) {
+  protected SpawnAction resourceGeneratingAction(ValidatedAndroidResources resource) {
     return getGeneratingSpawnAction(resource.getApk());
   }
 
-  protected static ResourceContainer getResourceContainer(ConfiguredTarget target) {
-    return getResourceContainer(target, /* transitive= */ false);
+  protected static ValidatedAndroidResources getValidatedResources(ConfiguredTarget target) {
+    return getValidatedResources(target, /* transitive= */ false);
   }
 
-  protected static ResourceContainer getResourceContainer(
+  protected static ValidatedAndroidResources getValidatedResources(
       ConfiguredTarget target, boolean transitive) {
-
     Preconditions.checkNotNull(target);
-    final AndroidResourcesProvider provider = target.getProvider(AndroidResourcesProvider.class);
-    assertThat(provider).named("No android resources exported from the target.").isNotNull();
-    return getOnlyElement(
-        transitive
-            ? provider.getTransitiveAndroidResources()
-            : provider.getDirectAndroidResources());
+    final AndroidResourcesInfo info = target.get(AndroidResourcesInfo.PROVIDER);
+    assertWithMessage("No android resources exported from the target.").that(info).isNotNull();
+    return transitive
+        ? info.getTransitiveAndroidResources().getSingleton()
+        : info.getDirectAndroidResources().getSingleton();
   }
 
-  protected Artifact getResourceClassJar(final ConfiguredTarget target) {
+  protected Artifact getResourceClassJar(final ConfiguredTargetAndData target) {
     JavaRuleOutputJarsProvider jarProvider =
-        JavaInfo.getProvider(JavaRuleOutputJarsProvider.class, target);
+        JavaInfo.getProvider(JavaRuleOutputJarsProvider.class, target.getConfiguredTarget());
     assertThat(jarProvider).isNotNull();
     return Iterables.find(
             jarProvider.getOutputJars(),
@@ -175,14 +163,16 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     String actualFlagValue = actualArgs.get(actualArgs.indexOf("--primaryData") + 1);
     List<String> actualPaths = null;
     if (actualFlagValue.matches("[^;]*;[^;]*;.*")) {
-      actualPaths = Arrays.asList(actualFlagValue.split(";")[0].split("#"));
+      actualPaths =
+          Arrays.asList(Iterables.get(Splitter.on(';').split(actualFlagValue), 0).split("#"));
 
     } else if (actualFlagValue.matches("[^:]*:[^:]*:.*")) {
-      actualPaths = Arrays.asList(actualFlagValue.split(":")[0].split("#"));
+      actualPaths =
+          Arrays.asList(Iterables.get(Splitter.on(':').split(actualFlagValue), 0).split("#"));
     } else {
       fail(String.format("Failed to parse --primaryData: %s", actualFlagValue));
     }
-    assertThat(actualPaths).containsAllIn(expectedPaths);
+    assertThat(actualPaths).containsAtLeastElementsIn(expectedPaths);
   }
 
   protected List<String> getDirectDependentResourceDirs(List<String> actualArgs) {
@@ -207,10 +197,15 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
       fail(String.format("Failed to parse flag: %s", actualFlagValue));
     }
     ImmutableList.Builder<String> actualPaths = ImmutableList.builder();
-    for (String resourceDependency :  actualFlagValue.split(",")) {
-      actualPaths.add(resourceDependency.split(separator)[0].split("#"));
+    for (String resourceDependency : Splitter.on(',').split(actualFlagValue)) {
+      actualPaths.add(
+          Iterables.get(Splitter.on(separator).split(resourceDependency), 0).split("#"));
     }
     return actualPaths.build();
+  }
+
+  protected String execPathEndingWith(NestedSet<Artifact> inputs, String suffix) {
+    return getFirstArtifactEndingWith(inputs, suffix).getExecPathString();
   }
 
   protected String execPathEndingWith(Iterable<Artifact> inputs, String suffix) {
@@ -227,52 +222,112 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     return null;
   }
 
+  protected List<String> getProcessorNames(JavaCompileAction compileAction) throws Exception {
+    return JavaCompileActionTestHelper.getProcessorNames(compileAction);
+  }
+
   protected List<String> getProcessorNames(String outputTarget) throws Exception {
-    OutputFileConfiguredTarget out = (OutputFileConfiguredTarget)
-        getFileConfiguredTarget(outputTarget);
+    OutputFileConfiguredTarget out =
+        (OutputFileConfiguredTarget) getFileConfiguredTarget(outputTarget);
     JavaCompileAction compileAction = (JavaCompileAction) getGeneratingAction(out.getArtifact());
-    return compileAction.getProcessorNames();
+    return getProcessorNames(compileAction);
   }
 
   // Returns an artifact that will be generated when a rule has resources.
   protected static Artifact getResourceArtifact(ConfiguredTarget target) {
     // the last provider is the provider from the target.
     return Iterables.getLast(
-            target.getProvider(AndroidResourcesProvider.class).getDirectAndroidResources())
+            target.get(AndroidResourcesInfo.PROVIDER).getDirectAndroidResources().toList())
         .getJavaClassJar();
   }
 
+  protected Map<String, String> getBinaryMergeeManifests(ConfiguredTarget target) throws Exception {
+    return getMergeeManifests(target.get(ApkInfo.PROVIDER).getMergedManifest());
+  }
+
+  protected Map<String, String> getLocalTestMergeeManifests(ConfiguredTarget target)
+      throws Exception {
+    return getMergeeManifests(
+        collectRunfiles(target).toList().stream()
+            .filter(
+                (artifact) ->
+                    artifact.getFilename().equals("AndroidManifest.xml")
+                        && artifact.getOwnerLabel().equals(target.getLabel()))
+            .collect(MoreCollectors.onlyElement()));
+  }
+
+  /** Gets the map of mergee manifests in the order specified on the command line. */
+  protected Map<String, String> getMergeeManifests(Artifact processedManifest) throws Exception {
+    List<String> processingActionArgs = getGeneratingSpawnActionArgs(processedManifest);
+    assertThat(processingActionArgs).contains("--primaryData");
+    String primaryData =
+        processingActionArgs.get(processingActionArgs.indexOf("--primaryData") + 1);
+    String mergedManifestExecPathString = Splitter.on(":").splitToList(primaryData).get(2);
+    SpawnAction processingAction = getGeneratingSpawnAction(processedManifest);
+    Artifact mergedManifest =
+        Iterables.find(
+            processingAction.getInputs().toList(),
+            (artifact) -> artifact.getExecPath().toString().equals(mergedManifestExecPathString));
+    List<String> mergeArgs = getGeneratingSpawnActionArgs(mergedManifest);
+    if (!mergeArgs.contains("--mergeeManifests")) {
+      return ImmutableMap.of();
+    }
+    Map<String, String> splitData =
+        Splitter.on(",")
+            .withKeyValueSeparator(Splitter.onPattern("(?<!\\\\):"))
+            .split(mergeArgs.get(mergeArgs.indexOf("--mergeeManifests") + 1));
+    ImmutableMap.Builder<String, String> results = new ImmutableMap.Builder<>();
+    for (Map.Entry<String, String> manifestAndLabel : splitData.entrySet()) {
+      results.put(manifestAndLabel.getKey(), manifestAndLabel.getValue().replace("\\:", ":"));
+    }
+    return results.build();
+  }
+
+  /** Gets the processed manifest exported by the given library. */
+  protected Artifact getLibraryManifest(ConfiguredTarget target) throws Exception {
+    if (target.get(AndroidManifestInfo.PROVIDER) != null) {
+      return target.get(AndroidManifestInfo.PROVIDER).getManifest();
+    }
+    return null;
+  }
+
+  // Returns an artifact that will be generated when a rule has assets that are processed seperately
+  static Artifact getDecoupledAssetArtifact(ConfiguredTarget target) {
+    return target.get(AndroidAssetsInfo.PROVIDER).getValidationResult();
+  }
+
   protected static Set<Artifact> getNonToolInputs(Action action) {
-    return Sets.difference(
-        ImmutableSet.copyOf(action.getInputs()), ImmutableSet.copyOf(action.getTools()));
+    return Sets.difference(action.getInputs().toSet(), action.getTools().toSet());
   }
 
   protected void checkDebugKey(String debugKeyFile, boolean hasDebugKeyTarget) throws Exception {
     ConfiguredTarget binary = getConfiguredTarget("//java/com/google/android/hello:b");
-    String defaultKeyStoreFile =
-        ruleClassProvider.getToolsRepository() + "//tools/android:debug_keystore";
+    Label defaultKeyStoreFile =
+        Label.parseAbsoluteUnchecked(
+            ruleClassProvider.getToolsRepository() + "//tools/android:debug_keystore");
+    Label debugKeyFileLabel = Label.parseAbsolute(debugKeyFile, ImmutableMap.of());
 
     if (hasDebugKeyTarget) {
       assertWithMessage("Debug key file target missing.")
-          .that(checkKeyPresence(binary, debugKeyFile, defaultKeyStoreFile))
+          .that(checkKeyPresence(binary, debugKeyFileLabel, defaultKeyStoreFile))
           .isTrue();
     } else {
       assertWithMessage("Debug key file is default, although different target specified.")
-          .that(checkKeyPresence(binary, defaultKeyStoreFile, debugKeyFile))
+          .that(checkKeyPresence(binary, defaultKeyStoreFile, debugKeyFileLabel))
           .isTrue();
     }
   }
 
   private boolean checkKeyPresence(
-      ConfiguredTarget binary, String shouldHaveKey, String shouldNotHaveKey) throws Exception {
+      ConfiguredTarget binary, Label shouldHaveKey, Label shouldNotHaveKey) throws Exception {
     boolean hasKey = false;
     boolean doesNotHaveKey = false;
 
     for (ConfiguredTarget debugKeyTarget : getDirectPrerequisites(binary)) {
-      if (debugKeyTarget.getLabel().toString().equals(shouldHaveKey)) {
+      if (debugKeyTarget.getLabel().equals(shouldHaveKey)) {
         hasKey = true;
       }
-      if (debugKeyTarget.getLabel().toString().equals(shouldNotHaveKey)) {
+      if (debugKeyTarget.getLabel().equals(shouldNotHaveKey)) {
         doesNotHaveKey = true;
       }
     }
@@ -284,26 +339,43 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     return getAndroidSdk().getAndroidJar().getRootRelativePathString();
   }
 
+  protected String getAndroidJarFilename() throws Exception {
+    return getAndroidSdk().getAndroidJar().getFilename();
+  }
+
   protected Artifact getProguardBinary() throws Exception {
     return getAndroidSdk().getProguard().getExecutable();
   }
 
-  private AndroidSdkProvider getAndroidSdk() {
-    Label sdk = targetConfig.getFragment(AndroidConfiguration.class).getSdk();
-    return getConfiguredTarget(sdk, targetConfig).getProvider(AndroidSdkProvider.class);
+  protected String getMainDexClassesPath() throws Exception {
+    return getAndroidSdk().getMainDexClasses().getRootRelativePathString();
   }
 
-  protected void checkProguardUse(String target, String artifact, boolean expectMapping,
+  protected String getMainDexClassesFilename() throws Exception {
+    return getAndroidSdk().getMainDexClasses().getFilename();
+  }
+
+  private AndroidSdkProvider getAndroidSdk() throws Exception {
+    Label sdk = targetConfig.getFragment(AndroidConfiguration.class).getSdk();
+    return getConfiguredTarget(sdk, targetConfig).get(AndroidSdkProvider.PROVIDER);
+  }
+
+  protected void checkProguardUse(
+      String target,
+      String artifact,
+      boolean expectMapping,
       @Nullable Integer passes,
-      String... expectedlibraryJars) throws Exception {
+      String... expectedlibraryJars)
+      throws Exception {
     ConfiguredTarget binary = getConfiguredTarget(target);
     assertProguardUsed(binary);
     assertProguardGenerated(binary);
 
-    Action dexAction = actionsTestUtil().getActionForArtifactEndingWith(
-        actionsTestUtil().artifactClosureOf(getFilesToBuild(binary)), "classes.dex");
-    Artifact trimmedJar =
-        getFirstArtifactEndingWith(dexAction.getInputs(), artifact);
+    Action dexAction =
+        actionsTestUtil()
+            .getActionForArtifactEndingWith(
+                actionsTestUtil().artifactClosureOf(getFilesToBuild(binary)), "classes.dex");
+    Artifact trimmedJar = getFirstArtifactEndingWith(dexAction.getInputs(), artifact);
     assertWithMessage("Dex should be built from jar trimmed with Proguard.")
         .that(trimmedJar)
         .isNotNull();
@@ -311,8 +383,9 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
 
     if (passes == null) {
       // Verify proguard as a single action.
-      Action proguardMap = actionsTestUtil().getActionForArtifactEndingWith(getFilesToBuild(binary),
-          "_proguard.map");
+      Action proguardMap =
+          actionsTestUtil()
+              .getActionForArtifactEndingWith(getFilesToBuild(binary), "_proguard.map");
       if (expectMapping) {
         assertWithMessage("proguard.map is not in the rule output").that(proguardMap).isNotNull();
       } else {
@@ -321,8 +394,8 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
       checkProguardLibJars(proguardAction, expectedlibraryJars);
     } else {
       // Verify the multi-stage system generated the correct number of stages.
-      Artifact proguardMap = ActionsTestUtil.getFirstArtifactEndingWith(
-          proguardAction.getOutputs(), "_proguard.map");
+      Artifact proguardMap =
+          ActionsTestUtil.getFirstArtifactEndingWith(proguardAction.getOutputs(), "_proguard.map");
       if (expectMapping) {
         assertWithMessage("proguard.map is not in the rule output").that(proguardMap).isNotNull();
       } else {
@@ -335,9 +408,9 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
       SpawnAction lastStageAction = proguardAction;
       // Verify Obfuscation config.
       for (int pass = passes; pass > 0; pass--) {
-        Artifact lastStageOutput = ActionsTestUtil.getFirstArtifactEndingWith(
-            lastStageAction.getInputs(),
-            "Proguard_optimization_" + pass + ".jar");
+        Artifact lastStageOutput =
+            ActionsTestUtil.getFirstArtifactEndingWith(
+                lastStageAction.getInputs(), "Proguard_optimization_" + pass + ".jar");
         assertWithMessage("Proguard_optimization_" + pass + ".jar is not in rule output")
             .that(lastStageOutput)
             .isNotNull();
@@ -348,8 +421,9 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
         checkProguardLibJars(lastStageAction, expectedlibraryJars);
       }
 
-      Artifact preoptimizationOutput = ActionsTestUtil.getFirstArtifactEndingWith(
-          lastStageAction.getInputs(), "proguard_preoptimization.jar");
+      Artifact preoptimizationOutput =
+          ActionsTestUtil.getFirstArtifactEndingWith(
+              lastStageAction.getInputs(), "proguard_preoptimization.jar");
       assertWithMessage("proguard_preoptimization.jar is not in rule output")
           .that(preoptimizationOutput)
           .isNotNull();
@@ -365,7 +439,8 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
       throws Exception {
     Collection<String> libraryJars = new ArrayList<>();
     Iterator<String> argsIterator = proguardAction.getArguments().iterator();
-    for (String argument = argsIterator.next(); argsIterator.hasNext();
+    for (String argument = argsIterator.next();
+        argsIterator.hasNext();
         argument = argsIterator.next()) {
       if (argument.equals("-libraryjars")) {
         libraryJars.add(argsIterator.next());
@@ -375,8 +450,10 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
   }
 
   protected void assertProguardGenerated(ConfiguredTarget binary) {
-    Action generateProguardAction = actionsTestUtil().getActionForArtifactEndingWith(
-        actionsTestUtil().artifactClosureOf(getFilesToBuild(binary)), "_proguard.cfg");
+    Action generateProguardAction =
+        actionsTestUtil()
+            .getActionForArtifactEndingWith(
+                actionsTestUtil().artifactClosureOf(getFilesToBuild(binary)), "_proguard.cfg");
     assertWithMessage("proguard generating action not spawned")
         .that(generateProguardAction)
         .isNotNull();
@@ -384,8 +461,10 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
         actionsTestUtil().getActionForArtifactEndingWith(getFilesToBuild(binary), "_proguard.jar");
     actionsTestUtil();
     assertWithMessage("Generated config not in inputs to proguard action")
-        .that(proguardAction.getInputs()).contains(ActionsTestUtil.getFirstArtifactEndingWith(
-        generateProguardAction.getOutputs(), "_proguard.cfg"));
+        .that(proguardAction.getInputs().toList())
+        .contains(
+            ActionsTestUtil.getFirstArtifactEndingWith(
+                generateProguardAction.getOutputs(), "_proguard.cfg"));
   }
 
   protected void assertProguardNotUsed(ConfiguredTarget binary) {

@@ -19,9 +19,7 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
 import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 
-/**
- * Helper class to centralize Javac flags handling.
- */
+/** Helper class to centralize Javac flags handling. */
 public class ProtoJavacOpts {
 
   /**
@@ -32,7 +30,7 @@ public class ProtoJavacOpts {
   public static ImmutableList<String> constructJavacOpts(RuleContext ruleContext) {
     JavaToolchainProvider toolchain = JavaToolchainProvider.from(ruleContext);
     return ImmutableList.<String>builder()
-        .addAll(toolchain.getJavacOptions())
+        .addAll(toolchain.getJavacOptions(ruleContext))
         .addAll(toolchain.getCompatibleJavacOptions(JavaSemantics.PROTO_JAVACOPTS_KEY))
         .build();
   }

@@ -3,6 +3,11 @@ layout: documentation
 title: Generate external dependencies for a Java project
 ---
 
+> NOTE: `generate_workspace` is no longer maintained by the Bazel team. The
+GitHub project has been archived. Instead, please use [`rules_jvm_external`](
+https://github.com/bazelbuild/rules_jvm_external) to fetch and resolve
+Maven artifacts transitively.
+
 # Generate external dependencies from Maven projects
 
 The tool `generate_workspace` helps automate the process of writing
@@ -47,7 +52,8 @@ use this tool:
     $ bazel run //generate_workspace -- \
     >    --maven_project=/path/to/my/project \
     >    --artifact=groupId:artifactId:version \
-    >    --artifact=groupId:artifactId:version
+    >    --artifact=groupId:artifactId:version \
+    >    --repositories=https://jcenter.bintray.com
     Wrote
     /usr/local/.../generate_workspace.runfiles/__main__/generate_workspace.bzl
     ```

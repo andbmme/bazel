@@ -13,15 +13,17 @@
 // limitations under the License.
 package com.google.devtools.build.lib.syntax;
 
-import java.io.IOException;
 
-/**
- * Syntax node for an integer literal.
- */
+/** Syntax node for an integer literal. */
 public final class IntegerLiteral extends Expression {
+  private final String raw;
+  private final int tokenOffset;
   private final int value;
 
-  public IntegerLiteral(Integer value) {
+  IntegerLiteral(FileLocations locs, String raw, int tokenOffset, int value) {
+    super(locs);
+    this.raw = raw;
+    this.tokenOffset = tokenOffset;
     this.value = value;
   }
 
@@ -29,18 +31,23 @@ public final class IntegerLiteral extends Expression {
     return value;
   }
 
-  @Override
-  Object doEval(Environment env) {
-    return value;
+  /** Returns the raw source text of the literal. */
+  public String getRaw() {
+    return raw;
   }
 
   @Override
-  public void prettyPrint(Appendable buffer) throws IOException {
-    buffer.append(String.valueOf(value));
+  public int getStartOffset() {
+    return tokenOffset;
   }
 
   @Override
-  public void accept(SyntaxTreeVisitor visitor) {
+  public int getEndOffset() {
+    return tokenOffset + raw.length();
+  }
+
+  @Override
+  public void accept(NodeVisitor visitor) {
     visitor.visit(this);
   }
 

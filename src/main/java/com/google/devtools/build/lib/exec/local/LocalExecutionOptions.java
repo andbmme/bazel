@@ -14,11 +14,14 @@
 package com.google.devtools.build.lib.exec.local;
 
 import com.google.devtools.common.options.Converters;
+import com.google.devtools.common.options.Converters.StringConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
-import java.util.regex.Pattern;
+import com.google.devtools.common.options.RegexPatternOption;
+import java.time.Duration;
+import java.util.List;
 
 /**
  * Local execution options.
@@ -26,27 +29,64 @@ import java.util.regex.Pattern;
 public class LocalExecutionOptions extends OptionsBase {
 
   @Option(
-    name = "local_termination_grace_seconds",
-    oldName = "local_sigkill_grace_seconds",
-    category = "remote execution",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    defaultValue = "15",
-    help =
-        "Time to wait between terminating a local process due to timeout and forcefully "
-            + "shutting it down."
-  )
+      name = "process_wrapper_extra_flags",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      converter = StringConverter.class,
+      allowMultiple = true,
+      help =
+          "Extra flags to pass to the process-wrapper. These are appended to the invocation "
+              + "constructed by Bazel, so this can be used to override any computed defaults.")
+  public List<String> processWrapperExtraFlags;
+
+  @Option(
+      name = "local_termination_grace_seconds",
+      oldName = "local_sigkill_grace_seconds",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      defaultValue = "15",
+      help =
+          "Time to wait between terminating a local process due to timeout and forcefully "
+              + "shutting it down.")
   public int localSigkillGraceSeconds;
 
   @Option(
-    name = "allowed_local_actions_regex",
+      name = "allowed_local_actions_regex",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      converter = Converters.RegexPatternConverter.class,
+      defaultValue = "null",
+      help =
+          "A regex whitelist for action types which may be run locally. If unset, "
+              + "all actions are allowed to execute locally")
+  public RegexPatternOption allowedLocalAction;
+
+  @Option(
+    name = "experimental_collect_local_action_metrics",
+    defaultValue = "false",
     documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    converter = Converters.RegexPatternConverter.class,
-    defaultValue = "null",
+    effectTags = {OptionEffectTag.EXECUTION},
     help =
-        "A regex whitelist for action types which may be run locally. If unset, "
-            + "all actions are allowed to execute locally"
+        "When enabled, execution statistics (such as user and system time) are recorded for "
+            + "locally executed actions which don't use sandboxing"
   )
-  public Pattern allowedLocalAction;
+  public boolean collectLocalExecutionStatistics;
+
+  @Option(
+      name = "experimental_local_lockfree_output",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "When true, the local spawn runner does lock the output tree during dynamic execution. "
+              + "Instead, spawns are allowed to execute until they are explicitly interrupted by a "
+              + "faster remote action. Requires --legacy_spawn_scheduler=false because of the need "
+              + "for this explicit cancellation.")
+  public boolean localLockfreeOutput;
+
+  public Duration getLocalSigkillGraceSeconds() {
+    // TODO(ulfjack): Change localSigkillGraceSeconds type to Duration.
+    return Duration.ofSeconds(localSigkillGraceSeconds);
+  }
 }

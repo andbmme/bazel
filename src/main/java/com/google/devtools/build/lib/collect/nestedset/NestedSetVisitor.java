@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.collect.nestedset;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Sets;
+import java.util.Collection;
 import java.util.Set;
 
 /**
@@ -54,12 +55,21 @@ public final class NestedSetVisitor<E> {
    *
    * @param nestedSet the nested set to visit transitively.
    */
-  public void visit(NestedSet<E> nestedSet) {
+  public void visit(NestedSet<E> nestedSet) throws InterruptedException {
     Preconditions.checkArgument(nestedSet.getOrder() == Order.STABLE_ORDER);
     // We can short-circuit empty nested set visitation here, avoiding load on the shared map
     // VisitedState#seenNodes.
     if (!nestedSet.isEmpty()) {
-      visitRaw(nestedSet.rawChildren());
+      visitRaw(nestedSet.getChildrenInterruptibly());
+    }
+  }
+
+  /** Visit every entry in a collection. */
+  public void visit(Collection<E> collection) {
+    for (E e : collection) {
+      if (visited.add(e)) {
+        callback.accept(e);
+      }
     }
   }
 
@@ -85,7 +95,10 @@ public final class NestedSetVisitor<E> {
     }
 
     private boolean add(Object node) {
-      return seenNodes.add(node);
+      // Though it may look redundant, the contains call is much cheaper than the add and can
+      // greatly improve the performance and reduce the contention associated with checking
+      // seenNodes.
+      return !seenNodes.contains(node) && seenNodes.add(node);
     }
   }
 }

@@ -14,41 +14,59 @@
 package com.google.devtools.build.lib.packages;
 
 import com.google.common.collect.ImmutableCollection;
-import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.events.Location;
-import java.util.Map;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.syntax.CallUtils;
+import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.syntax.Location;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 
-/** Base class for native implementations of {@link Info}. */
-// todo(vladmos,dslomov): make abstract once DefaultInfo stops instantiating it.
-public class NativeInfo extends Info {
-  protected final ImmutableMap<String, Object> values;
+/**
+ * Abstract base class for implementations of {@link StructImpl} that expose
+ * StarlarkCallable-annotated fields (not just methods) to Starlark code. Subclasses must be
+ * immutable.
+ */
+@Immutable
+public abstract class NativeInfo extends StructImpl {
 
-  @Override
-  public Object getValue(String name) {
-    return values.get(name);
+  protected NativeInfo(Provider provider) {
+    this(provider, Location.BUILTIN);
   }
 
-  @Override
-  public boolean hasKey(String name) {
-    return values.containsKey(name);
-  }
-
-  @Override
-  public ImmutableCollection<String> getKeys() {
-    return values.keySet();
-  }
-
-  public NativeInfo(NativeProvider<?> provider) {
-    super(provider, Location.BUILTIN);
-    this.values = ImmutableMap.of();
-  }
-
-  public NativeInfo(NativeProvider<?> provider, Map<String, Object> values, Location loc) {
+  protected NativeInfo(Provider provider, Location loc) {
     super(provider, loc);
-    this.values = copyValues(values);
   }
 
-  public NativeInfo(NativeProvider<?> provider, Map<String, Object> values) {
-    this(provider, values, Location.BUILTIN);
+  @Override
+  public boolean isImmutable() {
+    return true; // immutable and Starlark-hashable
+  }
+
+  // TODO(adonovan): logically this should be a parameter of getValue
+  // and getFieldNames or an instance field of this object.
+  private static final StarlarkSemantics SEMANTICS = StarlarkSemantics.DEFAULT;
+
+  @Override
+  public Object getValue(String name) throws EvalException {
+    // @StarlarkMethod(structField=true) -- Java field
+    if (getFieldNames().contains(name)) {
+      try {
+        return CallUtils.getField(SEMANTICS, this, name);
+      } catch (InterruptedException exception) {
+        // Struct fields on NativeInfo objects are supposed to behave well and not throw
+        // exceptions, as they should be logicless field accessors. If this occurs, it's
+        // indicative of a bad NativeInfo implementation.
+        throw new IllegalStateException(
+            String.format(
+                "Access of field %s was unexpectedly interrupted, but should be "
+                    + "uninterruptible. This is indicative of a bad provider implementation.",
+                name));
+      }
+    }
+    return null;
+  }
+
+  @Override
+  public ImmutableCollection<String> getFieldNames() {
+    return CallUtils.getFieldNames(SEMANTICS, this);
   }
 }
